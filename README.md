@@ -1,5 +1,11 @@
 # 🧠 Cuba-Memorys
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)](https://python.org)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
+[![Version](https://img.shields.io/badge/version-1.1.0-orange)](https://github.com/lENADRO1910/cuba-memorys)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
+[![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
+
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, Hebbian learning, GraphRAG enrichment, and anti-hallucination grounding.
 
 12 tools with Cuban soul. Zero manual setup. Mathematically rigorous. **v1.1.0 — God-Tier: RRF fusion, REM Sleep daemon, GraphRAG, conditional pgvector.**
