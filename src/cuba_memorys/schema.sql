@@ -94,5 +94,20 @@ DO $$ BEGIN
     ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS version INT DEFAULT 1;
     ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS previous_versions JSONB DEFAULT '[]';
     ALTER TABLE brain_relations ADD COLUMN IF NOT EXISTS last_traversed TIMESTAMPTZ DEFAULT NOW();
+    -- v2.0: FSRS decay model columns (Ye 2023)
+    ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS stability FLOAT DEFAULT 1.0;
+    ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS difficulty FLOAT DEFAULT 5.0;
+    -- v2.0: Temporal validity for data lifecycle
+    ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ DEFAULT NOW();
+    ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS valid_until TIMESTAMPTZ;
+    -- v2.0: Embedding persistence (float4[] cache)
+    ALTER TABLE brain_observations ADD COLUMN IF NOT EXISTS embedding float4[];
+    -- v2.0: Add 'superseded' to observation_type
+    ALTER TABLE brain_observations DROP CONSTRAINT IF EXISTS brain_observations_observation_type_check;
+    ALTER TABLE brain_observations ADD CONSTRAINT brain_observations_observation_type_check
+        CHECK (observation_type IN (
+            'fact', 'decision', 'lesson', 'preference',
+            'error', 'solution', 'context', 'tool_usage', 'superseded'
+        ));
 EXCEPTION WHEN OTHERS THEN NULL;
 END $$;

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sys
 from datetime import datetime, date
 from importlib import resources
@@ -9,6 +10,8 @@ from uuid import UUID
 
 import asyncpg
 import orjson
+
+_DB_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
 
 _pool: asyncpg.Pool | None = None
 _pool_lock = asyncio.Lock()
@@ -45,6 +48,9 @@ async def _ensure_database_exists() -> None:
             target_db,
         )
         if not exists:
+            if not _DB_NAME_PATTERN.match(target_db):
+                print(f"[cuba-memorys] Invalid database name: {target_db}", file=sys.stderr)
+                return
             await conn.execute(f'CREATE DATABASE "{target_db}"')
             print(f"[cuba-memorys] Created database '{target_db}'", file=sys.stderr)
         else:
@@ -72,12 +78,16 @@ async def get_pool() -> asyncpg.Pool:
                 "Example: postgresql://user:pass@localhost:5432/brain"
             )
 
+        async def _init_connection(conn: asyncpg.Connection) -> None:
+            await conn.execute("SELECT 1")
+
         _pool = await asyncpg.create_pool(
             database_url,
             min_size=2,
             max_size=10,
             command_timeout=30,
             statement_cache_size=512,
+            init=_init_connection,
         )
         return _pool
 
@@ -86,7 +96,7 @@ async def init_schema() -> None:
     schema_sql = resources.files("cuba_memorys").joinpath("schema.sql").read_text()
     async with pool.acquire() as conn:
         await conn.execute(schema_sql)
-    print("[cuba-memorys] Schema initialized (v2.0)", file=sys.stderr)
+    print("[cuba-memorys] Schema initialized (v1.0.1)", file=sys.stderr)
 
 async def execute(query: str, *args: Any) -> str:
     async with _semaphore:

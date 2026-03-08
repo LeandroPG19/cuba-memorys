@@ -2,6 +2,31 @@ import re
 import time
 from typing import Any
 
+RRF_K: int = 60  # Cormack (2009) standard constant
+
+
+def rrf_fuse(signal_rankings: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Reciprocal Rank Fusion across N ranked signal lists.
+
+    Args:
+        signal_rankings: List of ranked result lists from different signals.
+
+    Returns:
+        Fused results sorted by RRF score.
+    """
+    scores: dict[str, float] = {}
+    items: dict[str, dict[str, Any]] = {}
+    for ranking in signal_rankings:
+        for rank, item in enumerate(ranking):
+            key = str(item.get("id", item.get("name", "")))
+            scores[key] = scores.get(key, 0) + 1.0 / (RRF_K + rank + 1)
+            if key not in items:
+                items[key] = item
+    sorted_keys = sorted(scores, key=scores.__getitem__, reverse=True)
+    return [
+        {**items[k], "rrf_score": round(scores[k], 4)} for k in sorted_keys
+    ]
+
 _cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
 CACHE_TTL: float = 60.0
 CACHE_MAX_SIZE: int = 100
@@ -116,8 +141,10 @@ SELECT o.id, o.content, o.observation_type, o.importance,
     EXTRACT(EPOCH FROM (NOW() - o.last_accessed)) / 86400.0 AS days_since_access
 FROM brain_observations o
 JOIN brain_entities e ON o.entity_id = e.id
-WHERE o.search_vector @@ plainto_tsquery('simple', $1)
-   OR similarity(o.content, $1) > 0.3
+WHERE (o.search_vector @@ plainto_tsquery('simple', $1)
+   OR similarity(o.content, $1) > 0.3)
+   AND o.observation_type != 'superseded'
+   AND (o.valid_until IS NULL OR o.valid_until > NOW())
 ORDER BY score DESC
 LIMIT $2
 """
@@ -149,8 +176,10 @@ SELECT
     e.name AS entity_name
 FROM brain_observations o
 JOIN brain_entities e ON o.entity_id = e.id
-WHERE o.search_vector @@ plainto_tsquery('simple', $1)
-   OR similarity(o.content, $1) > 0.3
+WHERE (o.search_vector @@ plainto_tsquery('simple', $1)
+   OR similarity(o.content, $1) > 0.3)
+   AND o.observation_type != 'superseded'
+   AND (o.valid_until IS NULL OR o.valid_until > NOW())
 ORDER BY similarity(o.content, $1) DESC
 LIMIT 5
 """

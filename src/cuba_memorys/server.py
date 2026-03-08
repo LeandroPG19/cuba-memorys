@@ -1,10 +1,9 @@
 import asyncio
 import json
 import math
+import signal
 import sys
 from typing import Any
-
-import orjson
 
 from cuba_memorys import db, search
 from cuba_memorys.hebbian import (
@@ -15,14 +14,38 @@ from cuba_memorys.hebbian import (
 from cuba_memorys.tfidf import tfidf_index
 from cuba_memorys import embeddings
 
+VALID_ENTITY_TYPES: frozenset[str] = frozenset(
+    {"concept", "project", "technology", "person", "pattern", "config"}
+)
+
+_GRAPH_RELATIONS_SQL = (
+    "SELECT e1.name AS src, e2.name AS dst, r.strength "
+    "FROM brain_relations r "
+    "JOIN brain_entities e1 ON r.from_entity = e1.id "
+    "JOIN brain_entities e2 ON r.to_entity = e2.id"
+)
+
+async def _build_brain_graph(directed: bool = False) -> tuple[Any, bool]:
+    """Fetch relations and build a networkx graph.
+
+    Returns:
+        (graph, has_data): The graph and whether any relations exist.
+    """
+    import networkx as nx  # type: ignore[import-untyped]
+    rels = await db.fetch(_GRAPH_RELATIONS_SQL)
+    if not rels:
+        return None, False
+    g = nx.DiGraph() if directed else nx.Graph()
+    for r in rels:
+        g.add_edge(r["src"], r["dst"], weight=float(r["strength"]))
+    return g, True
+
 TOOL_DEFINITIONS = [
     {
-        "name": "brain_entity",
+        "name": "cuba_alma",
         "description": (
-            "Create, read, update, or delete knowledge graph entities. "
-            "Use to persist concepts, projects, technologies, patterns, or people "
-            "you learn about. Accessing an entity auto-boosts its neighbors (spreading activation). "
-            "DO NOT create entities for transient/one-off information — use brain_observe instead."
+            "CRUD knowledge graph entities (concepts, projects, technologies, patterns, people). "
+            "Auto-boosts neighbors on access. For transient info use cuba_cronica instead."
         ),
         "inputSchema": {
             "type": "object",
@@ -49,12 +72,11 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_observe",
+        "name": "cuba_cronica",
         "description": (
-            "Attach facts, lessons, decisions, or preferences to entities. Use after learning "
-            "something new about a concept/project/technology. Contradiction detection warns "
-            "if new observation conflicts with existing ones. Use action='batch_add' with "
-            "'observations' array to add multiple in one call (10x fewer tool calls)."
+            "Attach facts/lessons/decisions to entities. Auto-creates entity if not found. "
+            "Dedup gate blocks near-duplicates. Contradictions auto-supersede old facts. "
+            "Use batch_add with 'observations' array for bulk writes."
         ),
         "inputSchema": {
             "type": "object",
@@ -90,11 +112,11 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_relate",
+        "name": "cuba_puente",
         "description": (
             "Create edges between entities (uses, causes, implements, depends_on, related_to). "
-            "Use 'traverse' to explore connections and 'infer' for transitive reasoning "
-            "(A→B→C implies A→C with decayed strength). Relations strengthen with use (Hebbian)."
+            "'traverse' explores connections, 'infer' does transitive reasoning (A→B→C). "
+            "Relations strengthen with use (Hebbian)."
         ),
         "inputSchema": {
             "type": "object",
@@ -133,12 +155,11 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_search",
+        "name": "cuba_faro",
         "description": (
-            "Search your memory BEFORE answering questions to ground responses in verified facts. "
-            "Returns results with grounding scores (trgm_similarity, tfidf_similarity, confidence). "
-            "Mode 'verify' checks if a specific claim has supporting evidence — use BEFORE stating "
-            "facts to prevent hallucination. Returns confidence: verified/partial/weak/unknown."
+            "Search memory BEFORE answering to ground responses. Returns grounding scores. "
+            "Mode 'verify' checks claims against evidence (confidence: verified/partial/weak/unknown). "
+            "Session-aware: boosts results matching active session goals."
         ),
         "inputSchema": {
             "type": "object",
@@ -149,7 +170,7 @@ TOOL_DEFINITIONS = [
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["hybrid", "keyword", "fuzzy", "graph", "verify"],
+                    "enum": ["hybrid", "verify"],
                     "description": "Search mode (default: hybrid). 'verify' checks if claim is grounded.",
                 },
                 "scope": {
@@ -166,11 +187,10 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_error_report",
+        "name": "cuba_alarma",
         "description": (
-            "Report an error you encountered. Auto-detects recurring patterns (>=3 similar = warning). "
-            "Hebbian learning: similar errors get boosted synapse weights, making them easier to find. "
-            "Use IMMEDIATELY when you encounter any error, before attempting to fix it."
+            "Report errors immediately. Auto-detects patterns (≥3 similar = warning). "
+            "Hebbian: similar errors get boosted for easier retrieval."
         ),
         "inputSchema": {
             "type": "object",
@@ -196,7 +216,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_error_solve",
+        "name": "cuba_remedio",
         "description": (
             "Mark an error as resolved with solution. "
             "Cross-references similar unresolved errors."
@@ -217,11 +237,10 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_error_query",
+        "name": "cuba_expediente",
         "description": (
-            "Search past errors and solutions. Use 'proposed_action' as ANTI-REPETITION guard: "
-            "describe what you plan to do and get warned if a similar approach previously FAILED. "
-            "Always check error memory BEFORE attempting a fix to avoid repeating past mistakes."
+            "Search past errors/solutions. Use 'proposed_action' as anti-repetition guard: "
+            "warns if similar approach previously failed."
         ),
         "inputSchema": {
             "type": "object",
@@ -248,7 +267,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_session",
+        "name": "cuba_jornada",
         "description": "Track working sessions with goals and outcomes.",
         "inputSchema": {
             "type": "object",
@@ -281,7 +300,7 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_decision",
+        "name": "cuba_decreto",
         "description": "Record and query architecture/design decisions.",
         "inputSchema": {
             "type": "object",
@@ -321,12 +340,11 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_consolidate",
+        "name": "cuba_zafra",
         "description": (
-            "Memory maintenance. Actions: decay (SM-2 adaptive, frequently-accessed survive longer), "
-            "prune (remove low-importance), merge (deduplicate), summarize (compress entity observations), "
-            "pagerank (recalculate entity importance via graph structure), "
-            "find_duplicates (detect similar entity names), export (full JSON backup), stats."
+            "Memory maintenance: decay (FSRS adaptive), prune (remove low-importance), "
+            "merge (deduplicate), summarize (compress observations), "
+            "pagerank (personalized importance), find_duplicates, export, stats."
         ),
         "inputSchema": {
             "type": "object",
@@ -357,10 +375,10 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_feedback",
+        "name": "cuba_eco",
         "description": (
-            "RLHF feedback loop: reinforce useful memories (Oja's rule). "
-            "Positive boosts importance, negative decreases, correct updates content."
+            "RLHF feedback: positive boosts importance (Oja's rule), "
+            "negative decreases, correct updates content."
         ),
         "inputSchema": {
             "type": "object",
@@ -387,19 +405,18 @@ TOOL_DEFINITIONS = [
         },
     },
     {
-        "name": "brain_analytics",
+        "name": "cuba_vigia",
         "description": (
-            "Knowledge graph analytics. summary: entity/observation/error counts + token estimate. "
-            "health: staleness, Shannon entropy (knowledge diversity), DB size. "
-            "drift: chi-squared concept drift on error types. "
-            "communities: Louvain community detection on entity graph."
+            "Knowledge graph analytics: summary (counts + token estimate), "
+            "health (staleness, entropy, DB size), drift (chi-squared on errors), "
+            "communities (Louvain), bridges (betweenness centrality)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "metric": {
                     "type": "string",
-                    "enum": ["summary", "health", "drift", "communities"],
+                    "enum": ["summary", "health", "drift", "communities", "bridges"],
                     "description": "Metric to compute",
                 },
             },
@@ -414,6 +431,8 @@ async def handle_brain_entity(args: dict[str, Any]) -> str:
 
     if action == "create":
         entity_type = args.get("entity_type", "concept")
+        if entity_type not in VALID_ENTITY_TYPES:
+            return json.dumps({"error": f"Invalid entity_type '{entity_type}'. Valid: {sorted(VALID_ENTITY_TYPES)}"})
         row = await db.fetchrow(
             "INSERT INTO brain_entities (name, entity_type) "
             "VALUES ($1, $2) "
@@ -502,7 +521,13 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
         "SELECT id FROM brain_entities WHERE name = $1", entity_name,
     )
     if not entity:
-        return json.dumps({"error": f"Entity '{entity_name}' not found"})
+        entity = await db.fetchrow(
+            "INSERT INTO brain_entities (name, entity_type) VALUES ($1, $2) "
+            "ON CONFLICT (name) DO UPDATE SET updated_at = NOW() RETURNING id",
+            entity_name, args.get("entity_type", "concept"),
+        )
+    if not entity:
+        return json.dumps({"error": f"Failed to create entity '{entity_name}'"})
 
     entity_id = entity["id"]
 
@@ -513,15 +538,29 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
 
         warnings: list[str] = []
         existing = await db.fetch(
-            "SELECT content FROM brain_observations WHERE entity_id = $1",
+            "SELECT id, content FROM brain_observations WHERE entity_id = $1",
             entity_id,
         )
         if existing:
             for obs in existing:
                 sim = tfidf_index.similarity(content, obs["content"])
+                # v2.0: Write-Time Dedup Gate — block near-duplicates
+                if sim > 0.85:
+                    return json.dumps({
+                        "action": "skipped", "reason": "near_duplicate",
+                        "existing": obs["content"][:80],
+                        "similarity": round(sim, 3),
+                    })
+                # v2.0: Auto-Supersede — mark contradicted observations
                 if sim > 0.7 and search.has_negation(content, obs["content"]):
+                    await db.execute(
+                        "UPDATE brain_observations SET observation_type = 'superseded', "
+                        "importance = importance * 0.1, valid_until = NOW() "
+                        "WHERE id = $1",
+                        obs["id"],
+                    )
                     warnings.append(
-                        f"CONFLICT: '{obs['content'][:80]}...' (similarity={sim:.2f})"
+                        f"SUPERSEDED: '{obs['content'][:60]}...' (sim={sim:.2f})"
                     )
 
         row = await db.fetchrow(
@@ -534,6 +573,15 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
         result: dict[str, Any] = {"action": "added", "observation": row}
         if warnings:
             result["contradictions"] = warnings
+        obs_count = await db.fetchval(
+            "SELECT COUNT(*) FROM brain_observations WHERE entity_id = $1",
+            entity_id,
+        )
+        if obs_count > 20:
+            result["warning"] = (
+                f"entity_overloaded: {obs_count} observations. "
+                "Consider brain_consolidate(action='summarize')."
+            )
         return db.serialize(result)
 
     if action == "batch_add":
@@ -542,25 +590,41 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
             return json.dumps({"error": "observations array required"})
 
         existing = await db.fetch(
-            "SELECT content FROM brain_observations WHERE entity_id = $1",
+            "SELECT id, content FROM brain_observations WHERE entity_id = $1",
             entity_id,
         )
 
         added = []
+        skipped = []
         all_warnings: list[str] = []
         for obs_data in observations:
             content = obs_data.get("content", "")
             obs_type = obs_data.get("type", "fact")
             source = obs_data.get("source", "agent")
 
+            skip = False
             if existing:
                 for e_obs in existing:
                     sim = tfidf_index.similarity(content, e_obs["content"])
+                    # v2.0: Write-Time Dedup Gate
+                    if sim > 0.85:
+                        skipped.append(content[:60])
+                        skip = True
+                        break
+                    # v2.0: Auto-Supersede
                     if sim > 0.7 and search.has_negation(content, e_obs["content"]):
-                        all_warnings.append(
-                            f"CONFLICT in '{content[:40]}..': "
-                            f"vs '{e_obs['content'][:40]}...' (sim={sim:.2f})"
+                        await db.execute(
+                            "UPDATE brain_observations SET observation_type = 'superseded', "
+                            "importance = importance * 0.1, valid_until = NOW() "
+                            "WHERE id = $1",
+                            e_obs["id"],
                         )
+                        all_warnings.append(
+                            f"SUPERSEDED: '{e_obs['content'][:40]}..'"
+                        )
+
+            if skip:
+                continue
 
             row = await db.fetchrow(
                 "INSERT INTO brain_observations "
@@ -571,9 +635,23 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
             added.append(row)
 
         search.cache_clear()
-        result = {"action": "batch_added", "count": len(added), "observations": added}
+        result = {
+            "action": "batch_added", "count": len(added),
+            "observations": added,
+        }
+        if skipped:
+            result["skipped_duplicates"] = len(skipped)
         if all_warnings:
             result["contradictions"] = all_warnings
+        obs_count = await db.fetchval(
+            "SELECT COUNT(*) FROM brain_observations WHERE entity_id = $1",
+            entity_id,
+        )
+        if obs_count > 20:
+            result["warning"] = (
+                f"entity_overloaded: {obs_count} observations. "
+                "Consider brain_consolidate(action='summarize')."
+            )
         return db.serialize(result)
 
     if action == "delete":
@@ -591,6 +669,8 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
             "SELECT id, content, observation_type, importance, source, "
             "access_count, last_accessed, version, created_at "
             "FROM brain_observations WHERE entity_id = $1 "
+            "AND observation_type != 'superseded' "
+            "AND (valid_until IS NULL OR valid_until > NOW()) "
             "ORDER BY importance DESC",
             entity_id,
         )
@@ -646,14 +726,16 @@ async def handle_brain_relate(args: dict[str, Any]) -> str:
         if rel_type:
             await db.execute(
                 "DELETE FROM brain_relations "
-                "WHERE from_entity = $1 AND to_entity = $2 "
+                "WHERE ((from_entity = $1 AND to_entity = $2) "
+                "   OR (from_entity = $2 AND to_entity = $1)) "
                 "AND relation_type = $3",
                 from_e["id"], to_e["id"], rel_type,
             )
         else:
             await db.execute(
                 "DELETE FROM brain_relations "
-                "WHERE from_entity = $1 AND to_entity = $2",
+                "WHERE (from_entity = $1 AND to_entity = $2) "
+                "   OR (from_entity = $2 AND to_entity = $1)",
                 from_e["id"], to_e["id"],
             )
         return json.dumps({
@@ -798,6 +880,29 @@ async def handle_brain_search(args: dict[str, Any]) -> str:
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     results = results[:limit]
 
+    session = await db.fetchrow(
+        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL "
+        "ORDER BY started_at DESC LIMIT 1",
+    )
+    if session and session["goals"]:
+        keywords = " ".join(str(g) for g in session["goals"]).lower().split()
+        keywords = [kw for kw in keywords if len(kw) > 3]
+        if keywords:
+            for r in results:
+                content_lower = r.get("content", r.get("name", "")).lower()
+                if any(kw in content_lower for kw in keywords):
+                    r["score"] = r.get("score", 0) * 1.15
+            results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    for i, r in enumerate(results):
+        if "content" in r:
+            if i < 3:
+                r["content"] = r["content"][:200]
+            elif i < 7:
+                r["content"] = r["content"].split(".")[0][:100]
+            else:
+                r.pop("content", None)
+
     search.cache_set(query, mode, scope, limit, results)
     return db.serialize({"results": results})
 
@@ -898,56 +1003,26 @@ async def handle_brain_error_query(args: dict[str, Any]) -> str:
                 "failed_attempts": failed,
             })
 
-    if project and resolved_only:
-        rows = await db.fetch(
-            "SELECT id, error_type, error_message, solution, resolved, "
-            "synapse_weight, project, created_at, "
-            "(0.40 * ts_rank_cd(search_vector, plainto_tsquery('simple', $1)) + "
-            " 0.30 * similarity(error_message, $1) + "
-            " 0.30 * (synapse_weight / GREATEST("
-            "   (SELECT MAX(synapse_weight) FROM brain_errors), 1.0))"
-            ") AS score "
-            "FROM brain_errors "
-            "WHERE (search_vector @@ plainto_tsquery('simple', $1) "
-            "   OR similarity(error_message, $1) > 0.3) "
-            "AND project = $2 AND resolved = TRUE "
-            "ORDER BY score DESC LIMIT 10",
-            query_text, project,
-        )
-    elif project:
-        rows = await db.fetch(
-            "SELECT id, error_type, error_message, solution, resolved, "
-            "synapse_weight, project, created_at, "
-            "(0.40 * ts_rank_cd(search_vector, plainto_tsquery('simple', $1)) + "
-            " 0.30 * similarity(error_message, $1) + "
-            " 0.30 * (synapse_weight / GREATEST("
-            "   (SELECT MAX(synapse_weight) FROM brain_errors), 1.0))"
-            ") AS score "
-            "FROM brain_errors "
-            "WHERE (search_vector @@ plainto_tsquery('simple', $1) "
-            "   OR similarity(error_message, $1) > 0.3) "
-            "AND project = $2 "
-            "ORDER BY score DESC LIMIT 10",
-            query_text, project,
-        )
-    elif resolved_only:
-        rows = await db.fetch(
-            "SELECT id, error_type, error_message, solution, resolved, "
-            "synapse_weight, project, created_at, "
-            "(0.40 * ts_rank_cd(search_vector, plainto_tsquery('simple', $1)) + "
-            " 0.30 * similarity(error_message, $1) + "
-            " 0.30 * (synapse_weight / GREATEST("
-            "   (SELECT MAX(synapse_weight) FROM brain_errors), 1.0))"
-            ") AS score "
-            "FROM brain_errors "
-            "WHERE (search_vector @@ plainto_tsquery('simple', $1) "
-            "   OR similarity(error_message, $1) > 0.3) "
-            "AND resolved = TRUE "
-            "ORDER BY score DESC LIMIT 10",
-            query_text,
-        )
-    else:
-        rows = await db.fetch(search.SEARCH_ERRORS_SQL, query_text, 10)
+    base_sql = (
+        "SELECT id, error_type, error_message, solution, resolved, "
+        "synapse_weight, project, created_at, "
+        "(0.40 * ts_rank_cd(search_vector, plainto_tsquery('simple', $1)) + "
+        " 0.30 * similarity(error_message, $1) + "
+        " 0.30 * (synapse_weight / GREATEST("
+        "   (SELECT MAX(synapse_weight) FROM brain_errors), 1.0))"
+        ") AS score "
+        "FROM brain_errors "
+        "WHERE (search_vector @@ plainto_tsquery('simple', $1) "
+        "   OR similarity(error_message, $1) > 0.3) "
+    )
+    params: list[Any] = [query_text]
+    if project:
+        params.append(project)
+        base_sql += f"AND project = ${len(params)} "
+    if resolved_only:
+        base_sql += "AND resolved = TRUE "
+    base_sql += "ORDER BY score DESC LIMIT 10"
+    rows = await db.fetch(base_sql, *params)
 
     return db.serialize({"results": rows})
 
@@ -1082,14 +1157,14 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         result = await db.execute(
             "UPDATE brain_observations SET "
             "importance = GREATEST(0.01, "
-            "  importance * EXP("
-            "    -0.0231 / GREATEST(1.3, 1.3 + 0.24 * LN(1 + access_count)) * "
-            "    EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0"
+            "  importance * POWER("
+            "    1.0 + EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 "
+            "    / (9.0 * GREATEST(stability, 0.1)), -1"
             "  )) "
             "WHERE last_accessed < NOW() - INTERVAL '1 day'",
         )
         search.cache_clear()
-        return json.dumps({"action": "sm2_decay_applied", "status": result})
+        return json.dumps({"action": "fsrs_decay_applied", "status": result})
 
     if action == "prune":
         threshold = args.get("threshold", 0.1)
@@ -1171,19 +1246,21 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         return db.serialize({"stats": stats})
 
     if action == "pagerank":
-        import networkx as nx
-        rels = await db.fetch(
-            "SELECT e1.name AS src, e2.name AS dst, r.strength "
-            "FROM brain_relations r "
-            "JOIN brain_entities e1 ON r.from_entity = e1.id "
-            "JOIN brain_entities e2 ON r.to_entity = e2.id",
-        )
-        if not rels:
+        import networkx as nx  # type: ignore[import-untyped]
+        g, has_data = await _build_brain_graph(directed=True)
+        if not has_data:
             return json.dumps({"action": "pagerank", "error": "No relations to rank"})
-        g = nx.DiGraph()
-        for r in rels:
-            g.add_edge(r["src"], r["dst"], weight=float(r["strength"]))
-        pr = nx.pagerank(g, alpha=0.85, weight="weight")
+        recent = await db.fetch(
+            "SELECT name FROM brain_entities ORDER BY updated_at DESC LIMIT 10",
+        )
+        personalization = (
+            {r["name"]: 1.0 for r in recent if r["name"] in g}
+            if recent else None
+        )
+        pr = nx.pagerank(
+            g, alpha=0.85, weight="weight",
+            personalization=personalization if personalization else None,
+        )
         updated = 0
         for name, pr_score in pr.items():
             pr_norm = min(1.0, pr_score * len(pr))
@@ -1197,36 +1274,45 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         search.cache_clear()
         top5 = sorted(pr.items(), key=lambda x: x[1], reverse=True)[:5]
         return json.dumps({
-            "action": "pagerank", "entities_updated": updated,
+            "action": "personalized_pagerank", "entities_updated": updated,
             "top_5": [{"name": n, "score": round(s, 4)} for n, s in top5],
         })
 
     if action == "find_duplicates":
-        from rapidfuzz import fuzz
-        entities = await db.fetch(
-            "SELECT name FROM brain_entities ORDER BY name",
+        duplicates = await db.fetch(
+            "SELECT a.name AS a, b.name AS b, "
+            "  similarity(a.name, b.name) * 100 AS similarity "
+            "FROM brain_entities a "
+            "JOIN brain_entities b ON a.id < b.id "
+            "WHERE similarity(a.name, b.name) > 0.8 "
+            "ORDER BY similarity(a.name, b.name) DESC LIMIT 20",
         )
-        names = [e["name"] for e in entities]
-        duplicates = []
-        for i, a in enumerate(names):
-            for b in names[i + 1:]:
-                score = fuzz.ratio(a.lower(), b.lower())
-                if score > 80:
-                    duplicates.append({"a": a, "b": b, "similarity": score})
-        duplicates.sort(key=lambda x: x["similarity"], reverse=True)
-        return json.dumps({
+        return db.serialize({
             "action": "find_duplicates",
-            "duplicates": duplicates[:20],
+            "duplicates": duplicates,
         })
 
     if action == "export":
-        entities = await db.fetch("SELECT * FROM brain_entities")
-        observations = await db.fetch("SELECT * FROM brain_observations")
-        relations = await db.fetch("SELECT * FROM brain_relations")
-        errors = await db.fetch("SELECT * FROM brain_errors")
-        sessions = await db.fetch("SELECT * FROM brain_sessions")
+        entities = await db.fetch(
+            "SELECT id, name, entity_type, importance, access_count, "
+            "created_at, updated_at FROM brain_entities LIMIT 10000",
+        )
+        observations = await db.fetch(
+            "SELECT id, entity_id, content, observation_type, importance, "
+            "access_count, source, version, created_at "
+            "FROM brain_observations LIMIT 10000",
+        )
+        relations = await db.fetch(
+            "SELECT * FROM brain_relations LIMIT 10000",
+        )
+        errors = await db.fetch(
+            "SELECT * FROM brain_errors LIMIT 5000",
+        )
+        sessions = await db.fetch(
+            "SELECT * FROM brain_sessions LIMIT 1000",
+        )
         return db.serialize({
-            "version": "2.0",
+            "version": "1.0.1",
             "entities": entities,
             "observations": observations,
             "relations": relations,
@@ -1438,43 +1524,49 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
         })
 
     if metric == "communities":
-        import networkx as nx
-        rels = await db.fetch(
-            "SELECT e1.name AS src, e2.name AS dst, r.strength "
-            "FROM brain_relations r "
-            "JOIN brain_entities e1 ON r.from_entity = e1.id "
-            "JOIN brain_entities e2 ON r.to_entity = e2.id",
-        )
-        if not rels:
+        import networkx as nx  # type: ignore[import-untyped]
+        g, has_data = await _build_brain_graph()
+        if not has_data:
             return json.dumps({"communities": [], "note": "No relations to analyze"})
-        g = nx.Graph()
-        for r in rels:
-            g.add_edge(r["src"], r["dst"], weight=float(r["strength"]))
-        communities = nx.community.louvain_communities(g, resolution=1.0)
-        result = []
+        communities = nx.community.louvain_communities(g, resolution=1.0)  # type: ignore[union-attr]
+        community_list: list[dict[str, Any]] = []
         for i, community in enumerate(communities):
-            result.append({
+            community_list.append({
                 "id": i,
                 "members": sorted(community),
                 "size": len(community),
             })
-        return json.dumps({"communities": result, "total": len(result)})
+        return json.dumps({"communities": community_list, "total": len(community_list)})
+
+    if metric == "bridges":
+        import networkx as nx  # type: ignore[import-untyped]
+        g, has_data = await _build_brain_graph()
+        if not has_data:
+            return json.dumps({"bridges": [], "note": "No relations to analyze"})
+        bc = nx.betweenness_centrality(g, normalized=True)  # type: ignore[union-attr]
+        top = sorted(bc.items(), key=lambda x: x[1], reverse=True)[:10]
+        return json.dumps({
+            "bridges": [
+                {"entity": n, "centrality": round(s, 4)} for n, s in top
+            ],
+            "interpretation": "High centrality = bridge connecting different knowledge areas",
+        })
 
     return json.dumps({"error": f"Unknown metric: {metric}"})
 
 HANDLERS = {
-    "brain_entity": handle_brain_entity,
-    "brain_observe": handle_brain_observe,
-    "brain_relate": handle_brain_relate,
-    "brain_search": handle_brain_search,
-    "brain_error_report": handle_brain_error_report,
-    "brain_error_solve": handle_brain_error_solve,
-    "brain_error_query": handle_brain_error_query,
-    "brain_session": handle_brain_session,
-    "brain_decision": handle_brain_decision,
-    "brain_consolidate": handle_brain_consolidate,
-    "brain_feedback": handle_brain_feedback,
-    "brain_analytics": handle_brain_analytics,
+    "cuba_alma": handle_brain_entity,
+    "cuba_cronica": handle_brain_observe,
+    "cuba_puente": handle_brain_relate,
+    "cuba_faro": handle_brain_search,
+    "cuba_alarma": handle_brain_error_report,
+    "cuba_remedio": handle_brain_error_solve,
+    "cuba_expediente": handle_brain_error_query,
+    "cuba_jornada": handle_brain_session,
+    "cuba_decreto": handle_brain_decision,
+    "cuba_zafra": handle_brain_consolidate,
+    "cuba_eco": handle_brain_feedback,
+    "cuba_vigia": handle_brain_analytics,
 }
 
 async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
@@ -1491,7 +1583,7 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {
                     "name": "cuba-memorys",
-                    "version": "1.0.0",
+                    "version": "1.0.1",
                 },
             },
         }
@@ -1544,7 +1636,7 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                         "type": "text",
                         "text": json.dumps({
                             "error": type(e).__name__,
-                            "message": str(e),
+                            "message": "Internal server error",
                         }),
                     }],
                     "isError": True,
@@ -1562,6 +1654,10 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
 
 async def main() -> None:
     loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, shutdown_event.set)
 
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
@@ -1572,8 +1668,11 @@ async def main() -> None:
     )
 
     try:
-        while True:
-            line = await reader.readline()
+        while not shutdown_event.is_set():
+            try:
+                line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             if not line:
                 break
 
@@ -1595,5 +1694,6 @@ async def main() -> None:
     except (ConnectionError, BrokenPipeError, EOFError):
         pass
     finally:
+        print("[cuba-memorys] Shutting down gracefully...", file=sys.stderr)
         await db.close()
         write_transport.close()

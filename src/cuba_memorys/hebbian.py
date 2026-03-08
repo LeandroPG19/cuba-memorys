@@ -1,4 +1,5 @@
 import math
+from collections import Counter
 
 ETA: float = 0.05
 
@@ -8,10 +9,6 @@ SPREAD_DECAY: float = 0.3
 
 MIN_IMPORTANCE: float = 0.01
 MAX_IMPORTANCE: float = 1.0
-
-SM2_EF_MIN: float = 1.3
-SM2_EF_MAX: float = 2.5
-SM2_EF_BASE: float = 2.5
 
 RELATION_TRAVERSE_BOOST: float = 0.05
 RELATION_DECAY_LAMBDA: float = math.log(2) / 60.0
@@ -24,35 +21,38 @@ def oja_negative(importance: float) -> float:
     delta = ETA * (1.0 + importance * importance)
     return min(MAX_IMPORTANCE, max(MIN_IMPORTANCE, importance - delta))
 
-def sm2_easiness_factor(access_count: int) -> float:
-    if access_count <= 0:
-        quality = 1
-    elif access_count <= 2:
-        quality = 2
-    elif access_count <= 5:
-        quality = 3
-    elif access_count <= 10:
-        quality = 4
-    else:
-        quality = 5
+def fsrs_retrievability(elapsed_days: float, stability: float) -> float:
+    """FSRS power-law decay: R(t,S) = (1 + t/(9*S))^(-1). Ye (2023).
 
-    ef = SM2_EF_BASE + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
-    return max(SM2_EF_MIN, min(SM2_EF_MAX, ef))
+    Args:
+        elapsed_days: Days since last review.
+        stability: Memory stability parameter (higher = slower decay).
 
-def sm2_decay(importance: float, days_elapsed: float, access_count: int) -> float:
-    if days_elapsed <= 0:
-        return importance
+    Returns:
+        Retrievability in [0, 1].
+    """
+    if stability <= 0 or elapsed_days <= 0:
+        return 1.0
+    return (1.0 + elapsed_days / (9.0 * stability)) ** (-1.0)
 
-    ef = sm2_easiness_factor(access_count)
-    adaptive_lambda = DECAY_LAMBDA_BASE / ef
-    decayed = importance * math.exp(-adaptive_lambda * days_elapsed)
-    return max(MIN_IMPORTANCE, decayed)
+def fsrs_update_stability(
+    stability: float, difficulty: float, retrievability: float,
+) -> float:
+    """Update stability after successful recall (FSRS v4).
 
-def ebbinghaus_decay(importance: float, days_elapsed: float) -> float:
-    if days_elapsed <= 0:
-        return importance
-    decayed = importance * math.exp(-DECAY_LAMBDA_BASE * days_elapsed)
-    return max(MIN_IMPORTANCE, decayed)
+    Args:
+        stability: Current stability.
+        difficulty: Item difficulty (1-10 scale).
+        retrievability: Current retrievability before recall.
+
+    Returns:
+        New stability value.
+    """
+    return stability * (
+        1.0 + math.exp(0.1) * (11 - difficulty)
+        * stability ** (-0.2)
+        * (math.exp((1 - retrievability) * 0.9) - 1)
+    )
 
 def spreading_activation_boost(current_importance: float) -> float:
     boost = 0.02 * SPREAD_DECAY
@@ -75,3 +75,21 @@ def transitive_strength(
     strength_ab: float, strength_bc: float, depth: int,
 ) -> float:
     return strength_ab * strength_bc * (0.9 ** depth)
+
+def information_density(text: str) -> float:
+    """Shannon entropy ratio H/H_max. High = diverse information.
+
+    Args:
+        text: Input text to measure.
+
+    Returns:
+        Density ratio in [0, 1]. 0 = repetitive, 1 = maximally diverse.
+    """
+    words = text.lower().split()
+    if len(words) < 2:
+        return 0.0
+    counts = Counter(words)
+    n = len(words)
+    h = -sum((c / n) * math.log2(c / n) for c in counts.values())
+    h_max = math.log2(n)
+    return h / h_max if h_max > 0 else 0.0

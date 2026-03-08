@@ -1,7 +1,7 @@
 [project]
 name = "cuba-memorys"
-version = "1.0.0"
-description = "Knowledge graph MCP with Hebbian learning, TF-IDF semantic search, PageRank, contradiction detection, SM-2 spaced repetition, and anti-hallucination grounding. PostgreSQL backend. Created by Leandro Pérez G."
+version = "1.0.1"
+description = "Knowledge graph MCP with Hebbian learning, FSRS spaced repetition, RRF search fusion, PageRank, contradiction detection, and anti-hallucination grounding. PostgreSQL backend. Created by Leandro Pérez G."
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30.0",
@@ -10,6 +10,7 @@ dependencies = [
     "networkx>=3.2",
     "scipy>=1.12.0",
     "rapidfuzz>=3.6.0",
+    "numpy>=1.26.0",
 ]
 license = {text = "CC-BY-NC-4.0"}
 readme = "README.md"
@@ -31,3 +32,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cuba_memorys"]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = ["networkx.*", "rapidfuzz.*", "scipy.*", "orjson.*", "asyncpg.*"]
+ignore_missing_imports = true
