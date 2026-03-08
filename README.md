@@ -2,13 +2,13 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)](https://python.org)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-1.1.0-orange)](https://github.com/lENADRO1910/cuba-memorys)
+[![Version](https://img.shields.io/badge/version-1.3.0-orange)](https://github.com/lENADRO1910/cuba-memorys)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, Hebbian learning, GraphRAG enrichment, and anti-hallucination grounding.
 
-12 tools with Cuban soul. Zero manual setup. Mathematically rigorous. **v1.1.0 — God-Tier: RRF fusion, REM Sleep daemon, GraphRAG, conditional pgvector.**
+12 tools with Cuban soul. Zero manual setup. Mathematically rigorous. **v1.3.0 — Modular architecture, CC-reduced (avg A), RRF fusion, REM Sleep daemon, GraphRAG, conditional pgvector.**
 
 ---
 
@@ -30,10 +30,11 @@ AI agents forget everything between conversations. Cuba-Memorys solves this by g
 | Knowledge graph with relations | ✅ | ❌ |
 | Hebbian learning (Oja's rule) | ✅ | ❌ |
 | FSRS adaptive spaced repetition | ✅ | ❌ |
-| **4-signal RRF fusion search (v1.1)** | ✅ | ❌ |
-| **GraphRAG topological enrichment (v1.1)** | ✅ | ❌ |
-| **REM Sleep autonomous consolidation (v1.1)** | ✅ | ❌ |
-| **Conditional pgvector + HNSW (v1.1)** | ✅ | ❌ |
+| **4-signal RRF fusion search** | ✅ | ❌ |
+| **GraphRAG topological enrichment** | ✅ | ❌ |
+| **REM Sleep autonomous consolidation** | ✅ | ❌ |
+| **Conditional pgvector + HNSW** | ✅ | ❌ |
+| **Modular architecture (CC avg A)** | ✅ | ❌ |
 | Optional BGE embeddings (ONNX) | ✅ | ❌ |
 | Contradiction detection | ✅ | ❌ |
 | Graduated confidence scoring | ✅ | ❌ |
@@ -260,15 +261,20 @@ Checks for semantic overlap + negation patterns (not, never, instead of, replace
 
 ## Architecture
 
+v1.3.0 uses a **modular architecture** — the monolithic `server.py` (1920 LOC) was decomposed into focused modules with cyclomatic complexity reduced by 87% (avg D → A).
+
 ```
 cuba-memorys/
 ├── docker-compose.yml          # Dedicated PostgreSQL (port 5488)
 ├── pyproject.toml              # Package metadata + optional deps
 ├── README.md
 └── src/cuba_memorys/
-    ├── __init__.py
+    ├── __init__.py             # Version (1.3.0)
     ├── __main__.py             # Entry point
-    ├── server.py               # 12 MCP tools + REM Sleep daemon (~1850 LOC)
+    ├── server.py               # Thin re-export (24 LOC)
+    ├── protocol.py             # JSON-RPC transport, event loop, REM Sleep daemon
+    ├── handlers.py             # 12 MCP tool handlers (CC-reduced via sub-function extraction)
+    ├── constants.py            # Tool definitions, thresholds, enums
     ├── db.py                   # asyncpg pool + orjson + pgvector detection + Decimal
     ├── schema.sql              # 5 tables, 15+ indexes, pg_trgm, versioning
     ├── hebbian.py              # FSRS, Oja's rule, spreading activation
@@ -399,18 +405,22 @@ New:       "Project does NOT use PostgreSQL, it uses MySQL instead"
 
 ## Verification
 
-Tested with NEMESIS protocol (3-tier) — v1.1.0 results:
+Tested with NEMESIS protocol (3-tier) — v1.3.0 results:
 
 ```
-🟢 Normal (4/4)   — RRF fusion (rrf_score on all results), GraphRAG (graph_context with
-                     neighbors), scope=observations with grounding, verify mode (0.7093)
-🟡 Pessimist (4/4) — Empty queries, whitespace, dedup gate (similarity=1.0),
-                     graph traversal depth=2 with strength decay
-🔴 Extreme (5/5)  — SQL injection, XSS, path traversal, min-length content,
-                     transitive inference depth=5
+🟢 Normal (12/12)  — All 12 tools, all CRUD actions, GraphRAG enrichment,
+                     Hebbian cross-reference, RRF fusion, Oja's rule,
+                     dedup gate, anti-repetition guard, batch_add
+🟡 Pessimist (8/8) — Empty strings, missing fields, invalid entity_type,
+                     non-existent entities, limit=0, max_depth=999,
+                     anti-repetition guard trigger, Oja negative decay
+🔴 Extreme (9/9)  — SQL injection (parametrized queries), XSS (literal storage),
+                     UNION injection (no data leak), path traversal (inert),
+                     unicode bombs (emoji + special chars), oversized inputs,
+                     eco correct priority semantics, Louvain communities
 ```
 
-Previous v1.0.1 tests (18/18) also verified: Entity CRUD, observe, search, relate, PageRank, communities, decay, find_duplicates, export, health, entropy, Unicode, bidirectional delete.
+Previous versions: v1.1.0 (13/13), v1.0.1 (18/18).
 
 ### Performance
 
@@ -439,4 +449,4 @@ Previous v1.0.1 tests (18/18) also verified: Entity CRUD, observe, search, relat
 
 ## Credits
 
-Mathematical foundations: Wozniak (1987), Ye (2022, FSRS), Oja (1982), Salton (1975, TF-IDF), Cormack (2009, RRF), Brin & Page (1998, PageRank), Collins & Loftus (1975), Shannon (1948), Pearson (1900, χ²), Blondel et al. (2008, Louvain), BAAI (2023, BGE embeddings), Malkov & Yashunin (2018, HNSW).
+Mathematical foundations: Wozniak (1987), Ye (2022, FSRS), Oja (1982), Salton (1975, TF-IDF), Cormack (2009, RRF), Brin & Page (1998, PageRank), Collins & Loftus (1975), Shannon (1948), Pearson (1900, χ²), Blondel et al. (2008, Louvain), McCabe (1976, CC), BAAI (2023, BGE embeddings), Malkov & Yashunin (2018, HNSW).

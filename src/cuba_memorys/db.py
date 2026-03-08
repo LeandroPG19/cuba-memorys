@@ -1,7 +1,7 @@
 import asyncio
+import logging
 import os
 import re
-import sys
 from datetime import datetime, date
 from decimal import Decimal
 from importlib import resources
@@ -11,6 +11,10 @@ from uuid import UUID
 
 import asyncpg
 import orjson
+
+from cuba_memorys import __version__
+
+logger = logging.getLogger("cuba-memorys.db")
 
 _DB_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
 
@@ -45,7 +49,7 @@ async def _ensure_database_exists() -> None:
     try:
         conn = await asyncpg.connect(admin_url, timeout=10)
     except (OSError, asyncpg.PostgresError) as e:
-        print(f"[cuba-memorys] Cannot connect to PostgreSQL: {e}", file=sys.stderr)
+        logger.error("Cannot connect to PostgreSQL: %s", e)
         return
 
     try:
@@ -55,12 +59,12 @@ async def _ensure_database_exists() -> None:
         )
         if not exists:
             if not _DB_NAME_PATTERN.match(target_db):
-                print(f"[cuba-memorys] Invalid database name: {target_db}", file=sys.stderr)
+                logger.error("Invalid database name: %s", target_db)
                 return
             await conn.execute(f'CREATE DATABASE "{target_db}"')
-            print(f"[cuba-memorys] Created database '{target_db}'", file=sys.stderr)
+            logger.info("Created database '%s'", target_db)
         else:
-            print(f"[cuba-memorys] Database '{target_db}' OK", file=sys.stderr)
+            logger.info("Database '%s' OK", target_db)
     except asyncpg.DuplicateDatabaseError:
         pass
     finally:
@@ -94,6 +98,7 @@ async def get_pool() -> asyncpg.Pool:
             command_timeout=30,
             statement_cache_size=512,
             init=_init_connection,
+            setup=_init_connection,
         )
         return _pool
 
@@ -125,8 +130,7 @@ async def init_schema() -> None:
                     "ALTER TABLE brain_observations "
                     "ADD COLUMN embedding vector(384)",
                 )
-                print("[cuba-memorys] Migrated embedding column to vector(384)",
-                      file=sys.stderr)
+                logger.info("Migrated embedding column to vector(384)")
             elif not col_type:
                 await conn.execute(
                     "ALTER TABLE brain_observations "
@@ -138,13 +142,11 @@ async def init_schema() -> None:
                 "ON brain_observations USING hnsw (embedding vector_cosine_ops) "
                 "WITH (m = 16, ef_construction = 64)",
             )
-            print("[cuba-memorys] pgvector active — HNSW index ready (384d)",
-                  file=sys.stderr)
+            logger.info("pgvector active — HNSW index ready (384d)")
         else:
-            print("[cuba-memorys] pgvector not installed — using TF-IDF + trigrams",
-                  file=sys.stderr)
+            logger.info("pgvector not installed — using TF-IDF + trigrams")
 
-    print("[cuba-memorys] Schema initialized (v1.1.0)", file=sys.stderr)
+    logger.info("Schema initialized (%s)", __version__)
 
 async def execute(query: str, *args: Any) -> str:
     async with _semaphore:
@@ -175,8 +177,64 @@ async def fetchval(query: str, *args: Any) -> Any:
 async def close() -> None:
     global _pool
     if _pool is not None:
-        await _pool.close()
+        try:
+            await asyncio.wait_for(_pool.close(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Pool close timed out, terminating")
+            _pool.terminate()
         _pool = None
+
+
+async def rebuild_tfidf_index() -> int:
+    """Rebuild TF-IDF index from all observations.
+
+    Returns:
+        Number of documents indexed.
+    """
+    from cuba_memorys.tfidf import tfidf_index
+    rows = await fetch(
+        "SELECT content FROM brain_observations "
+        "WHERE observation_type != 'superseded' "
+        "AND (valid_until IS NULL OR valid_until > NOW())",
+    )
+    if rows:
+        corpus = [r["content"] for r in rows]
+        tfidf_index.fit(corpus)
+    return len(rows)
+
+
+async def rebuild_embeddings(batch_size: int = 50) -> int:
+    """Backfill embeddings for observations that lack them.
+
+    Requires pgvector + ONNX model.
+
+    Returns:
+        Number of observations updated.
+    """
+    from cuba_memorys import embeddings
+    if not has_pgvector() or not embeddings.is_available():
+        return 0
+
+    rows = await fetch(
+        "SELECT id, content FROM brain_observations "
+        "WHERE embedding IS NULL "
+        "AND observation_type != 'superseded' LIMIT 500",
+    )
+    if not rows:
+        return 0
+
+    updated = 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        texts = [r["content"] for r in batch]
+        vecs = embeddings.embed(texts)
+        for j, vec in enumerate(vecs):
+            await execute(
+                "UPDATE brain_observations SET embedding = $1 WHERE id = $2",
+                vec.tolist(), batch[j]["id"],
+            )
+            updated += 1
+    return updated
 
 def _json_default(obj: Any) -> Any:
     if isinstance(obj, UUID):

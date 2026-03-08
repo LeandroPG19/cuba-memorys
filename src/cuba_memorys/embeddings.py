@@ -1,8 +1,10 @@
-import sys
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger("cuba-memorys.embeddings")
 
 _session: Any | None = None
 _tokenizer: Any | None = None
@@ -26,10 +28,9 @@ def _ensure_model() -> bool:
         from huggingface_hub import hf_hub_download
         from tokenizers import Tokenizer
     except ImportError:
-        print(
-            "[cuba-memorys] onnxruntime not installed — "
+        logger.info(
+            "onnxruntime not installed — "
             "embeddings disabled, using TF-IDF fallback",
-            file=sys.stderr,
         )
         return False
 
@@ -63,17 +64,11 @@ def _ensure_model() -> bool:
         _tokenizer.enable_padding(length=512)
 
         _available = True
-        print(
-            "[cuba-memorys] Embedding model loaded: BGE-small-en-v1.5 (384d)",
-            file=sys.stderr,
-        )
+        logger.info("Embedding model loaded: BGE-small-en-v1.5 (384d)")
         return True
 
     except Exception as e:
-        print(
-            f"[cuba-memorys] Embedding model load failed: {e}",
-            file=sys.stderr,
-        )
+        logger.warning("Embedding model load failed: %s", e)
         return False
 
 def embed(texts: list[str]) -> np.ndarray:
