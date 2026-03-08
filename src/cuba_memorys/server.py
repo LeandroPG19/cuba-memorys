@@ -1,25 +1,10 @@
-"""Cuba-Memorys MCP Server v2.0: Knowledge Graph with Hebbian learning.
-
-JSON-RPC over stdio. Implements the Model Context Protocol (MCP).
-Requires: DATABASE_URL env var pointing to PostgreSQL >=12 with pg_trgm.
-
-v2.0: TF-IDF semantic search, SM-2 spaced repetition, PageRank,
-contradiction detection, confidence scoring, optional BGE embeddings.
-
-Tools (12):
-  Knowledge Graph: brain_entity, brain_observe, brain_relate, brain_search
-  Error Memory:    brain_error_report, brain_error_solve, brain_error_query
-  Sessions:        brain_session, brain_decision
-  Intelligence:    brain_consolidate, brain_feedback, brain_analytics
-"""
-
 import asyncio
 import json
 import math
 import sys
 from typing import Any
 
-import orjson  # noqa: F401 — used in db.serialize()
+import orjson
 
 from cuba_memorys import db, search
 from cuba_memorys.hebbian import (
@@ -423,11 +408,7 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-
-# ─── Tool Handlers ───────────────────────────────────────────────────
-
 async def handle_brain_entity(args: dict[str, Any]) -> str:
-    """Handle brain_entity tool calls."""
     action = args["action"]
     name = args.get("name", "")
 
@@ -453,15 +434,12 @@ async def handle_brain_entity(args: dict[str, Any]) -> str:
 
         entity_id = row["id"]
 
-        # Spreading activation: boost self
         await db.execute(
             "UPDATE brain_entities SET access_count = access_count + 1, "
             "importance = LEAST(1.0, importance + 0.02), "
             "updated_at = NOW() WHERE id = $1",
             entity_id,
         )
-        # FIX BUG-6: Spreading activation boost neighbors
-        # asyncpg passes UUID natively — no ::uuid cast needed
         await db.execute(
             "UPDATE brain_entities SET "
             "importance = LEAST(1.0, importance + 0.006) "
@@ -475,14 +453,12 @@ async def handle_brain_entity(args: dict[str, Any]) -> str:
             entity_id,
         )
 
-        # Get observations
         obs = await db.fetch(
             "SELECT id, content, observation_type, importance, source, "
             "created_at FROM brain_observations "
             "WHERE entity_id = $1 ORDER BY importance DESC",
             entity_id,
         )
-        # Get relations
         rels = await db.fetch(
             "SELECT e.name AS target, r.relation_type, r.strength, "
             "r.bidirectional "
@@ -518,9 +494,7 @@ async def handle_brain_entity(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_observe(args: dict[str, Any]) -> str:
-    """Handle brain_observe tool calls (v2.0: contradiction + batch + versioning)."""
     action = args["action"]
     entity_name = args["entity_name"]
 
@@ -537,7 +511,6 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
         obs_type = args.get("observation_type", "fact")
         source = args.get("source", "agent")
 
-        # B1: Contradiction detection — check existing observations
         warnings: list[str] = []
         existing = await db.fetch(
             "SELECT content FROM brain_observations WHERE entity_id = $1",
@@ -564,12 +537,10 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
         return db.serialize(result)
 
     if action == "batch_add":
-        # F8: Batch observe — 10x fewer tool calls
         observations = args.get("observations", [])
         if not observations:
             return json.dumps({"error": "observations array required"})
 
-        # B1: Load existing observations for contradiction detection
         existing = await db.fetch(
             "SELECT content FROM brain_observations WHERE entity_id = $1",
             entity_id,
@@ -582,7 +553,6 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
             obs_type = obs_data.get("type", "fact")
             source = obs_data.get("source", "agent")
 
-            # B1: Contradiction detection per observation
             if existing:
                 for e_obs in existing:
                     sim = tfidf_index.similarity(content, e_obs["content"])
@@ -628,9 +598,7 @@ async def handle_brain_observe(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_relate(args: dict[str, Any]) -> str:
-    """Handle brain_relate tool calls."""
     action = args["action"]
 
     if action == "create":
@@ -726,7 +694,6 @@ async def handle_brain_relate(args: dict[str, Any]) -> str:
             start_e["id"], max_depth,
         )
 
-        # E3: Relation strength learning — boost traversed edges
         await db.execute(
             "UPDATE brain_relations SET "
             "strength = LEAST(1.0, strength + 0.05), "
@@ -742,15 +709,12 @@ async def handle_brain_relate(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_search(args: dict[str, Any]) -> str:
-    """Handle brain_search tool calls (v2.0: TF-IDF + grounding + confidence)."""
     query = args["query"]
     mode = args.get("mode", "hybrid")
     scope = args.get("scope", "all")
     limit = min(args.get("limit", 10), 50)
 
-    # B2: Anti-hallucination verify mode with graduated confidence
     if mode == "verify":
         rows = await db.fetch(search.VERIFY_SQL, query)
         if not rows:
@@ -799,7 +763,6 @@ async def handle_brain_search(args: dict[str, Any]) -> str:
             "evidence": evidence,
         })
 
-    # LRU cache check
     cached = search.cache_get(query, mode, scope, limit)
     if cached is not None:
         return db.serialize({"cached": True, "results": cached})
@@ -816,7 +779,6 @@ async def handle_brain_search(args: dict[str, Any]) -> str:
         rows = await db.fetch(search.SEARCH_OBSERVATIONS_SQL, query, limit)
         for r in rows:
             r["_type"] = "observation"
-            # B3: Grounding metadata
             tfidf_sim = tfidf_index.similarity(query, r.get("content", ""))
             r["grounding"] = {
                 "trgm_similarity": round(float(r.get("trgm_similarity", 0)), 3),
@@ -833,22 +795,18 @@ async def handle_brain_search(args: dict[str, Any]) -> str:
             r["_type"] = "error"
         results.extend(rows)
 
-    # Sort all results by score and limit
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     results = results[:limit]
 
     search.cache_set(query, mode, scope, limit, results)
     return db.serialize({"results": results})
 
-
 async def handle_brain_error_report(args: dict[str, Any]) -> str:
-    """Handle brain_error_report tool calls."""
     error_type = args["error_type"]
     error_message = args["error_message"]
     context = json.dumps(args.get("context", {}))
     project = args.get("project", "default")
 
-    # Insert new error
     row = await db.fetchrow(
         "INSERT INTO brain_errors "
         "(error_type, error_message, context, project) "
@@ -859,7 +817,6 @@ async def handle_brain_error_report(args: dict[str, Any]) -> str:
     if not row:
         return json.dumps({"error": "Failed to insert error record"})
 
-    # Find similar errors (pattern detection)
     similar = await db.fetch(
         "SELECT id, error_message, solution, resolved, synapse_weight "
         "FROM brain_errors "
@@ -868,7 +825,6 @@ async def handle_brain_error_report(args: dict[str, Any]) -> str:
         row["id"], error_message,
     )
 
-    # Boost synapse weight of similar errors (Hebbian)
     for s in similar:
         new_weight = synapse_weight_boost(s["synapse_weight"])
         await db.execute(
@@ -876,7 +832,7 @@ async def handle_brain_error_report(args: dict[str, Any]) -> str:
             new_weight, s["id"],
         )
 
-    is_pattern = len(similar) >= 2  # 3+ total including new one
+    is_pattern = len(similar) >= 2
     search.cache_clear()
 
     return db.serialize({
@@ -887,9 +843,7 @@ async def handle_brain_error_report(args: dict[str, Any]) -> str:
         "similar_errors": similar,
     })
 
-
 async def handle_brain_error_solve(args: dict[str, Any]) -> str:
-    """Handle brain_error_solve tool calls."""
     error_id = args["error_id"]
     solution = args["solution"]
 
@@ -899,7 +853,6 @@ async def handle_brain_error_solve(args: dict[str, Any]) -> str:
         solution, error_id,
     )
 
-    # Cross-reference: find similar unresolved errors
     error = await db.fetchrow(
         "SELECT error_message FROM brain_errors WHERE id = $1::uuid",
         error_id,
@@ -923,20 +876,12 @@ async def handle_brain_error_solve(args: dict[str, Any]) -> str:
         "similar_unresolved": candidates,
     })
 
-
 async def handle_brain_error_query(args: dict[str, Any]) -> str:
-    """Handle brain_error_query tool calls.
-
-    FIX BUG-2: Replaced fragile string manipulation with proper
-    parameterized SQL construction. Each combination of filters
-    gets its own SQL query to avoid parameter count mismatches.
-    """
     query_text = args["query"]
     project = args.get("project")
     resolved_only = args.get("resolved_only", False)
     proposed_action = args.get("proposed_action")
 
-    # Anti-repetition guard
     if proposed_action:
         failed = await db.fetch(
             "SELECT id, error_type, error_message, context, solution "
@@ -953,8 +898,6 @@ async def handle_brain_error_query(args: dict[str, Any]) -> str:
                 "failed_attempts": failed,
             })
 
-    # FIX BUG-2: Build SQL with proper parameterization
-    # Each filter combination uses explicit SQL (no string replace)
     if project and resolved_only:
         rows = await db.fetch(
             "SELECT id, error_type, error_message, solution, resolved, "
@@ -1008,9 +951,7 @@ async def handle_brain_error_query(args: dict[str, Any]) -> str:
 
     return db.serialize({"results": rows})
 
-
 async def handle_brain_session(args: dict[str, Any]) -> str:
-    """Handle brain_session tool calls."""
     action = args["action"]
 
     if action == "start":
@@ -1026,8 +967,6 @@ async def handle_brain_session(args: dict[str, Any]) -> str:
     if action == "end":
         summary = args.get("summary", "")
         outcome = args.get("outcome", "success")
-        # FIX BUG-1: PostgreSQL does NOT support ORDER BY/LIMIT in UPDATE.
-        # Use subquery with ctid or id to select the target row.
         row = await db.fetchrow(
             "UPDATE brain_sessions SET summary = $1, outcome = $2, "
             "ended_at = NOW() "
@@ -1062,13 +1001,10 @@ async def handle_brain_session(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_decision(args: dict[str, Any]) -> str:
-    """Handle brain_decision tool calls."""
     action = args["action"]
 
     if action == "record":
-        # Store as observation on a special _decisions entity
         entity = await db.fetchrow(
             "INSERT INTO brain_entities (name, entity_type) "
             "VALUES ('_decisions', 'system') "
@@ -1139,15 +1075,10 @@ async def handle_brain_decision(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_consolidate(args: dict[str, Any]) -> str:
-    """Handle brain_consolidate tool calls (v2.0: SM-2 + PageRank + export)."""
     action = args["action"]
 
     if action == "decay":
-        # E1: SM-2 adaptive decay — access_count modifies half-life
-        # EF = 2.5 + (0.1 - (5-q)*(0.08 + (5-q)*0.02))
-        # Approximation in SQL: EF = GREATEST(1.3, 1.3 + 0.24 * LN(1+access_count))
         result = await db.execute(
             "UPDATE brain_observations SET "
             "importance = GREATEST(0.01, "
@@ -1240,7 +1171,6 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         return db.serialize({"stats": stats})
 
     if action == "pagerank":
-        # D1: PageRank via networkx
         import networkx as nx
         rels = await db.fetch(
             "SELECT e1.name AS src, e2.name AS dst, r.strength "
@@ -1254,10 +1184,9 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         for r in rels:
             g.add_edge(r["src"], r["dst"], weight=float(r["strength"]))
         pr = nx.pagerank(g, alpha=0.85, weight="weight")
-        # Blend: 0.6×PR + 0.4×current importance
         updated = 0
         for name, pr_score in pr.items():
-            pr_norm = min(1.0, pr_score * len(pr))  # normalize
+            pr_norm = min(1.0, pr_score * len(pr))
             await db.execute(
                 "UPDATE brain_entities SET "
                 "importance = LEAST(1.0, 0.6 * $1 + 0.4 * importance), "
@@ -1273,7 +1202,6 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         })
 
     if action == "find_duplicates":
-        # F5: Entity duplicate detection with rapidfuzz
         from rapidfuzz import fuzz
         entities = await db.fetch(
             "SELECT name FROM brain_entities ORDER BY name",
@@ -1292,7 +1220,6 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
         })
 
     if action == "export":
-        # F6: Full JSON export for backup/migration
         entities = await db.fetch("SELECT * FROM brain_entities")
         observations = await db.fetch("SELECT * FROM brain_observations")
         relations = await db.fetch("SELECT * FROM brain_relations")
@@ -1309,9 +1236,7 @@ async def handle_brain_consolidate(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown action: {action}"})
 
-
 async def handle_brain_feedback(args: dict[str, Any]) -> str:
-    """Handle brain_feedback tool calls (v2.0: versioning on correct)."""
     action = args["action"]
     entity_name = args.get("entity_name")
     obs_id = args.get("observation_id")
@@ -1369,7 +1294,6 @@ async def handle_brain_feedback(args: dict[str, Any]) -> str:
                 new_imp, obs_id,
             )
         elif action == "correct" and correction:
-            # E2: Observation versioning — save old content before update
             new_imp = row["importance"]
             prev = json.loads(row["previous_versions"]) if row["previous_versions"] else []
             prev.append({
@@ -1396,9 +1320,7 @@ async def handle_brain_feedback(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": "entity_name or observation_id required"})
 
-
 async def handle_brain_analytics(args: dict[str, Any]) -> str:
-    """Handle brain_analytics tool calls (v2.0: entropy + communities + MTTR)."""
     metric = args["metric"]
 
     if metric == "summary":
@@ -1411,9 +1333,7 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
             "  (SELECT COUNT(*) FROM brain_errors WHERE resolved) AS resolved_errors, "
             "  (SELECT COUNT(*) FROM brain_sessions) AS sessions",
         )
-        # F4: Token estimation — approximate based on observation count
         obs_count = int(row["observations"]) if row else 0
-        # Average observation is ~80 chars → ~20 tokens
         token_est = obs_count * 20
         result: dict[str, Any] = {"summary": row}
         result["estimated_tokens"] = token_est
@@ -1429,7 +1349,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
             "   WHERE access_count = 0) AS unused_entities, "
             "  (SELECT pg_size_pretty(pg_database_size(current_database()))) AS db_size",
         )
-        # F1: Shannon entropy for knowledge diversity
         type_counts = await db.fetch(
             "SELECT entity_type, COUNT(*) AS cnt FROM brain_entities "
             "GROUP BY entity_type",
@@ -1452,7 +1371,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
             if p > 0:
                 obs_entropy -= p * math.log2(p)
 
-        # F3: Error trends + MTTR (uses resolved_at, not updated_at)
         err_stats = await db.fetchrow(
             "SELECT "
             "  (SELECT COUNT(*) FROM brain_errors WHERE resolved) AS resolved, "
@@ -1461,7 +1379,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
             "   FROM brain_errors WHERE resolved AND resolved_at IS NOT NULL) AS avg_mttr_seconds",
         )
 
-        # F1: knowledge_diversity_score = entropy / max_entropy
         max_entity_entropy = math.log2(max(1, len(type_counts))) if type_counts else 1.0
         max_obs_entropy = math.log2(max(1, len(obs_counts))) if obs_counts else 1.0
 
@@ -1487,7 +1404,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
         })
 
     if metric == "drift":
-        # Chi-squared with scipy for proper p-values
         from scipy import stats as sp_stats
         row = await db.fetchrow(
             "WITH recent AS ("
@@ -1510,7 +1426,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
         chi_sq = float(row["chi_squared"]) if row else 0
         categories = int(row["categories"]) if row else 0
         df = max(1, categories - 1)
-        # F2: Proper p-value with scipy
         p_value = float(sp_stats.chi2.sf(chi_sq, df)) if categories > 0 else 1.0
         drift_detected = p_value < 0.05
 
@@ -1523,7 +1438,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
         })
 
     if metric == "communities":
-        # D2: Louvain community detection via networkx
         import networkx as nx
         rels = await db.fetch(
             "SELECT e1.name AS src, e2.name AS dst, r.strength "
@@ -1548,9 +1462,6 @@ async def handle_brain_analytics(args: dict[str, Any]) -> str:
 
     return json.dumps({"error": f"Unknown metric: {metric}"})
 
-
-# ─── Tool dispatcher ─────────────────────────────────────────────────
-
 HANDLERS = {
     "brain_entity": handle_brain_entity,
     "brain_observe": handle_brain_observe,
@@ -1566,18 +1477,7 @@ HANDLERS = {
     "brain_analytics": handle_brain_analytics,
 }
 
-
-# ─── JSON-RPC over stdio ─────────────────────────────────────────────
-
 async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Process a single JSON-RPC request.
-
-    Args:
-        request: Parsed JSON-RPC request.
-
-    Returns:
-        JSON-RPC response dict, or None for notifications.
-    """
     method = request.get("method", "")
     req_id = request.get("id")
     params = request.get("params", {})
@@ -1597,8 +1497,6 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     if method == "notifications/initialized":
-        # FIX BUG-4: Notifications have no id, must NOT send a response.
-        # Just init schema silently.
         await db.init_schema()
         return None
 
@@ -1653,7 +1551,6 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
                 },
             }
 
-    # Unknown methods that have an id get an error response
     if req_id is not None:
         return {
             "jsonrpc": "2.0",
@@ -1661,24 +1558,15 @@ async def handle_request(request: dict[str, Any]) -> dict[str, Any] | None:
             "error": {"code": -32601, "message": f"Unknown method: {method}"},
         }
 
-    # Notifications without id get no response
     return None
 
-
 async def main() -> None:
-    """Run the MCP server: read JSON-RPC from stdin, write to stdout.
-
-    Uses sys.stdin.buffer and sys.stdout.buffer directly with
-    asyncio protocol for maximum compatibility across Python versions.
-    """
     loop = asyncio.get_running_loop()
 
-    # Set up stdin reader
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
 
-    # Set up stdout writer — use subprocess protocol pattern
     write_transport, write_protocol = await loop.connect_write_pipe(
         lambda: asyncio.Protocol(), sys.stdout.buffer,
     )
@@ -1700,7 +1588,6 @@ async def main() -> None:
 
             response = await handle_request(request)
 
-            # FIX BUG-4: Only send response for non-notification messages
             if response is not None:
                 response_bytes = db.serialize(response).encode("utf-8") + b"\n"
                 write_transport.write(response_bytes)
