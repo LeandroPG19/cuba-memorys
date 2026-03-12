@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
@@ -13,11 +13,11 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir .
 
 # --- Production ---
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 COPY --from=builder /usr/local/bin/cuba-memorys /usr/local/bin/cuba-memorys
 COPY --from=builder /app/src ./src
 

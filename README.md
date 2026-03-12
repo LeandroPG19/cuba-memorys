@@ -1,8 +1,8 @@
 # 🧠 Cuba-Memorys
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white)](https://python.org)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue?logo=python&logoColor=white)](https://python.org)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-1.6.0-orange)](https://github.com/lENADRO1910/cuba-memorys)
+[![Version](https://img.shields.io/badge/version-1.6.0-orange)](https://github.com/LeandroPG19/cuba-memorys)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 
@@ -79,13 +79,13 @@ AI agents forget everything between conversations. Cuba-Memorys solves this by g
 
 ### 1. Prerequisites
 
-- **Python 3.11+**
+- **Python 3.14+**
 - **Docker** (for PostgreSQL)
 
 ### 2. Install
 
 ```bash
-git clone https://github.com/lENADRO1910/cuba-memorys.git
+git clone https://github.com/LeandroPG19/cuba-memorys.git
 cd cuba-memorys
 
 docker compose up -d
@@ -492,7 +492,7 @@ Previous versions: v1.3.0 (12/12, 8/8, 9/9), v1.1.0 (13/13), v1.0.1 (18/18).
 
 **Leandro Pérez G.**
 
-- GitHub: [@lENADRO1910](https://github.com/lENADRO1910)
+- GitHub: [@LeandroPG19](https://github.com/LeandroPG19)
 - Email: [leandropatodo@gmail.com](mailto:leandropatodo@gmail.com)
 
 ## Credits

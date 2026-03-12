@@ -1,8 +1,8 @@
 [project]
 name = "cuba-memorys"
-version = "1.3.0"
+version = "1.6.0"
 description = "Knowledge graph MCP with Hebbian learning, FSRS spaced repetition, RRF search fusion, PageRank, contradiction detection, and anti-hallucination grounding. PostgreSQL backend. Created by Leandro Pérez G."
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "asyncpg>=0.30.0",
     "orjson>=3.10.0",

@@ -2,11 +2,11 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.93+-orange?logo=rust&logoColor=white)](https://rust-lang.org)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/lENADRO1910/cuba-memorys)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/LeandroPG19/cuba-memorys)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-77%20pass-brightgreen)](https://github.com/lENADRO1910/cuba-memorys)
-[![Tech Debt](https://img.shields.io/badge/tech%20debt-0-brightgreen)](https://github.com/lENADRO1910/cuba-memorys)
+[![Tests](https://img.shields.io/badge/tests-77%20pass-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
+[![Tech Debt](https://img.shields.io/badge/tech%20debt-0-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server written in Rust for maximum performance. Knowledge graph with neuroscience-inspired algorithms: FSRS-6 adaptive decay, Hebbian learning with BCM metaplasticity, Dual-Strength memory, Leiden community detection, BM25+ search, adaptive RRF fusion, and anti-hallucination grounding.
 
@@ -346,5 +346,5 @@ Last audit: **2026-03-11** — Zero technical debt.
 
 **Leandro Pérez G.**
 
-- GitHub: [@lENADRO1910](https://github.com/lENADRO1910)
+- GitHub: [@LeandroPG19](https://github.com/LeandroPG19)
 - Email: [leandropatodo@gmail.com](mailto:leandropatodo@gmail.com)
