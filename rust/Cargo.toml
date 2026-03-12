@@ -3,7 +3,7 @@ name = "cuba-memorys"
 version = "2.0.0"
 edition = "2024"
 description = "Knowledge Graph MCP Server — Rust rewrite with FSRS-6 + Dual-Strength"
-license = "MIT"
+license = "CC-BY-NC-4.0"
 
 [dependencies]
 # Async runtime
