@@ -26,6 +26,7 @@ from cuba_memorys.hebbian import (
     oja_negative,
     oja_positive,
     synapse_weight_boost,
+    calculate_thermal_diffusion,
 )
 from cuba_memorys.tfidf import tfidf_index
 from cuba_memorys.constants import (
@@ -250,19 +251,56 @@ async def _entity_get(name: str) -> str:
         "updated_at = NOW() WHERE id = $1",
         entity_id, IMPORTANCE_ACCESS_BOOST,
     )
-    # E2: Spreading activation — boost neighbors (Collins & Loftus 1975)
-    await db.execute(
-        "UPDATE brain_entities SET "
-        "importance = LEAST(1.0, importance + $2) "
-        "WHERE id IN ("
-        "  SELECT CASE WHEN r.from_entity = $1 THEN r.to_entity "
-        "              ELSE r.from_entity END "
+    # E2 (V2): Spreading activation — Thermal diffusion (Heat Equation)
+    # Fetches a subgraph up to degree 3 from the active entity to prevent
+    # full DB scans. Uses Laplacian diffusion to spread the boost topographically.
+    edges_raw = await db.fetch(
+        "WITH RECURSIVE subgraph AS ("
+        "  SELECT from_entity, to_entity, strength, 1 as depth FROM brain_relations "
+        "  WHERE from_entity = $1 OR to_entity = $1 "
+        "  UNION "
+        "  SELECT r.from_entity, r.to_entity, r.strength, s.depth + 1 "
         "  FROM brain_relations r "
-        "  WHERE r.from_entity = $1 "
-        "     OR (r.to_entity = $1 AND r.bidirectional = TRUE)"
-        ")",
-        entity_id, IMPORTANCE_NEIGHBOR_BOOST,
+        "  JOIN subgraph s ON r.from_entity = s.to_entity OR r.to_entity = s.from_entity "
+        "  WHERE s.depth < 3"
+        ") "
+        "SELECT DISTINCT from_entity, to_entity, strength FROM subgraph",
+        entity_id,
     )
+    if edges_raw:
+        graph_edges = [
+            (str(row["from_entity"]), str(row["to_entity"]), float(row["strength"]))
+            for row in edges_raw
+        ]
+
+        # Run matrix operations in a separate thread to prevent blocking the async loop
+        import asyncio
+        loop = asyncio.get_running_loop()
+        import functools
+        diffusion_boosts = await loop.run_in_executor(
+            None,
+            functools.partial(
+                calculate_thermal_diffusion, graph_edges, str(entity_id)
+            )
+        )
+
+        # Batch update based on diffusion results
+        if diffusion_boosts:
+            # Quitamos el nodo activo para no sobreescribir su IMPORTANCE_ACCESS_BOOST de arriba
+            diffusion_boosts.pop(str(entity_id), None)
+
+            updates = [
+                (boost_val, n_id)
+                for n_id, boost_val in diffusion_boosts.items()
+                if boost_val > 0.0001
+            ]
+            if updates:
+                await db.execute_many(
+                    "UPDATE brain_entities SET "
+                    "importance = LEAST(1.0, importance + $1) "
+                    "WHERE id = $2",
+                    updates,
+                )
 
     obs = await db.fetch(
         "SELECT id, content, observation_type, importance, source, "
@@ -767,10 +805,10 @@ async def _expand_via_neighbors(
     scope: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """V9: Expand search via KG neighbors when recall is low.
+    """V9 (V2): Expand search via KG Random Walk with Restart (RWR).
 
-    Inspired by Zep/Graphiti BFS search (arXiv 2501.13956 §3.1).
-    Only triggered when initial results < limit.
+    Replaces BFS with RWR (stochastic context extraction) based on the
+    underlying connection graph and relation strengths.
 
     Args:
         query: Original search query.
@@ -785,16 +823,86 @@ async def _expand_via_neighbors(
     if not entity_ids:
         return results
     try:
-        neighbors = await db.fetch(
-            "SELECT DISTINCT e.name FROM brain_entities e "
-            "JOIN brain_relations r ON "
-            "  (e.id = r.to_entity AND r.from_entity = ANY($1::uuid[])) "
-            "  OR (e.id = r.from_entity AND r.to_entity = ANY($1::uuid[])) "
-            "LIMIT 5",
+        # Retrieve local subgraph (degree <= 2) to build a focused RWR graph without full DB scan
+        edges_raw = await db.fetch(
+            "WITH RECURSIVE subgraph AS ("
+            "  SELECT from_entity, to_entity, strength, 1 as depth FROM brain_relations "
+            "  WHERE from_entity = ANY($1::uuid[]) OR to_entity = ANY($1::uuid[]) "
+            "  UNION "
+            "  SELECT r.from_entity, r.to_entity, r.strength, s.depth + 1 "
+            "  FROM brain_relations r "
+            "  JOIN subgraph s ON r.from_entity = s.to_entity OR r.to_entity = s.from_entity "
+            "  WHERE s.depth < 2"
+            ") "
+            "SELECT DISTINCT from_entity, to_entity, strength FROM subgraph",
             [str(eid) for eid in entity_ids],
+        )
+        if not edges_raw:
+            return results
+
+        try:
+            import networkx as nx # type: ignore[import-untyped]
+        except ImportError:
+            # Fallback a V9 antigua en caso de no tener networkx instalado
+            neighbors = await db.fetch(
+                "SELECT DISTINCT e.name FROM brain_entities e "
+                "JOIN brain_relations r ON "
+                "  (e.id = r.to_entity AND r.from_entity = ANY($1::uuid[])) "
+                "  OR (e.id = r.from_entity AND r.to_entity = ANY($1::uuid[])) "
+                "LIMIT 5",
+                [str(eid) for eid in entity_ids],
+            )
+            if not neighbors:
+                return results
+            expanded_terms = " ".join(n["name"] for n in neighbors)
+            expanded_query = f"{query} {expanded_terms}"
+            extra_signals = await _collect_search_signals(
+                expanded_query, scope, limit, exclude_ids=[str(r.get("id")) for r in results]
+            )
+            return results + extra_signals
+
+        G = nx.Graph()
+        for row in edges_raw:
+            G.add_edge(str(row["from_entity"]), str(row["to_entity"]), weight=float(row["strength"]))
+
+        start_nodes = [str(eid) for eid in entity_ids if str(eid) in G]
+        if not start_nodes:
+            return results
+
+        # Ejecutar RWR en subproceso para no bloquear el Event Loop
+        import asyncio
+        loop = asyncio.get_running_loop()
+        import functools
+
+        def run_rwr(graph_obj, start_node_list):
+            return nx.pagerank(
+                graph_obj,
+                alpha=0.85,
+                personalization={node: 1.0 for node in start_node_list},
+                weight='weight'
+            )
+
+        rwr_scores = await loop.run_in_executor(None, functools.partial(run_rwr, G, start_nodes))
+
+        # Filtrar nodos iniciales y ordenar por puntuación
+        expanded_nodes = []
+        for node, score in sorted(rwr_scores.items(), key=lambda x: x[1], reverse=True):
+            if node not in start_nodes:
+                expanded_nodes.append(node)
+            if len(expanded_nodes) >= 5: # Top 5 vecinos contextuales
+                break
+
+        if not expanded_nodes:
+            return results
+
+        # Obtener los nombres de las entidades con puntuaciones más altas
+        neighbors = await db.fetch(
+            "SELECT name FROM brain_entities WHERE id = ANY($1::uuid[])",
+            expanded_nodes
         )
         if not neighbors:
             return results
+
         expanded_terms = " ".join(n["name"] for n in neighbors)
         expanded_query = f"{query} {expanded_terms}"
         extra_signals = await _collect_search_signals(

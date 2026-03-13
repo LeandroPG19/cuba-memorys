@@ -58,6 +58,65 @@ def spreading_activation_boost(current_importance: float) -> float:
     boost = 0.02 * SPREAD_DECAY
     return min(MAX_IMPORTANCE, current_importance + boost)
 
+
+def calculate_thermal_diffusion(
+    graph_edges: list[tuple[str, str, float]],
+    active_entity: str,
+    iterations: int = 3,
+    alpha: float = 0.15,
+) -> dict[str, float]:
+    """Calculates spreading activation using the heat equation (Laplacian diffusion).
+
+    Args:
+        graph_edges: List of tuples (source_entity_id, target_entity_id, edge_weight)
+        active_entity: The ID of the entity that was accessed
+        iterations: Number of diffusion steps
+        alpha: Thermal diffusivity constant
+
+    Returns:
+        Dictionary mapping entity_id to its new importance boost
+    """
+    try:
+        import networkx as nx # type: ignore[import-untyped]
+        import numpy as np
+        import scipy.sparse # type: ignore[import-untyped]
+    except ImportError:
+        # Fallback si dependencias científicas no están disponibles
+        return {}
+
+    G = nx.Graph()
+    for src, dst, weight in graph_edges:
+        G.add_edge(src, dst, weight=weight)
+
+    if active_entity not in G:
+        return {}
+
+    nodes = list(G.nodes())
+    try:
+        idx = nodes.index(active_entity)
+    except ValueError:
+        return {}
+
+    # Construir matriz Laplaciana escasa L = D - A
+    try:
+        L_sparse = nx.laplacian_matrix(G, weight='weight')
+    except Exception:
+        return {}
+
+    # Vector inicial de "calor" (importancia inyectada)
+    X = np.zeros(len(nodes))
+    X[idx] = 1.0 # 1 unidad de energía inyectada
+
+    # Multiplicación vectorizada rápida con SciPy Sparse
+    for _ in range(iterations):
+        # Ecuación del calor discreta: X_new = X_old - alpha * L * X_old
+        LX = L_sparse.dot(X)
+        X = X - alpha * LX
+
+    SCALE_FACTOR = 0.02 * SPREAD_DECAY
+
+    return {nodes[i]: float(X[i]) * SCALE_FACTOR for i in range(len(nodes))}
+
 def synapse_weight_boost(current_weight: float, max_weight: float = 5.0) -> float:
     delta = 0.1 * (1.0 - current_weight / max_weight)
     return min(max_weight, max(0.0, current_weight + delta))
