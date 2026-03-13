@@ -80,6 +80,7 @@ async def _check_dedup(
         (is_duplicate, warnings, existing_content_preview)
     """
     warnings: list[str] = []
+    superseded_ids: list[Any] = []
     dupes = await db.fetch(
         "SELECT id, content, similarity(content, $2) AS sim "
         "FROM brain_observations WHERE entity_id = $1 "
@@ -87,27 +88,36 @@ async def _check_dedup(
         "ORDER BY sim DESC LIMIT 5",
         entity_id, content, CONTRADICTION_THRESHOLD,
     )
+
+    async def _flush_superseded():
+        if superseded_ids:
+            await db.execute(
+                "UPDATE brain_observations SET observation_type = 'superseded', "
+                "importance = importance * 0.1, valid_until = NOW() "
+                "WHERE id = ANY($1::uuid[])",
+                superseded_ids,
+            )
+
     for obs in dupes:
         sim = float(obs["sim"])
         if sim > DEDUP_THRESHOLD:
+            await _flush_superseded()
             return True, warnings, obs["content"][:80]
         # E3: Embedding-enhanced dedup — catches paraphrased duplicates
         if sim > 0.5 and embeddings.is_available():
             emb_sim = _compute_embedding_score(content, obs["content"])
             if emb_sim is not None and emb_sim > 0.92:
+                await _flush_superseded()
                 return True, warnings, obs["content"][:80]
         if sim > CONTRADICTION_THRESHOLD and search.has_negation(
             content, obs["content"],
         ):
-            await db.execute(
-                "UPDATE brain_observations SET observation_type = 'superseded', "
-                "importance = importance * 0.1, valid_until = NOW() "
-                "WHERE id = $1",
-                obs["id"],
-            )
+            superseded_ids.append(obs["id"])
             warnings.append(
                 f"SUPERSEDED: '{obs['content'][:60]}...' (sim={sim:.2f})"
             )
+
+    await _flush_superseded()
     return False, warnings, None
 
 
