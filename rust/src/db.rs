@@ -28,6 +28,22 @@ BEGIN
 END $$;
 "#;
 
+/// BCM θ_M EMA migration — adds bcm_theta column for persistent sliding threshold.
+/// V3: Deep Research 2026-03-14.
+const BCM_THETA_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_entities'
+        AND column_name = 'bcm_theta'
+    ) THEN
+        ALTER TABLE brain_entities
+            ADD COLUMN bcm_theta FLOAT DEFAULT 10.0;
+    END IF;
+END $$;
+"#;
+
 /// Create and initialize the database connection pool.
 ///
 /// Args:
@@ -82,6 +98,14 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
         .context("failed to apply Dual-Strength migration")?;
 
     tracing::info!("Dual-Strength columns verified");
+
+    // Apply BCM theta migration (idempotent) — V3 Deep Research
+    sqlx::raw_sql(BCM_THETA_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply BCM theta migration")?;
+
+    tracing::info!("BCM theta column verified");
 
     // Check pgvector extension
     let pgvector_check: Option<(String,)> = sqlx::query_as(

@@ -17,7 +17,20 @@ use sqlx::PgPool;
 /// Topological inertia coefficient: scales PageRank influence on stability.
 /// Higher γ → hub nodes retain stability more aggressively.
 /// Range: [0.0, 2.0]. Default: 0.5. Set to 0.0 to disable.
-const TOPO_INERTIA_GAMMA: f64 = 0.5;
+/// V3: Configurable via CUBA_TOPO_GAMMA env var.
+const TOPO_INERTIA_GAMMA_DEFAULT: f64 = 0.5;
+
+/// Read γ from env (cached with OnceLock for single-read).
+fn topo_gamma() -> f64 {
+    use std::sync::OnceLock;
+    static GAMMA: OnceLock<f64> = OnceLock::new();
+    *GAMMA.get_or_init(|| {
+        std::env::var("CUBA_TOPO_GAMMA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(TOPO_INERTIA_GAMMA_DEFAULT)
+    })
+}
 
 /// Calculate retrievability from stability and elapsed days.
 ///
@@ -90,7 +103,7 @@ pub fn update_stability(
 /// the knowledge graph disproportionately.
 pub fn apply_topological_inertia(base_stability: f64, pagerank: f64) -> f64 {
     let pr = pagerank.max(0.0);
-    base_stability * (1.0 + TOPO_INERTIA_GAMMA * (1.0 + pr).ln())
+    base_stability * (1.0 + topo_gamma() * (1.0 + pr).ln())
 }
 
 /// Update difficulty based on rating.
@@ -135,7 +148,7 @@ pub async fn batch_decay(pool: &PgPool, protected: &[uuid::Uuid]) -> Result<usiz
     )
     .bind(protected)
     .bind(DECAY_THRESHOLD)
-    .bind(TOPO_INERTIA_GAMMA)
+    .bind(topo_gamma())
     .execute(pool)
     .await?;
 

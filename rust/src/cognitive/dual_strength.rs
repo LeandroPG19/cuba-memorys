@@ -4,8 +4,10 @@
 //! V2: SAC unification (Raaijmakers & Shiffrin → Pavlik & Anderson 2005).
 //!     SS ↔ FSRS Stability (S), RS ↔ FSRS Retrievability (R).
 //!     Update formula: ΔSS = α * (SS_max - SS) * e^(-β * RS)
-//!     Parameters: α=0.2 (learning rate), β=1.5 (retrieval inhibition).
-//!     Source: Gemini Deep Research Area 2, SAC model.
+//!     Parameters: α=0.5 (learning rate), β=0.5 (retrieval inhibition).
+//!     V3: Agent-optimized (Deep Research 2026-03-14): agents don't need
+//!         "desirable difficulty" — faster consolidation via higher α,
+//!         lower retrieval penalty via lower β.
 //! VF2: Testing Effect (Roediger & Karpicke 2006).
 
 use crate::constants::{
@@ -16,9 +18,11 @@ use sqlx::PgPool;
 
 // ── SAC Parameters (Gemini Deep Research 2026-03-14) ────────────
 /// SAC learning rate: controls how fast storage strength approaches maximum.
-const SAC_ALPHA: f64 = 0.2;
+/// V3: 0.2→0.5 (agent-optimized — faster consolidation).
+const SAC_ALPHA: f64 = 0.5;
 /// SAC retrieval inhibition: higher RS → smaller ΔSS (diminishing returns).
-const SAC_BETA: f64 = 1.5;
+/// V3: 1.5→0.5 (agent-optimized — less penalty for high retrieval).
+const SAC_BETA: f64 = 0.5;
 /// Maximum storage strength (ceiling).
 const SS_MAX: f64 = 1.0;
 
@@ -155,13 +159,13 @@ mod tests {
 
     #[test]
     fn test_sac_parameters_calibrated() {
-        // α=0.2, β=1.5: at SS=0, RS=0 → ΔSS = 0.2 * 1.0 * e^0 = 0.2
+        // V3: α=0.5, β=0.5: at SS=0, RS=0 → ΔSS = 0.5 * 1.0 * e^0 = 0.5
         let s = increment_storage(0.0, 0.0);
-        assert!((s - 0.2).abs() < 0.001, "SS=0,RS=0 → ΔSS should be α: got {s}");
+        assert!((s - 0.5).abs() < 0.001, "SS=0,RS=0 → ΔSS should be α: got {s}");
 
-        // At SS=0, RS=1 → ΔSS = 0.2 * 1.0 * e^(-1.5) ≈ 0.2 * 0.2231 ≈ 0.0446
+        // At SS=0, RS=1 → ΔSS = 0.5 * 1.0 * e^(-0.5) ≈ 0.5 * 0.6065 ≈ 0.303
         let s = increment_storage(0.0, 1.0);
-        assert!(s > 0.04 && s < 0.05, "SS=0,RS=1 → ΔSS ≈ 0.045: got {s}");
+        assert!(s > 0.29 && s < 0.32, "SS=0,RS=1 → ΔSS ≈ 0.303: got {s}");
     }
 
     #[test]

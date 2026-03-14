@@ -31,8 +31,10 @@ pub const PRED_ERROR_UPDATE: f64 = 0.75;     // Somewhat similar → update exis
 // Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
+/// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
+/// Configurable via CUBA_CACHE_TTL env var.
 pub const CACHE_MAX_ENTRIES: usize = 256;
-pub const CACHE_TTL_SECS: u64 = 60;
+pub const CACHE_TTL_SECS: u64 = 300;
 
 /// Community summary cap (V9).
 pub const COMMUNITY_SUMMARY_CAP: usize = 30;

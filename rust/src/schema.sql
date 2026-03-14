@@ -1,5 +1,5 @@
--- cuba-memorys schema v2.1.0 (FSRS-6 w20, Adaptive RRF, HNSW tuning)
--- Based on v2.0.0 + Dual-Strength Model (Bjork 1992)
+-- cuba-memorys schema v2.2.0 (Deep Research V3: SAC calibration, BCM EMA, configurable γ/TTL)
+-- Based on v2.1.0 + BCM θ_M persistence (EMA sliding threshold)
 
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS brain_entities (
     importance FLOAT DEFAULT 0.5
         CHECK (importance >= 0.0 AND importance <= 1.0),
     access_count INT DEFAULT 0,
+    -- V3: BCM EMA sliding threshold (Deep Research 2026-03-14)
+    bcm_theta FLOAT DEFAULT 10.0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     search_vector tsvector GENERATED ALWAYS AS (
