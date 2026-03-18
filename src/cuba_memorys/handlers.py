@@ -15,6 +15,8 @@ import logging
 import math
 from typing import Any
 
+import networkx as nx  # type: ignore[import-untyped]
+
 import asyncpg
 
 from cuba_memorys import __version__, db, search, embeddings
@@ -58,7 +60,6 @@ async def _build_brain_graph(directed: bool = False) -> tuple[Any, bool]:
     Returns:
         (graph, has_data): The graph and whether any relations exist.
     """
-    import networkx as nx  # type: ignore[import-untyped]
     rels = await db.fetch(GRAPH_RELATIONS_SQL)
     if not rels:
         return None, False
@@ -1303,7 +1304,6 @@ async def _consolidate_stats(_args: dict[str, Any]) -> str:
 
 
 async def _consolidate_pagerank(_args: dict[str, Any]) -> str:
-    import networkx as nx  # type: ignore[import-untyped]
     g, has_data = await _build_brain_graph(directed=True)
     if not has_data:
         return db.serialize({"action": "pagerank", "error": "No relations to rank"})
@@ -1640,7 +1640,6 @@ async def _analytics_communities() -> str:
     from top-3 observations per entity (by importance). Inspired by
     Zep/Graphiti hierarchical KG (arXiv 2501.13956 §2.3).
     """
-    import networkx as nx  # type: ignore[import-untyped]
     g, has_data = await _build_brain_graph()
     if not has_data:
         return db.serialize({"communities": [], "note": "No relations to analyze"})
@@ -1684,7 +1683,6 @@ async def _community_summary(member_names: list[str]) -> str:
 
 
 async def _analytics_bridges() -> str:
-    import networkx as nx  # type: ignore[import-untyped]
     g, has_data = await _build_brain_graph()
     if not has_data:
         return db.serialize({"bridges": [], "note": "No relations to analyze"})

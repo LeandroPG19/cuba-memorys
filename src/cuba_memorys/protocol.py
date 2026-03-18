@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import asyncpg
+import networkx as nx  # type: ignore[import-untyped]
 
 from cuba_memorys import __version__, db, search
 from cuba_memorys.constants import REM_IDLE_SECONDS, TOOL_DEFINITIONS
@@ -192,7 +193,6 @@ async def _rem_consolidation() -> None:
 async def _rem_pagerank() -> None:
     """Run PageRank as part of REM consolidation."""
     try:
-        import networkx as nx  # type: ignore[import-untyped]
         from cuba_memorys.handlers import _build_brain_graph
 
         g, has_data = await _build_brain_graph(directed=True)
