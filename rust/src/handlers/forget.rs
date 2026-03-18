@@ -46,7 +46,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             WHERE error_message ILIKE '%' || $1 || '%'
                OR context::text ILIKE '%' || $1 || '%'
             RETURNING 1
-        ) SELECT COUNT(*) FROM deleted"
+        ) SELECT COUNT(*) FROM deleted",
     )
     .bind(entity_name)
     .fetch_one(&mut *tx)
@@ -61,7 +61,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                OR session_name ILIKE '%' || $1 || '%'
                OR summary ILIKE '%' || $1 || '%'
             RETURNING 1
-        ) SELECT COUNT(*) FROM deleted"
+        ) SELECT COUNT(*) FROM deleted",
     )
     .bind(entity_name)
     .fetch_one(&mut *tx)

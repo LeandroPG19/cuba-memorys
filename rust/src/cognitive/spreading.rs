@@ -23,7 +23,7 @@ pub async fn neighbor_diffusion(pool: &PgPool) -> Result<()> {
         "SELECT id, importance FROM brain_entities
          WHERE importance > 0.5
          ORDER BY importance DESC
-         LIMIT 20"
+         LIMIT 20",
     )
     .fetch_all(pool)
     .await?;
@@ -39,7 +39,7 @@ pub async fn neighbor_diffusion(pool: &PgPool) -> Result<()> {
             "SELECT CASE WHEN from_entity = $1 THEN to_entity ELSE from_entity END,
                     strength
              FROM brain_relations
-             WHERE from_entity = $1 OR to_entity = $1"
+             WHERE from_entity = $1 OR to_entity = $1",
         )
         .bind(seed_id)
         .fetch_all(pool)
@@ -59,7 +59,7 @@ pub async fn neighbor_diffusion(pool: &PgPool) -> Result<()> {
                 "UPDATE brain_entities SET
                     importance = LEAST(importance + $1, 1.0),
                     updated_at = NOW()
-                 WHERE id = $2"
+                 WHERE id = $2",
             )
             .bind(weighted_boost)
             .bind(neighbor_id)

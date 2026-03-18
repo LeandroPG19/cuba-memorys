@@ -7,12 +7,12 @@
 //! model_quantized.onnx and tokenizer.json.
 //! If not set, falls back to deterministic hash-based embeddings for testing.
 
+use crate::search::cache::TtlLruCache;
 use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use crate::search::cache::TtlLruCache;
 
 /// Embedding dimension (BGE-small-en-v1.5 uses 384-d vectors).
 pub const EMBEDDING_DIM: usize = 384;
@@ -86,14 +86,16 @@ fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
         .commit_from_file(model_file)
         .map_err(|e| anyhow::anyhow!("load model: {e}"))?;
 
-    ONNX_SESSION.set(std::sync::Mutex::new(session))
+    ONNX_SESSION
+        .set(std::sync::Mutex::new(session))
         .map_err(|_| anyhow::anyhow!("ONNX session already initialized"))?;
 
     // Load tokenizer
     let tokenizer_dir = if model_dir.is_dir() {
         model_dir.clone()
     } else {
-        model_dir.parent()
+        model_dir
+            .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
     };
@@ -107,7 +109,8 @@ fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
             max_length: 512,
             ..Default::default()
         };
-        tokenizer.with_truncation(Some(truncation))
+        tokenizer
+            .with_truncation(Some(truncation))
             .map_err(|e| anyhow::anyhow!("failed to set truncation: {e}"))?;
 
         let padding = tokenizers::PaddingParams {
@@ -116,10 +119,14 @@ fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
         };
         tokenizer.with_padding(Some(padding));
 
-        TOKENIZER.set(tokenizer)
+        TOKENIZER
+            .set(tokenizer)
             .map_err(|_| anyhow::anyhow!("Tokenizer already initialized"))?;
     } else {
-        return Err(anyhow::anyhow!("tokenizer.json not found at {}", tokenizer_path.display()));
+        return Err(anyhow::anyhow!(
+            "tokenizer.json not found at {}",
+            tokenizer_path.display()
+        ));
     }
 
     Ok(())
@@ -135,17 +142,16 @@ pub async fn embed(text: &str) -> Result<Vec<f32>> {
     // Check cache first
     let cache_key = text.to_string();
     if let Ok(mut cache) = get_cache().lock()
-        && let Some(cached) = cache.get(&cache_key) {
-            return Ok(cached);
-        }
+        && let Some(cached) = cache.get(&cache_key)
+    {
+        return Ok(cached);
+    }
 
     // FIX B2: spawn_blocking for CPU-bound work
     let text_owned = text.to_string();
-    let embedding = tokio::task::spawn_blocking(move || {
-        compute_embedding(&text_owned)
-    })
-    .await
-    .context("embedding task panicked")??;
+    let embedding = tokio::task::spawn_blocking(move || compute_embedding(&text_owned))
+        .await
+        .context("embedding task panicked")??;
 
     // Store in cache
     if let Ok(mut cache) = get_cache().lock() {
@@ -161,12 +167,8 @@ pub async fn embed(text: &str) -> Result<Vec<f32>> {
 /// deterministic hash-based fallback for testing.
 fn compute_embedding(text: &str) -> Result<Vec<f32>> {
     match get_model_status() {
-        ModelStatus::Loaded => {
-            compute_onnx_embedding(text)
-        }
-        ModelStatus::Fallback => {
-            compute_hash_embedding(text)
-        }
+        ModelStatus::Loaded => compute_onnx_embedding(text),
+        ModelStatus::Fallback => compute_hash_embedding(text),
     }
 }
 
@@ -175,15 +177,15 @@ fn compute_embedding(text: &str) -> Result<Vec<f32>> {
 /// Pipeline: tokenize → Tensor::from_array → Session::run → mean pooling → L2 normalize.
 /// Exact parity with Python embeddings.py implementation.
 fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
-    let session_lock = ONNX_SESSION.get()
-        .context("ONNX session not initialized")?;
-    let mut session = session_lock.lock()
+    let session_lock = ONNX_SESSION.get().context("ONNX session not initialized")?;
+    let mut session = session_lock
+        .lock()
         .map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
-    let tokenizer = TOKENIZER.get()
-        .context("Tokenizer not initialized")?;
+    let tokenizer = TOKENIZER.get().context("Tokenizer not initialized")?;
 
     // 1. Tokenize
-    let encoding = tokenizer.encode(text, true)
+    let encoding = tokenizer
+        .encode(text, true)
         .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
 
     let ids = encoding.get_ids();
@@ -199,17 +201,14 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
 
     let shape = vec![1i64, seq_len as i64];
 
-    let input_ids_tensor = ort::value::Tensor::from_array(
-        (shape.clone(), input_ids)
-    ).context("failed to create input_ids tensor")?;
+    let input_ids_tensor = ort::value::Tensor::from_array((shape.clone(), input_ids))
+        .context("failed to create input_ids tensor")?;
 
-    let attn_mask_tensor = ort::value::Tensor::from_array(
-        (shape.clone(), attn_mask.clone())
-    ).context("failed to create attention_mask tensor")?;
+    let attn_mask_tensor = ort::value::Tensor::from_array((shape.clone(), attn_mask.clone()))
+        .context("failed to create attention_mask tensor")?;
 
-    let type_ids_tensor = ort::value::Tensor::from_array(
-        (shape, type_ids)
-    ).context("failed to create token_type_ids tensor")?;
+    let type_ids_tensor = ort::value::Tensor::from_array((shape, type_ids))
+        .context("failed to create token_type_ids tensor")?;
 
     // 3. Run inference — inputs! returns Vec, not Result
     let inputs = ort::inputs! {
@@ -217,7 +216,8 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
         "attention_mask" => attn_mask_tensor,
         "token_type_ids" => type_ids_tensor,
     };
-    let outputs = session.run(inputs)
+    let outputs = session
+        .run(inputs)
         .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
 
     // 4. Extract token embeddings (shape: [1, seq_len, 384])
@@ -230,7 +230,9 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
     if shape.len() != 3 || shape[2] as usize != EMBEDDING_DIM {
         return Err(anyhow::anyhow!(
             "unexpected output shape: {:?}, expected [1, {}, {}]",
-            shape, seq_len, EMBEDDING_DIM
+            shape,
+            seq_len,
+            EMBEDDING_DIM
         ));
     }
 
@@ -254,7 +256,12 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
     }
 
     // 6. L2 normalize
-    let norm: f32 = sum_embedding.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    let norm: f32 = sum_embedding
+        .iter()
+        .map(|x| x * x)
+        .sum::<f32>()
+        .sqrt()
+        .max(1e-9);
     for v in sum_embedding.iter_mut() {
         *v /= norm;
     }
@@ -273,9 +280,9 @@ fn compute_hash_embedding(text: &str) -> Result<Vec<f32>> {
     let words: Vec<&str> = text_lower.split_whitespace().collect();
 
     for (i, word) in words.iter().enumerate() {
-        let hash = word.bytes().fold(0u32, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u32)
-        });
+        let hash = word
+            .bytes()
+            .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
         let idx = (hash as usize) % EMBEDDING_DIM;
         embedding[idx] += 1.0 / (1.0 + i as f32);
     }
@@ -324,7 +331,10 @@ mod tests {
     fn test_embedding_normalized() {
         let emb = compute_hash_embedding("test sentence for normalization").unwrap();
         let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "should be L2 normalized: got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "should be L2 normalized: got {norm}"
+        );
     }
 
     #[test]

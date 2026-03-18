@@ -223,10 +223,7 @@ async fn rem_daemon(pool: PgPool) {
 
         // Run consolidation in a spawned task (I/O-bound: DB queries + graph ops)
         let pool_clone = pool.clone();
-        let result = tokio::spawn(async move {
-            run_rem_consolidation(&pool_clone).await
-        })
-        .await;
+        let result = tokio::spawn(async move { run_rem_consolidation(&pool_clone).await }).await;
 
         match result {
             Ok(Ok(())) => tracing::info!("REM sleep cycle completed"),
@@ -259,7 +256,7 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         // Protect entities accessed during active session (last 8h)
         sqlx::query_scalar(
             "SELECT DISTINCT entity_id FROM brain_observations
-             WHERE created_at > NOW() - INTERVAL '8 hours'"
+             WHERE created_at > NOW() - INTERVAL '8 hours'",
         )
         .fetch_all(pool)
         .await?

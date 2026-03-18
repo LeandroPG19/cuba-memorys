@@ -7,8 +7,8 @@ use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
 
-pub mod alma;
 pub mod alarma;
+pub mod alma;
 pub mod cronica;
 pub mod decreto;
 pub mod eco;

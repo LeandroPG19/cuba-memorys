@@ -108,11 +108,10 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
     tracing::info!("BCM theta column verified");
 
     // Check pgvector extension
-    let pgvector_check: Option<(String,)> = sqlx::query_as(
-        "SELECT extname::text FROM pg_extension WHERE extname = 'vector'"
-    )
-    .fetch_optional(pool)
-    .await?;
+    let pgvector_check: Option<(String,)> =
+        sqlx::query_as("SELECT extname::text FROM pg_extension WHERE extname = 'vector'")
+            .fetch_optional(pool)
+            .await?;
 
     if pgvector_check.is_some() {
         tracing::info!("pgvector extension detected");

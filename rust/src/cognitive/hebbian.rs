@@ -14,8 +14,7 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 use crate::constants::{
-    HEBBIAN_ACCESS_BOOST, HEBBIAN_SEARCH_BOOST, HEBBIAN_OJA_RATE,
-    BCM_THROTTLE_SCALE,
+    BCM_THROTTLE_SCALE, HEBBIAN_ACCESS_BOOST, HEBBIAN_OJA_RATE, HEBBIAN_SEARCH_BOOST,
 };
 
 // ── BCM V2: Dynamic Sliding Threshold ────────────────────────────
@@ -113,7 +112,7 @@ pub async fn oja_boost(pool: &PgPool, observation_id: uuid::Uuid, positive: bool
             "UPDATE brain_observations SET
                 importance = LEAST(importance + $1, 1.0),
                 updated_at = NOW()
-             WHERE id = $2"
+             WHERE id = $2",
         )
         .bind(HEBBIAN_OJA_RATE)
         .bind(observation_id)
@@ -124,7 +123,7 @@ pub async fn oja_boost(pool: &PgPool, observation_id: uuid::Uuid, positive: bool
             "UPDATE brain_observations SET
                 importance = GREATEST(importance * 0.8, 0.0),
                 updated_at = NOW()
-             WHERE id = $2"
+             WHERE id = $2",
         )
         .bind(observation_id)
         .execute(pool)
@@ -134,12 +133,16 @@ pub async fn oja_boost(pool: &PgPool, observation_id: uuid::Uuid, positive: bool
 }
 
 /// Strengthen relation on traversal (Hebbian synapse strengthening).
-pub async fn strengthen_relation(pool: &PgPool, from_entity: uuid::Uuid, to_entity: uuid::Uuid) -> Result<()> {
+pub async fn strengthen_relation(
+    pool: &PgPool,
+    from_entity: uuid::Uuid,
+    to_entity: uuid::Uuid,
+) -> Result<()> {
     sqlx::query(
         "UPDATE brain_relations SET
             strength = LEAST(strength + $1, 1.0),
             updated_at = NOW()
-         WHERE from_entity = $2 AND to_entity = $3"
+         WHERE from_entity = $2 AND to_entity = $3",
     )
     .bind(HEBBIAN_OJA_RATE)
     .bind(from_entity)
@@ -162,7 +165,7 @@ pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usi
              END
              FROM brain_relations
              WHERE from_entity = $2 OR to_entity = $2
-         )"
+         )",
     )
     .bind(HEBBIAN_ACCESS_BOOST)
     .bind(entity_id)
@@ -192,7 +195,10 @@ mod tests {
     fn test_dynamic_threshold_floor() {
         // Low access + low prev → clamped to θ_min
         let theta = dynamic_bcm_threshold(3, 5.0);
-        assert!((theta - BCM_THETA_MIN).abs() < 0.001, "low access → floor: {theta}");
+        assert!(
+            (theta - BCM_THETA_MIN).abs() < 0.001,
+            "low access → floor: {theta}"
+        );
     }
 
     #[test]
@@ -207,7 +213,10 @@ mod tests {
     fn test_dynamic_throttle_low_activity() {
         // Few accesses → near-full boost (θ_M = 10, count = 5 → ratio = 0.5)
         let boost = bcm_throttle_dynamic(0.01, 5, 10.0);
-        assert!(boost > 0.004, "low activity should give decent boost: {boost}");
+        assert!(
+            boost > 0.004,
+            "low activity should give decent boost: {boost}"
+        );
     }
 
     #[test]
@@ -215,7 +224,10 @@ mod tests {
         // Many accesses → fully self-adjusted throttle
         // count=100, θ=100 → ratio=1.0 → throttle = max(0.1, 1.0 - 0.8) = 0.2
         let boost = bcm_throttle_dynamic(0.01, 100, 100.0);
-        assert!(boost > 0.001 && boost < 0.005, "high activity → moderate throttle: {boost}");
+        assert!(
+            boost > 0.001 && boost < 0.005,
+            "high activity → moderate throttle: {boost}"
+        );
     }
 
     #[test]

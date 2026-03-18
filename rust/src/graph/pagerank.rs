@@ -11,35 +11,20 @@ const DAMPING: f64 = 0.85;
 const ITERATIONS: usize = 20;
 const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 
-/// Compute PageRank and store results (batch UPDATE — P1 fix).
+/// Compute PageRank from a list of edges.
 ///
-/// Returns number of entities updated.
-pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
-    // Fetch all relations with NF-IDF hub dampening (§B)
-    let edges: Vec<(uuid::Uuid, uuid::Uuid, f64)> = sqlx::query_as(
-        r#"
-        SELECT r.from_entity, r.to_entity,
-               r.strength / LN(1.0 + COALESCE(deg.degree, 1)) AS dampened_weight
-        FROM brain_relations r
-        LEFT JOIN (
-            SELECT from_entity, COUNT(*) AS degree
-            FROM brain_relations
-            GROUP BY from_entity
-        ) deg ON r.from_entity = deg.from_entity
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-
+/// Extracts the core algorithm from database I/O to improve maintainability
+/// and testability.
+pub fn compute_pagerank(edges: &[(uuid::Uuid, uuid::Uuid, f64)]) -> (Vec<uuid::Uuid>, Vec<f64>) {
     if edges.is_empty() {
-        return Ok(0);
+        return (Vec::new(), Vec::new());
     }
 
     // Build adjacency: node_id → (outgoing nodes with weights)
     let mut nodes: HashMap<uuid::Uuid, usize> = HashMap::new();
     let mut node_list: Vec<uuid::Uuid> = Vec::new();
 
-    for (from, to, _) in &edges {
+    for (from, to, _) in edges {
         for id in [from, to] {
             if !nodes.contains_key(id) {
                 let idx = node_list.len();
@@ -51,14 +36,14 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
 
     let n = node_list.len();
     if n == 0 {
-        return Ok(0);
+        return (Vec::new(), Vec::new());
     }
 
     // Build adjacency lists
     let mut outgoing: Vec<Vec<(usize, f64)>> = vec![vec![]; n];
     let mut out_weight_sum: Vec<f64> = vec![0.0; n];
 
-    for (from, to, weight) in &edges {
+    for (from, to, weight) in edges {
         let from_idx = nodes[from];
         let to_idx = nodes[to];
         outgoing[from_idx].push((to_idx, *weight));
@@ -90,7 +75,9 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
         }
 
         // Convergence check
-        let delta: f64 = ranks.iter().zip(new_ranks.iter())
+        let delta: f64 = ranks
+            .iter()
+            .zip(new_ranks.iter())
             .map(|(old, new)| (old - new).abs())
             .sum();
 
@@ -102,10 +89,37 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
         }
     }
 
-    // P1 FIX: Batch UPDATE with unnest() — 1 query instead of N
-    let ids: Vec<uuid::Uuid> = node_list.clone();
-    let scores: Vec<f64> = ranks;
+    (node_list, ranks)
+}
 
+/// Compute PageRank and store results (batch UPDATE — P1 fix).
+///
+/// Returns number of entities updated.
+pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
+    // Fetch all relations with NF-IDF hub dampening (§B)
+    let edges: Vec<(uuid::Uuid, uuid::Uuid, f64)> = sqlx::query_as(
+        r#"
+        SELECT r.from_entity, r.to_entity,
+               r.strength / LN(1.0 + COALESCE(deg.degree, 1)) AS dampened_weight
+        FROM brain_relations r
+        LEFT JOIN (
+            SELECT from_entity, COUNT(*) AS degree
+            FROM brain_relations
+            GROUP BY from_entity
+        ) deg ON r.from_entity = deg.from_entity
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let (ids, scores) = compute_pagerank(&edges);
+    let n = ids.len();
+
+    if n == 0 {
+        return Ok(0);
+    }
+
+    // P1 FIX: Batch UPDATE with unnest() — 1 query instead of N
     sqlx::query(
         r#"
         UPDATE brain_entities AS e
@@ -113,7 +127,7 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
             updated_at = NOW()
         FROM (SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::float8[]) AS rank) AS v
         WHERE e.id = v.id
-        "#
+        "#,
     )
     .bind(&ids)
     .bind(&scores)
@@ -133,5 +147,52 @@ mod tests {
         assert!(DAMPING > 0.0 && DAMPING < 1.0);
         assert!(ITERATIONS > 0);
         assert!(CONVERGENCE_THRESHOLD > 0.0);
+    }
+
+    #[test]
+    fn test_compute_pagerank_empty() {
+        let (ids, scores) = compute_pagerank(&[]);
+        assert!(ids.is_empty());
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn test_compute_pagerank_simple() {
+        let node1 = uuid::Uuid::new_v4();
+        let node2 = uuid::Uuid::new_v4();
+        let node3 = uuid::Uuid::new_v4();
+
+        // 1 -> 2, 2 -> 3, 3 -> 1 (cycle)
+        let edges = vec![
+            (node1, node2, 1.0),
+            (node2, node3, 1.0),
+            (node3, node1, 1.0),
+        ];
+
+        let (ids, scores) = compute_pagerank(&edges);
+        assert_eq!(ids.len(), 3);
+        assert_eq!(scores.len(), 3);
+
+        // In a symmetric cycle, they should all have roughly equal PageRank
+        let expected = 1.0 / 3.0;
+        for score in scores {
+            assert!((score - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_compute_pagerank_dangling() {
+        let node1 = uuid::Uuid::new_v4();
+        let node2 = uuid::Uuid::new_v4();
+
+        // 1 -> 2, 2 has no outgoing (dangling)
+        let edges = vec![(node1, node2, 1.0)];
+
+        let (ids, scores) = compute_pagerank(&edges);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(scores.len(), 2);
+
+        let sum: f64 = scores.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5); // Should still sum to 1
     }
 }

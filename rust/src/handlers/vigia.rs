@@ -5,7 +5,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
-    let metric = args.get("metric").and_then(|v| v.as_str()).unwrap_or("summary");
+    let metric = args
+        .get("metric")
+        .and_then(|v| v.as_str())
+        .unwrap_or("summary");
 
     match metric {
         "summary" => summary(pool).await,
@@ -18,11 +21,23 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 async fn summary(pool: &PgPool) -> Result<Value> {
-    let entities: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_entities").fetch_one(pool).await?;
-    let observations: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_observations WHERE observation_type != 'superseded'").fetch_one(pool).await?;
-    let relations: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_relations").fetch_one(pool).await?;
-    let errors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_errors").fetch_one(pool).await?;
-    let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_sessions").fetch_one(pool).await?;
+    let entities: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_entities")
+        .fetch_one(pool)
+        .await?;
+    let observations: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_observations WHERE observation_type != 'superseded'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let relations: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_relations")
+        .fetch_one(pool)
+        .await?;
+    let errors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_errors")
+        .fetch_one(pool)
+        .await?;
+    let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_sessions")
+        .fetch_one(pool)
+        .await?;
     let token_estimate = observations.0 * 50;
 
     Ok(serde_json::json!({
@@ -37,26 +52,32 @@ async fn summary(pool: &PgPool) -> Result<Value> {
 }
 
 async fn health(pool: &PgPool) -> Result<Value> {
-    let avg_importance: (Option<f64>,) = sqlx::query_as(
-        "SELECT AVG(importance)::float8 FROM brain_entities"
-    ).fetch_one(pool).await?;
+    let avg_importance: (Option<f64>,) =
+        sqlx::query_as("SELECT AVG(importance)::float8 FROM brain_entities")
+            .fetch_one(pool)
+            .await?;
 
     let stale_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_observations WHERE last_accessed < NOW() - INTERVAL '30 days'"
-    ).fetch_one(pool).await?;
+        "SELECT COUNT(*) FROM brain_observations WHERE last_accessed < NOW() - INTERVAL '30 days'",
+    )
+    .fetch_one(pool)
+    .await?;
 
-    let unused_entities: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_entities WHERE access_count = 0"
-    ).fetch_one(pool).await?;
+    let unused_entities: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM brain_entities WHERE access_count = 0")
+            .fetch_one(pool)
+            .await?;
 
-    let db_size: (String,) = sqlx::query_as(
-        "SELECT pg_size_pretty(pg_database_size(current_database()))"
-    ).fetch_one(pool).await?;
+    let db_size: (String,) =
+        sqlx::query_as("SELECT pg_size_pretty(pg_database_size(current_database()))")
+            .fetch_one(pool)
+            .await?;
 
     // Entropy diversity — Shannon entropy of entity types
-    let type_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT entity_type, COUNT(*) FROM brain_entities GROUP BY entity_type"
-    ).fetch_all(pool).await?;
+    let type_counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT entity_type, COUNT(*) FROM brain_entities GROUP BY entity_type")
+            .fetch_all(pool)
+            .await?;
 
     let entity_entropy = compute_entropy(&type_counts);
     let max_entity_entropy = if type_counts.is_empty() {
@@ -67,8 +88,10 @@ async fn health(pool: &PgPool) -> Result<Value> {
 
     // Observation type entropy
     let obs_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT observation_type, COUNT(*) FROM brain_observations GROUP BY observation_type"
-    ).fetch_all(pool).await?;
+        "SELECT observation_type, COUNT(*) FROM brain_observations GROUP BY observation_type",
+    )
+    .fetch_all(pool)
+    .await?;
     let obs_entropy = compute_entropy(&obs_counts);
     let max_obs_entropy = if obs_counts.is_empty() {
         1.0
@@ -85,8 +108,10 @@ async fn health(pool: &PgPool) -> Result<Value> {
             (SELECT COUNT(*) FROM brain_errors WHERE resolved), \
             (SELECT COUNT(*) FROM brain_errors), \
             (SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)))::float8 \
-             FROM brain_errors WHERE resolved AND resolved_at IS NOT NULL)"
-    ).fetch_one(pool).await?;
+             FROM brain_errors WHERE resolved AND resolved_at IS NOT NULL)",
+    )
+    .fetch_one(pool)
+    .await?;
 
     let resolution_rate = if err_stats.1 > 0 {
         err_stats.0 as f64 / err_stats.1 as f64
@@ -118,34 +143,39 @@ async fn drift(pool: &PgPool) -> Result<Value> {
     let recent: Vec<(String, i64)> = sqlx::query_as(
         "SELECT error_type, COUNT(*) FROM brain_errors \
          WHERE created_at > NOW() - INTERVAL '7 days' \
-         GROUP BY error_type"
-    ).fetch_all(pool).await?;
+         GROUP BY error_type",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let historical: Vec<(String, f64)> = sqlx::query_as(
         "SELECT error_type, COUNT(*)::float8 / 4.0 FROM brain_errors \
          WHERE created_at BETWEEN NOW() - INTERVAL '37 days' AND NOW() - INTERVAL '7 days' \
-         GROUP BY error_type"
-    ).fetch_all(pool).await?;
+         GROUP BY error_type",
+    )
+    .fetch_all(pool)
+    .await?;
 
     // Chi-squared test
-    let hist_map: std::collections::HashMap<String, f64> =
-        historical.into_iter().collect();
+    let hist_map: std::collections::HashMap<String, f64> = historical.into_iter().collect();
     let mut chi_squared = 0.0;
     let mut categories = 0u32;
 
     for (error_type, observed) in &recent {
         if let Some(&expected) = hist_map.get(error_type)
-            && expected > 0.0 {
-                chi_squared += (*observed as f64 - expected).powi(2) / expected;
-                categories += 1;
-            }
+            && expected > 0.0
+        {
+            chi_squared += (*observed as f64 - expected).powi(2) / expected;
+            categories += 1;
+        }
     }
 
     let df = (categories as i32 - 1).max(1);
     // Simplified p-value approximation (Wilson-Hilferty for chi-squared CDF)
     let p_value = chi2_survival(chi_squared, df as f64);
 
-    let drift_data: Vec<Value> = recent.iter()
+    let drift_data: Vec<Value> = recent
+        .iter()
         .map(|(t, c)| serde_json::json!({"error_type": t, "count": c}))
         .collect();
 
@@ -163,13 +193,16 @@ async fn drift(pool: &PgPool) -> Result<Value> {
 async fn communities(pool: &PgPool) -> Result<Value> {
     match crate::graph::community::detect(pool).await {
         Ok(communities) => {
-            let community_json: Vec<Value> = communities.iter().map(|(id, members)| {
-                serde_json::json!({
-                    "community_id": id,
-                    "size": members.len(),
-                    "members": members
+            let community_json: Vec<Value> = communities
+                .iter()
+                .map(|(id, members)| {
+                    serde_json::json!({
+                        "community_id": id,
+                        "size": members.len(),
+                        "members": members
+                    })
                 })
-            }).collect();
+                .collect();
             Ok(serde_json::json!({
                 "metric": "communities",
                 "algorithm": "leiden",
@@ -181,9 +214,12 @@ async fn communities(pool: &PgPool) -> Result<Value> {
             tracing::warn!(error = %e, "Leiden community detection failed, using fallback");
             let components: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT e.entity_type, COUNT(*) FROM brain_entities e \
-                 GROUP BY e.entity_type ORDER BY COUNT(*) DESC"
-            ).fetch_all(pool).await?;
-            let communities: Vec<Value> = components.iter()
+                 GROUP BY e.entity_type ORDER BY COUNT(*) DESC",
+            )
+            .fetch_all(pool)
+            .await?;
+            let communities: Vec<Value> = components
+                .iter()
                 .map(|(t, c)| serde_json::json!({"type": t, "size": c}))
                 .collect();
             Ok(serde_json::json!({
@@ -199,12 +235,15 @@ async fn communities(pool: &PgPool) -> Result<Value> {
 async fn bridges(pool: &PgPool) -> Result<Value> {
     match crate::graph::centrality::compute_bridges(pool, 10).await {
         Ok(ranked) => {
-            let bridge_list: Vec<Value> = ranked.iter().map(|(name, centrality)| {
-                serde_json::json!({
-                    "entity": name,
-                    "centrality": (centrality * 10000.0).round() / 10000.0
+            let bridge_list: Vec<Value> = ranked
+                .iter()
+                .map(|(name, centrality)| {
+                    serde_json::json!({
+                        "entity": name,
+                        "centrality": (centrality * 10000.0).round() / 10000.0
+                    })
                 })
-            }).collect();
+                .collect();
             Ok(serde_json::json!({
                 "metric": "bridges",
                 "algorithm": "brandes_betweenness",
@@ -218,9 +257,12 @@ async fn bridges(pool: &PgPool) -> Result<Value> {
                 "SELECT e.name, COUNT(r.id) as connection_count FROM brain_entities e
                  LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
                  GROUP BY e.name HAVING COUNT(r.id) > 2
-                 ORDER BY connection_count DESC LIMIT 10"
-            ).fetch_all(pool).await?;
-            let bridge_list: Vec<Value> = bridges.iter()
+                 ORDER BY connection_count DESC LIMIT 10",
+            )
+            .fetch_all(pool)
+            .await?;
+            let bridge_list: Vec<Value> = bridges
+                .iter()
                 .map(|(n, c)| serde_json::json!({"entity": n, "connections": c}))
                 .collect();
             Ok(serde_json::json!({
@@ -256,18 +298,16 @@ fn chi2_survival(x: f64, df: f64) -> f64 {
     if x <= 0.0 || df <= 0.0 {
         return 1.0;
     }
-    let z = ((x / df).powf(1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df)))
-        / (2.0 / (9.0 * df)).sqrt();
+    let z = ((x / df).powf(1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / (2.0 / (9.0 * df)).sqrt();
     0.5 * erfc_approx(z / std::f64::consts::SQRT_2)
 }
 
 /// Approximate complementary error function (Abramowitz & Stegun 7.1.26).
 fn erfc_approx(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let poly = t * (0.254829592
-        + t * (-0.284496736
-            + t * (1.421413741
-                + t * (-1.453152027 + t * 1.061405429))));
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let result = poly * (-x * x).exp();
     if x >= 0.0 { result } else { 2.0 - result }
 }
