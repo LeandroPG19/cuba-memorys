@@ -21,10 +21,7 @@ async fn main() {
         )
         .init();
 
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "cuba-memorys starting"
-    );
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
 
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {

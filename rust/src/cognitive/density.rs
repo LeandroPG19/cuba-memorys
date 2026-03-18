@@ -70,6 +70,9 @@ mod tests {
     fn test_density_mixed() {
         // Non-uniform distribution: "fast" appears 5x, rest 1x each → skewed entropy
         let d = information_density("fast fast fast fast fast safe modern language");
-        assert!(d > 0.3 && d < 0.9, "skewed distribution should be medium: got {d}");
+        assert!(
+            d > 0.3 && d < 0.9,
+            "skewed distribution should be medium: got {d}"
+        );
     }
 }

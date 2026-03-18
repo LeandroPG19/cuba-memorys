@@ -51,10 +51,13 @@ impl<V: Clone> TtlLruCache<V> {
 
     /// Insert value into cache.
     pub fn put(&mut self, key: String, value: V) {
-        self.inner.put(key, CacheEntry {
-            value,
-            inserted_at: Instant::now(),
-        });
+        self.inner.put(
+            key,
+            CacheEntry {
+                value,
+                inserted_at: Instant::now(),
+            },
+        );
     }
 
     /// Get cache statistics.
@@ -69,7 +72,9 @@ impl<V: Clone> TtlLruCache<V> {
 
     /// Evict expired entries proactively.
     pub fn evict_expired(&mut self) {
-        let keys_to_remove: Vec<String> = self.inner.iter()
+        let keys_to_remove: Vec<String> = self
+            .inner
+            .iter()
             .filter(|(_, entry)| entry.inserted_at.elapsed() >= self.ttl)
             .map(|(key, _)| key.clone())
             .collect();

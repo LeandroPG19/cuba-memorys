@@ -24,14 +24,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("query is required");
     }
 
-    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("hybrid");
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hybrid");
     let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
-    let limit = args.get("limit")
+    let limit = args
+        .get("limit")
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_LIMIT)
         .min(MAX_LIMIT);
 
-    let max_tokens = args.get("max_tokens")
+    let max_tokens = args
+        .get("max_tokens")
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
@@ -43,7 +48,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
-async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_tokens: i64) -> Result<Value> {
+async fn hybrid_search(
+    pool: &PgPool,
+    query: &str,
+    scope: &str,
+    limit: i64,
+    max_tokens: i64,
+) -> Result<Value> {
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = compute_query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
@@ -62,7 +73,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
 
     // Add text results with RRF rank score
     for (rank, result) in text_results.iter().enumerate() {
-        let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = result
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let rrf_score = text_weight / (rrf_k + rank as f64 + 1.0);
         fused_scores.insert(id, (rrf_score, result.clone()));
     }
@@ -70,7 +85,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     // Add vector results (V8: only if available)
     if let Ok(vec_results) = vector_results {
         for (rank, result) in vec_results.iter().enumerate() {
-            let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = result
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let rrf_score = vector_weight / (rrf_k + rank as f64 + 1.0);
             fused_scores
                 .entry(id.clone())
@@ -88,17 +107,20 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     results.truncate(limit as usize);
 
     // VF2: Testing Effect — boost retrieval_strength on matched observations
-    let matched_obs_ids: Vec<uuid::Uuid> = results.iter()
+    let matched_obs_ids: Vec<uuid::Uuid> = results
+        .iter()
         .filter_map(|(_, _, r)| {
-            r.get("id").and_then(|v| v.as_str())
+            r.get("id")
+                .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<uuid::Uuid>().ok())
         })
         .collect();
 
     if !matched_obs_ids.is_empty()
-        && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await {
-            tracing::warn!(error = %e, "failed to apply Testing Effect boost");
-        }
+        && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await
+    {
+        tracing::warn!(error = %e, "failed to apply Testing Effect boost");
+    }
 
     // Session awareness: check active session and boost matching results
     let session_boost = get_session_goals(pool).await.unwrap_or_default();
@@ -135,17 +157,21 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
 
     // FIX R-005: Check budget BEFORE subtraction to prevent i64 underflow
     let mut token_budget = max_tokens;
-    results_json = results_json.into_iter().take_while(|r| {
-        let content_len = r.get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.len() as i64 / 4)
-            .unwrap_or(20);
-        if token_budget < content_len {
-            return false;
-        }
-        token_budget -= content_len;
-        true
-    }).collect();
+    results_json = results_json
+        .into_iter()
+        .take_while(|r| {
+            let content_len = r
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len() as i64 / 4)
+                .unwrap_or(20);
+            if token_budget < content_len {
+                return false;
+            }
+            token_budget -= content_len;
+            true
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "mode": "hybrid",
@@ -172,7 +198,7 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
          WHERE similarity(content, $1) > 0.3
            AND observation_type != 'superseded'
          ORDER BY sim DESC
-         LIMIT 10"
+         LIMIT 10",
     )
     .bind(claim)
     .fetch_all(pool)
@@ -253,7 +279,8 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
                     "score": score
                 })
             },
-        ).await?;
+        )
+        .await?;
         results.extend(entities);
     }
 
@@ -283,7 +310,8 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
                     "score": score
                 })
             },
-        ).await?;
+        )
+        .await?;
         results.extend(observations);
     }
 
@@ -310,7 +338,8 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
                     "score": score
                 })
             },
-        ).await?;
+        )
+        .await?;
         results.extend(errors);
     }
 
@@ -341,7 +370,7 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
          WHERE o.embedding IS NOT NULL
            AND o.observation_type != 'superseded'
          ORDER BY o.embedding <=> $1::vector
-         LIMIT $2"
+         LIMIT $2",
     )
     .bind(pgvector::Vector::from(embedding))
     .bind(limit)
@@ -410,7 +439,7 @@ fn compute_query_entropy(query: &str) -> f64 {
 /// Get active session goals for session-aware boosting.
 async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
@@ -428,15 +457,12 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
 /// For each top result that has an entity name, we query its related entities
 /// to provide graph context. This helps the AI understand the broader
 /// knowledge structure around search matches.
-async fn enrich_graphrag(
-    pool: &PgPool,
-    results: &[(String, f64, Value)],
-    top_k: usize,
-) -> Value {
+async fn enrich_graphrag(pool: &PgPool, results: &[(String, f64, Value)], top_k: usize) -> Value {
     let mut context: Vec<Value> = Vec::new();
 
     for (_, _, result) in results.iter().take(top_k) {
-        let entity_name = result.get("entity_name")
+        let entity_name = result
+            .get("entity_name")
             .or_else(|| result.get("name"))
             .and_then(|v| v.as_str());
 

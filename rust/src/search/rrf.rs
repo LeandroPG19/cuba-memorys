@@ -57,7 +57,9 @@ pub fn fuse(
         for (rank, result) in results.iter().enumerate() {
             let rrf_score = weight / (RRF_K + rank as f64 + 1.0);
             *scores.entry(result.id.clone()).or_default() += rrf_score;
-            items.entry(result.id.clone()).or_insert_with(|| result.clone());
+            items
+                .entry(result.id.clone())
+                .or_insert_with(|| result.clone());
         }
     }
 
@@ -73,9 +75,9 @@ pub fn fuse(
     let mut unique: Vec<RankedResult> = Vec::new();
     for (id, score) in sorted {
         if let Some(mut item) = items.remove(&id) {
-            let is_dup = unique.iter().any(|existing| {
-                text_overlap(&item.content, &existing.content) > dedup_threshold
-            });
+            let is_dup = unique
+                .iter()
+                .any(|existing| text_overlap(&item.content, &existing.content) > dedup_threshold);
             if !is_dup {
                 item.score = score;
                 unique.push(item);
@@ -113,7 +115,10 @@ mod tests {
     #[test]
     fn test_query_entropy_repetitive() {
         let e = query_entropy("hello hello hello");
-        assert!(e < 0.01, "repetitive query should have near-zero entropy: got {e}");
+        assert!(
+            e < 0.01,
+            "repetitive query should have near-zero entropy: got {e}"
+        );
     }
 
     #[test]
@@ -129,12 +134,32 @@ mod tests {
     #[test]
     fn test_rrf_fusion_basic() {
         let signal1 = vec![
-            RankedResult { id: "a".into(), content: "alpha".into(), score: 0.0, source: "text".into() },
-            RankedResult { id: "b".into(), content: "beta".into(), score: 0.0, source: "text".into() },
+            RankedResult {
+                id: "a".into(),
+                content: "alpha".into(),
+                score: 0.0,
+                source: "text".into(),
+            },
+            RankedResult {
+                id: "b".into(),
+                content: "beta".into(),
+                score: 0.0,
+                source: "text".into(),
+            },
         ];
         let signal2 = vec![
-            RankedResult { id: "b".into(), content: "beta".into(), score: 0.0, source: "vec".into() },
-            RankedResult { id: "c".into(), content: "gamma".into(), score: 0.0, source: "vec".into() },
+            RankedResult {
+                id: "b".into(),
+                content: "beta".into(),
+                score: 0.0,
+                source: "vec".into(),
+            },
+            RankedResult {
+                id: "c".into(),
+                content: "gamma".into(),
+                score: 0.0,
+                source: "vec".into(),
+            },
         ];
 
         let fused = fuse(&[(signal1, 0.5), (signal2, 0.5)], 0.75);
@@ -146,16 +171,21 @@ mod tests {
     #[test]
     fn test_rrf_k60_deterministic() {
         // V4: k=60 always, deterministic scores
-        let signal = vec![
-            RankedResult { id: "a".into(), content: "alpha".into(), score: 0.0, source: "text".into() },
-        ];
+        let signal = vec![RankedResult {
+            id: "a".into(),
+            content: "alpha".into(),
+            score: 0.0,
+            source: "text".into(),
+        }];
 
         let fused = fuse(&[(signal, 1.0)], 0.75);
         // Score should be exactly 1.0 / (60.0 + 0 + 1.0) = 1/61
         let expected = 1.0 / 61.0;
         assert!(
             (fused[0].score - expected).abs() < 1e-10,
-            "k=60 fixed: expected {} got {}", expected, fused[0].score
+            "k=60 fixed: expected {} got {}",
+            expected,
+            fused[0].score
         );
     }
 }

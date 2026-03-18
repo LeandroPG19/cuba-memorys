@@ -74,10 +74,7 @@ pub fn update_stability(
     let s = current_stability.max(0.01);
 
     match rating {
-        0 => {
-            w[11] * d.powf(-w[12]) * ((s + 1.0).powf(w[13]) - 1.0)
-                * (w[14] * (1.0 - r)).exp()
-        }
+        0 => w[11] * d.powf(-w[12]) * ((s + 1.0).powf(w[13]) - 1.0) * (w[14] * (1.0 - r)).exp(),
         _ => {
             let rating_bonus = match rating {
                 1 => w[15],
@@ -182,14 +179,20 @@ mod tests {
     fn test_retrievability_custom_decay_slow() {
         let r_slow = retrievability_with_decay(1.0, 10.0, 0.1);
         let r_default = retrievability(1.0, 10.0);
-        assert!(r_slow > r_default, "slow decay should retain more: {r_slow} vs {r_default}");
+        assert!(
+            r_slow > r_default,
+            "slow decay should retain more: {r_slow} vs {r_default}"
+        );
     }
 
     #[test]
     fn test_retrievability_custom_decay_fast() {
         let r_fast = retrievability_with_decay(1.0, 10.0, 0.8);
         let r_default = retrievability(1.0, 10.0);
-        assert!(r_fast < r_default, "fast decay should retain less: {r_fast} vs {r_default}");
+        assert!(
+            r_fast < r_default,
+            "fast decay should retain less: {r_fast} vs {r_default}"
+        );
     }
 
     #[test]
@@ -208,7 +211,10 @@ mod tests {
     fn test_adaptive_decay_rate_bounds() {
         for count in [0, 1, 5, 10, 30, 50, 100, 500, 1000] {
             let rate = adaptive_decay_rate(count);
-            assert!((0.1..=0.8).contains(&rate), "out of bounds at count={count}: {rate}");
+            assert!(
+                (0.1..=0.8).contains(&rate),
+                "out of bounds at count={count}: {rate}"
+            );
         }
     }
 
@@ -221,7 +227,10 @@ mod tests {
     #[test]
     fn test_update_stability_forget() {
         let new_s = update_stability(10.0, 5.0, 0.3, 0);
-        assert!(new_s < 10.0, "stability should decrease on forget, got {new_s}");
+        assert!(
+            new_s < 10.0,
+            "stability should decrease on forget, got {new_s}"
+        );
         assert!(new_s > 0.0, "stability should remain positive");
     }
 
@@ -238,7 +247,10 @@ mod tests {
         // High PageRank → stability multiplied up
         let base_s = 10.0;
         let s_hub = apply_topological_inertia(base_s, 0.5);
-        assert!(s_hub > base_s, "hub should have higher stability: {s_hub} vs {base_s}");
+        assert!(
+            s_hub > base_s,
+            "hub should have higher stability: {s_hub} vs {base_s}"
+        );
     }
 
     #[test]
@@ -257,7 +269,10 @@ mod tests {
         // PageRank=0 → ln(1+0) = 0 → no boost
         let base_s = 10.0;
         let s = apply_topological_inertia(base_s, 0.0);
-        assert!((s - base_s).abs() < 1e-10, "zero PR should have no boost: {s}");
+        assert!(
+            (s - base_s).abs() < 1e-10,
+            "zero PR should have no boost: {s}"
+        );
     }
 
     #[test]

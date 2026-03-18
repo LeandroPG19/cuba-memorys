@@ -161,7 +161,10 @@ mod tests {
     fn test_sac_parameters_calibrated() {
         // V3: α=0.5, β=0.5: at SS=0, RS=0 → ΔSS = 0.5 * 1.0 * e^0 = 0.5
         let s = increment_storage(0.0, 0.0);
-        assert!((s - 0.5).abs() < 0.001, "SS=0,RS=0 → ΔSS should be α: got {s}");
+        assert!(
+            (s - 0.5).abs() < 0.001,
+            "SS=0,RS=0 → ΔSS should be α: got {s}"
+        );
 
         // At SS=0, RS=1 → ΔSS = 0.5 * 1.0 * e^(-0.5) ≈ 0.5 * 0.6065 ≈ 0.303
         let s = increment_storage(0.0, 1.0);

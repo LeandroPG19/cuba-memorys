@@ -16,10 +16,10 @@ fn fmt_duration(d: std::time::Duration) -> String {
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::var("DATABASE_URL")
-        .expect("Set DATABASE_URL to run benchmarks");
+    let url = std::env::var("DATABASE_URL").expect("Set DATABASE_URL to run benchmarks");
 
-    let pool = cuba_memorys::db::create_pool(&url).await
+    let pool = cuba_memorys::db::create_pool(&url)
+        .await
         .expect("Failed to connect");
 
     println!("\n  ═══ cuba-memorys Rust Benchmark ═══\n");
@@ -57,32 +57,44 @@ async fn main() {
         for i in 0..iterations {
             let name = format!("bench_alma_{i}_{}", uuid::Uuid::new_v4());
             let _ = cuba_memorys::handlers::dispatch(
-                &pool, "cuba_alma",
+                &pool,
+                "cuba_alma",
                 serde_json::json!({"action": "create", "name": &name, "entity_type": "concept"}),
-            ).await;
+            )
+            .await;
         }
         let elapsed = start.elapsed();
-        println!("  alma::create    {:>8} /call  ({iterations} calls)", fmt_duration(elapsed / iterations));
+        println!(
+            "  alma::create    {:>8} /call  ({iterations} calls)",
+            fmt_duration(elapsed / iterations)
+        );
     }
 
     // ── 3. alma::get ──────────────────────────────────────────────
     {
         let name = format!("bench_get_{}", uuid::Uuid::new_v4());
         let _ = cuba_memorys::handlers::dispatch(
-            &pool, "cuba_alma",
+            &pool,
+            "cuba_alma",
             serde_json::json!({"action": "create", "name": &name, "entity_type": "concept"}),
-        ).await;
+        )
+        .await;
 
         let iterations = 100;
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = cuba_memorys::handlers::dispatch(
-                &pool, "cuba_alma",
+                &pool,
+                "cuba_alma",
                 serde_json::json!({"action": "get", "name": &name}),
-            ).await;
+            )
+            .await;
         }
         let elapsed = start.elapsed();
-        println!("  alma::get       {:>8} /call  ({iterations} calls)", fmt_duration(elapsed / iterations));
+        println!(
+            "  alma::get       {:>8} /call  ({iterations} calls)",
+            fmt_duration(elapsed / iterations)
+        );
     }
 
     // ── 4. cronica::add ───────────────────────────────────────────
@@ -92,7 +104,8 @@ async fn main() {
         let start = Instant::now();
         for i in 0..iterations {
             let _ = cuba_memorys::handlers::dispatch(
-                &pool, "cuba_cronica",
+                &pool,
+                "cuba_cronica",
                 serde_json::json!({
                     "action": "add",
                     "entity_name": &name,
@@ -100,10 +113,14 @@ async fn main() {
                     "observation_type": "fact",
                     "source": "agent"
                 }),
-            ).await;
+            )
+            .await;
         }
         let elapsed = start.elapsed();
-        println!("  cronica::add    {:>8} /call  ({iterations} calls)", fmt_duration(elapsed / iterations));
+        println!(
+            "  cronica::add    {:>8} /call  ({iterations} calls)",
+            fmt_duration(elapsed / iterations)
+        );
     }
 
     // ── 5. faro::search (hybrid) ──────────────────────────────────
@@ -117,7 +134,10 @@ async fn main() {
             ).await;
         }
         let elapsed = start.elapsed();
-        println!("  faro::search    {:>8} /call  ({iterations} calls)", fmt_duration(elapsed / iterations));
+        println!(
+            "  faro::search    {:>8} /call  ({iterations} calls)",
+            fmt_duration(elapsed / iterations)
+        );
     }
 
     // ── 6. vigia::summary ─────────────────────────────────────────
@@ -126,12 +146,17 @@ async fn main() {
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = cuba_memorys::handlers::dispatch(
-                &pool, "cuba_vigia",
+                &pool,
+                "cuba_vigia",
                 serde_json::json!({"metric": "summary"}),
-            ).await;
+            )
+            .await;
         }
         let elapsed = start.elapsed();
-        println!("  vigia::summary  {:>8} /call  ({iterations} calls)", fmt_duration(elapsed / iterations));
+        println!(
+            "  vigia::summary  {:>8} /call  ({iterations} calls)",
+            fmt_duration(elapsed / iterations)
+        );
     }
 
     println!("\n  ═══ Benchmark Complete ═══\n");

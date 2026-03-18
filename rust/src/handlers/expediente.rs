@@ -39,7 +39,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ErrorRow {
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let project = args.get("project").and_then(|v| v.as_str());
-    let resolved_only = args.get("resolved_only").and_then(|v| v.as_bool()).unwrap_or(false);
+    let resolved_only = args
+        .get("resolved_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let proposed_action = args.get("proposed_action").and_then(|v| v.as_str());
 
     if query.is_empty() {
@@ -103,34 +106,39 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     };
 
     // FIX A-002: safe_truncate prevents panic on multi-byte UTF-8
-    let results: Vec<Value> = errors.iter().map(|row| {
-        serde_json::json!({
-            "id": row.id.to_string(),
-            "error_type": row.error_type,
-            "error_message": safe_truncate(&row.error_message, 200),
-            "solution": row.solution,
-            "resolved": row.resolved,
-            "project": row.project,
-            "similarity": row.sim
+    let results: Vec<Value> = errors
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "id": row.id.to_string(),
+                "error_type": row.error_type,
+                "error_message": safe_truncate(&row.error_message, 200),
+                "solution": row.solution,
+                "resolved": row.resolved,
+                "project": row.project,
+                "similarity": row.sim
+            })
         })
-    }).collect();
+        .collect();
 
     // Anti-repetition guard
-    let mut response = serde_json::json!({"query": query, "results": results, "count": results.len()});
+    let mut response =
+        serde_json::json!({"query": query, "results": results, "count": results.len()});
 
     if let Some(action) = proposed_action {
         let failed_similar: Vec<(String,)> = sqlx::query_as(
             "SELECT error_message FROM brain_errors
-             WHERE resolved = false AND similarity(solution, $1) > 0.5 LIMIT 3"
+             WHERE resolved = false AND similarity(solution, $1) > 0.5 LIMIT 3",
         )
         .bind(action)
         .fetch_all(pool)
         .await?;
 
         if !failed_similar.is_empty() {
-            response["anti_repetition_warning"] = serde_json::json!(
-                format!("⚠️ Similar approach failed {} time(s) before", failed_similar.len())
-            );
+            response["anti_repetition_warning"] = serde_json::json!(format!(
+                "⚠️ Similar approach failed {} time(s) before",
+                failed_similar.len()
+            ));
         }
     }
 
