@@ -4,10 +4,16 @@
 # Uses the same credentials as postgres_mcp_launcher.sh
 set -euo pipefail
 
-DB_USER="usuario"
-DB_PASS="contraseña"
-DB_HOST="${1:-localhost}"
-DB_PORT="${2:-6433}"
+DB_USER="${DB_USER:-usuario}"
+DB_PASS="${DB_PASS:-}"
+DB_HOST="${1:-${DB_HOST:-localhost}}"
+DB_PORT="${2:-${DB_PORT:-6433}}"
+
+if [[ -z "$DB_PASS" ]]; then
+  echo "❌ Error: DB_PASS environment variable is not set."
+  echo "Usage: DB_PASS=yourpassword $0 [host] [port]"
+  exit 1
+fi
 
 echo "🧠 Creating 'brain' database on ${DB_HOST}:${DB_PORT}..."
 
