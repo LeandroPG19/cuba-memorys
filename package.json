@@ -1,0 +1,37 @@
+{
+  "name": "cuba-memorys",
+  "version": "0.3.0",
+  "mcpName": "io.github.LeandroPG19/cuba-memorys",
+  "description": "Persistent memory for AI agents — knowledge graph MCP server with Hebbian learning, RRF fusion search, GraphRAG, and anti-hallucination grounding. 13 tools, PostgreSQL, sub-millisecond handlers.",
+  "license": "CC-BY-NC-4.0",
+  "author": "Leandro Pérez G.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeandroPG19/cuba-memorys.git"
+  },
+  "homepage": "https://github.com/LeandroPG19/cuba-memorys#readme",
+  "bugs": {
+    "url": "https://github.com/LeandroPG19/cuba-memorys/issues"
+  },
+  "keywords": [
+    "mcp",
+    "memory",
+    "knowledge-graph",
+    "ai-agent",
+    "model-context-protocol",
+    "hebbian",
+    "anti-hallucination",
+    "pagerank",
+    "postgresql",
+    "rust"
+  ],
+  "scripts": {
+    "postinstall": "node npm/postinstall.js"
+  },
+  "bin": {
+    "cuba-memorys": "npm/bin.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

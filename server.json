@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.LeandroPG19/cuba-memorys",
+  "description": "Persistent memory for AI agents. Knowledge graph, Hebbian learning, RRF search, GraphRAG.",
+  "repository": {
+    "url": "https://github.com/LeandroPG19/cuba-memorys",
+    "source": "github"
+  },
+  "version": "0.3.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "cuba-memorys",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "PostgreSQL connection URL (e.g. postgresql://user:pass@localhost:5432/brain)",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "cuba-memorys",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "PostgreSQL connection URL (e.g. postgresql://user:pass@localhost:5432/brain)",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

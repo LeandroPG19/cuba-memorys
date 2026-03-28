@@ -1,0 +1,185 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create GitHub Release + upload assets
+  id-token: write   # PyPI trusted publishing (OIDC)
+
+# ── 1. Build native binaries ─────────────────────────────────────────────────
+jobs:
+  build-binaries:
+    name: Binary — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: cuba-memorys-linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: cuba-memorys-linux-arm64
+            use_cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: cuba-memorys-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: cuba-memorys-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: cuba-memorys-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --quiet
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build (cargo)
+        if: "!matrix.use_cross"
+        working-directory: rust
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        working-directory: rust
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Stage artifact (Unix)
+        if: runner.os != 'Windows'
+        run: cp rust/target/${{ matrix.target }}/release/cuba-memorys ${{ matrix.artifact }}
+
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
+        run: cp rust/target/${{ matrix.target }}/release/cuba-memorys.exe ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+# ── 2. Create GitHub Release ─────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifacts
+        run: find dist/ -maxdepth 2 -type f -exec mv {} dist/ \;
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: cuba-memorys ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
+
+# ── 3. PyPI — maturin wheels ──────────────────────────────────────────────────
+  publish-pypi:
+    name: PyPI (${{ matrix.target }})
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: auto
+          - os: macos-latest
+            target: universal2-apple-darwin
+            manylinux: ""
+          - os: windows-latest
+            target: x86_64
+            manylinux: ""
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cuba-memorys/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and publish (maturin-action)
+        uses: PyO3/maturin-action@v1
+        with:
+          command: publish
+          args: --no-sdist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+
+# ── 4. npm publish ─────────────────────────────────────────────────────────────
+  publish-npm:
+    name: npm
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/cuba-memorys
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          CUBA_MEMORYS_SKIP_INSTALL: "1"
+
+# ── 5. MCP Registry ────────────────────────────────────────────────────────────
+  publish-mcp-registry:
+    name: MCP Registry
+    needs: [publish-pypi, publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL \
+            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/
+
+      - name: Publish to MCP Registry
+        run: mcp-publisher publish
+        env:
+          MCP_REGISTRY_TOKEN: ${{ secrets.MCP_REGISTRY_TOKEN }}

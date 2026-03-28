@@ -1,107 +1,36 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "cuba-memorys"
-version = "1.6.0"
-description = "Knowledge graph MCP with Hebbian learning, FSRS spaced repetition, RRF search fusion, PageRank, contradiction detection, and anti-hallucination grounding. PostgreSQL backend. Created by Leandro Pérez G."
-requires-python = ">=3.14"
-dependencies = [
-    "asyncpg>=0.30.0",
-    "orjson>=3.10.0",
-    "scikit-learn>=1.4.0",
-    "networkx>=3.2",
-    "scipy>=1.12.0",
-    "rapidfuzz>=3.6.0",
-    "numpy>=1.26.0",
-]
-license = {text = "CC-BY-NC-4.0"}
+version = "0.3.0"
+description = "Persistent memory for AI agents — knowledge graph MCP server with Hebbian learning, RRF fusion search, GraphRAG, and anti-hallucination grounding. 13 tools, PostgreSQL, sub-millisecond handlers."
 readme = "README.md"
-keywords = ["mcp", "memory", "knowledge-graph", "hebbian", "ai-agent", "anti-hallucination", "pagerank"]
-
-[project.optional-dependencies]
-embeddings = [
-    "onnxruntime>=1.17.0",
-    "huggingface-hub>=0.20.0",
-    "tokenizers>=0.15.0",
+license = { text = "CC-BY-NC-4.0" }
+requires-python = ">=3.9"
+keywords = [
+    "mcp",
+    "memory",
+    "knowledge-graph",
+    "hebbian",
+    "ai-agent",
+    "anti-hallucination",
+    "pagerank",
+    "model-context-protocol",
 ]
-dev = [
-    "ruff>=0.9.0",
-    "mypy>=1.14.0",
-    "bandit>=1.8.0",
-    "vulture>=2.14",
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "pre-commit>=4.0.0",
-]
-
-[project.scripts]
-cuba-memorys = "cuba_memorys.__main__:main"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/cuba_memorys"]
-
-# ── Ruff ────────────────────────────────────────────────────────────
-[tool.ruff]
-target-version = "py314"
-line-length = 100
-src = ["src"]
-
-[tool.ruff.lint]
-select = [
-    "E",     # pycodestyle errors
-    "W",     # pycodestyle warnings
-    "F",     # pyflakes
-    "I",     # isort
-    "N",     # pep8-naming
-    "UP",    # pyupgrade
-    "B",     # flake8-bugbear
-    "A",     # flake8-builtins
-    "C4",    # flake8-comprehensions
-    "SIM",   # flake8-simplify
-    "RET",   # flake8-return
-    "PIE",   # flake8-pie
-    "T20",   # flake8-print
-    "C90",   # mccabe complexity
-    "ASYNC", # flake8-async
-    "S",     # flake8-bandit (security)
-]
-ignore = [
-    "S608",  # SQL injection — SQL is parameterized via asyncpg $1 bindings
-    "S101",  # assert — used in tests
-    "E501",  # line too long — handled by formatter
+classifiers = [
+    "Programming Language :: Rust",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: Other/Proprietary License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
 ]
 
-[tool.ruff.lint.mccabe]
-max-complexity = 10
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S106"]
-
-# ── Mypy ────────────────────────────────────────────────────────────
-[tool.mypy]
-python_version = "3.14"
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = [
-    "networkx.*", "rapidfuzz.*", "scipy.*",
-    "orjson.*", "asyncpg.*", "sklearn.*",
-    "onnxruntime.*", "huggingface_hub.*", "tokenizers.*",
-]
-ignore_missing_imports = true
-
-# ── Vulture ─────────────────────────────────────────────────────────
-[tool.vulture]
-min_confidence = 80
-paths = ["src/cuba_memorys"]
-exclude = ["tests/"]
-
-# ── Pytest ──────────────────────────────────────────────────────────
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
+[tool.maturin]
+bindings = "bin"
+manifest-path = "rust/Cargo.toml"
+strip = true
