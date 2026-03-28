@@ -16,6 +16,12 @@
 > [!IMPORTANT]
 > **v0.3.0** — Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, zero tech debt. 51 tests, 0 clippy warnings, audited GO.
 
+## Demo
+
+<p align="center">
+  <img src="assets/demo.gif" alt="Cuba-Memorys MCP demo — AI agent session with knowledge graph, hybrid search, and graph analytics" width="700" />
+</p>
+
 ---
 
 ## Why Cuba-Memorys?
