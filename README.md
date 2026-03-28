@@ -2,11 +2,12 @@
 # Cuba-Memorys
 
 [![CI](https://github.com/LeandroPG19/cuba-memorys/actions/workflows/ci.yml/badge.svg)](https://github.com/LeandroPG19/cuba-memorys/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/cuba-memorys?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/cuba-memorys/)
+[![npm](https://img.shields.io/npm/v/cuba-memorys?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/cuba-memorys)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-published-8A2BE2?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyQzYuNDggMiAyIDYuNDggMiAxMnM0LjQ4IDEwIDEwIDEwIDEwLTQuNDggMTAtMTBTMTcuNTIgMiAxMiAyem0tMiAxNWwtNS01IDEuNDEtMS40MUwxMCAxNC4xN2w3LjU5LTcuNTlMMTkgOGwtOSA5eiIvPjwvc3ZnPg==)](https://registry.modelcontextprotocol.io)
 [![Rust](https://img.shields.io/badge/rust-1.93+-orange?logo=rust&logoColor=white)](https://rust-lang.org)
-[![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/LeandroPG19/cuba-memorys/releases/tag/v0.3.0)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
-[![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Audit](https://img.shields.io/badge/audit-GO-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
 [![Tech Debt](https://img.shields.io/badge/tech%20debt-0-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
 
@@ -64,27 +65,67 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 
 ---
 
-## Quick Start
+## Installation
+
+### PyPI (recommended)
+
+```bash
+pip install cuba-memorys
+```
+
+### npm
+
+```bash
+npm install -g cuba-memorys
+```
+
+### From source
 
 ```bash
 git clone https://github.com/LeandroPG19/cuba-memorys.git
-cd cuba-memorys
-
-# Start PostgreSQL
-docker compose up -d
-
-# Build Rust binary
-cd rust
+cd cuba-memorys/rust
 cargo build --release
 ```
 
-Configure your AI editor (Claude Code, Cursor, Windsurf, etc.):
+### Binary download
+
+Pre-built binaries available at [GitHub Releases](https://github.com/LeandroPG19/cuba-memorys/releases).
+
+---
+
+## Quick Start
+
+**1. Start PostgreSQL** (if you don't have one running):
+
+```bash
+docker compose up -d
+```
+
+**2. Configure your AI editor** (Claude Code, Cursor, Windsurf, etc.):
+
+<details>
+<summary><b>Claude Code</b></summary>
+
+```bash
+claude mcp add cuba-memorys -- cuba-memorys
+```
+Set the environment variable:
+```bash
+export DATABASE_URL="postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
+```
+
+</details>
+
+<details>
+<summary><b>Cursor / Windsurf / VS Code</b></summary>
+
+Add to your MCP config (`.cursor/mcp.json`, `.windsurf/mcp.json`, or `.vscode/mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "cuba-memorys": {
-      "command": "/path/to/cuba-memorys/rust/target/release/cuba-memorys",
+      "command": "cuba-memorys",
       "env": {
         "DATABASE_URL": "postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
       }
@@ -92,6 +133,8 @@ Configure your AI editor (Claude Code, Cursor, Windsurf, etc.):
   }
 }
 ```
+
+</details>
 
 The server auto-creates the `brain` database and all tables on first run.
 
@@ -172,7 +215,7 @@ cuba-memorys/
 │   ├── scripts/
 │   │   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
 │   └── tests/
-└── src/cuba_memorys/            # Python legacy (v1.6.0)
+└── server.json                  # MCP Registry manifest
 ```
 
 ### Performance: Rust vs Python
