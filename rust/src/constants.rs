@@ -6,22 +6,6 @@ use serde_json::Value;
 
 // ── Thresholds ───────────────────────────────────────────────────
 
-/// Default FSRS-6 parameters (Ye 2024) — 21 parameters.
-pub const FSRS6_DEFAULT_PARAMS: [f64; 21] = [
-    0.40255, 1.18385, 3.173, 15.69105,   // w[0..3]: initial stability
-    7.1949,  0.5345,  1.4604, 0.0046,     // w[4..7]: difficulty
-    1.54575, 0.1192,  1.01925, 1.9395,    // w[8..11]: recall
-    0.11,    0.29605, 2.2698, 0.2315,     // w[12..15]: forget
-    2.9898,  0.51655, 0.6621,             // w[16..18]: review
-    0.0,     0.0,                          // w[19..20]: reserved
-];
-
-/// Factor for desired retention → retrievability threshold.
-pub const DESIRED_RETENTION: f64 = 0.9;
-
-/// Decay threshold — observations below this retrievability are eligible.
-pub const DECAY_THRESHOLD: f64 = 0.3;
-
 /// Deduplication similarity threshold (cosine similarity).
 pub const DEDUP_THRESHOLD: f64 = 0.85;
 
@@ -36,32 +20,12 @@ pub const PRED_ERROR_UPDATE: f64 = 0.75;     // Somewhat similar → update exis
 pub const CACHE_MAX_ENTRIES: usize = 256;
 pub const CACHE_TTL_SECS: u64 = 300;
 
-/// Community summary cap (V9).
-pub const COMMUNITY_SUMMARY_CAP: usize = 30;
-
 /// Hebbian boost constants.
 pub const HEBBIAN_ACCESS_BOOST: f64 = 0.01;
-pub const HEBBIAN_SEARCH_BOOST: f64 = 0.02; // VF2: Testing Effect
-pub const HEBBIAN_OJA_RATE: f64 = 0.05;      // Oja's learning rate
-pub const HEBBIAN_MAX_IMPORTANCE: f64 = 1.0;
 
 /// BCM Metaplasticity (Bienenstock-Cooper-Munro, 1982).
 /// Throttle scale: how aggressively to reduce boost (0.0=off, 1.0=max throttle).
 pub const BCM_THROTTLE_SCALE: f64 = 0.8;
-/// High activity threshold: access_count above this triggers significant throttling.
-pub const BCM_HIGH_ACTIVITY_THRESHOLD: f64 = 50.0;
-
-/// Dual-Strength constants (VF1 — Bjork 1992).
-pub const STORAGE_STRENGTH_INCREMENT: f64 = 0.1;
-pub const RETRIEVAL_DECAY_FACTOR: f64 = 0.95;
-pub const RETRIEVAL_SEARCH_BOOST: f64 = 0.05; // VF2: Testing Effect
-
-/// FSRS-6 w20: Default decay rate (Expertium 2025).
-/// Range [0.1, 0.8]. Adaptive per-entity via sigmoid(access_count).
-pub const DEFAULT_DECAY_RATE: f64 = 0.5;
-
-// RRF k=60 constant moved to search/rrf.rs and handlers/faro.rs (V4)
-// Adaptive RRF_K_MIN/MAX removed per Gemini Deep Research audit 2026-03-14.
 
 /// Relation types.
 pub const VALID_RELATION_TYPES: &[&str] = &[
@@ -202,10 +166,10 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["metric"]
         })),
-        tool_def("cuba_zafra", "Memory maintenance: decay (FSRS adaptive), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats.", serde_json::json!({
+        tool_def("cuba_zafra", "Memory maintenance: decay (exponential, halflife=30d), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats.", serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export", "backfill"], "description": "Consolidation action"},
+                "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export"], "description": "Consolidation action"},
                 "entity_name": {"type": "string", "description": "Entity to summarize (for summarize action)"},
                 "compressed_summary": {"type": "string", "description": "Compressed text replacing observations (for summarize)"},
                 "threshold": {"type": "number", "description": "Importance threshold for prune (default 0.1)"},

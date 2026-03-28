@@ -162,7 +162,7 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
     // Hebbian boost on access
     boost_entity_importance(pool, entity_id).await?;
 
-    // Dual-Strength: boost retrieval + storage on access
+    // Update access tracking (last_accessed + access_count)
     dual_strength::on_entity_access(pool, entity_id).await?;
 
     // Get observations (non-superseded)

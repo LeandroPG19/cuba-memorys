@@ -7,6 +7,10 @@
 //! POST-AUDIT FIX: Gemini audit identified COMP-001 (GDPR non-compliance)
 //! because cuba_alma(delete) only cascades via FK to observations + relations,
 //! leaving orphaned references in errors/sessions.
+//!
+//! SEC-002 FIX: Replaced ILIKE '%' || $1 || '%' with POSITION(LOWER($1) IN LOWER(field)) > 0.
+//! ILIKE with wildcards in $1 (e.g., entity_name="%") acted as a wildcard and deleted ALL rows.
+//! POSITION() performs literal substring search with no special characters.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -39,12 +43,14 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     // Use a transaction for atomicity
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
 
-    // 1. Delete errors that mention this entity (by name in context or message)
+    // 1. Delete errors that mention this entity (by name in context or message).
+    // SEC-002: Use POSITION(LOWER($1) IN LOWER(field)) > 0 — literal substring match,
+    // no special characters (unlike ILIKE '%'||$1||'%' where $1='%' matches everything).
     let errors_deleted: (i64,) = sqlx::query_as(
         "WITH deleted AS (
             DELETE FROM brain_errors
-            WHERE error_message ILIKE '%' || $1 || '%'
-               OR context::text ILIKE '%' || $1 || '%'
+            WHERE POSITION(LOWER($1) IN LOWER(error_message)) > 0
+               OR POSITION(LOWER($1) IN LOWER(context::text)) > 0
             RETURNING 1
         ) SELECT COUNT(*) FROM deleted"
     )
@@ -53,13 +59,14 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to delete errors")?;
 
-    // 2. Delete sessions that mention this entity in goals or summary
+    // 2. Delete sessions that mention this entity in goals or summary.
+    // SEC-002: Same POSITION() fix — literal match, no wildcard expansion.
     let sessions_deleted: (i64,) = sqlx::query_as(
         "WITH deleted AS (
             DELETE FROM brain_sessions
-            WHERE goals::text ILIKE '%' || $1 || '%'
-               OR session_name ILIKE '%' || $1 || '%'
-               OR summary ILIKE '%' || $1 || '%'
+            WHERE POSITION(LOWER($1) IN LOWER(goals::text)) > 0
+               OR POSITION(LOWER($1) IN LOWER(session_name)) > 0
+               OR POSITION(LOWER($1) IN LOWER(COALESCE(summary, ''))) > 0
             RETURNING 1
         ) SELECT COUNT(*) FROM deleted"
     )

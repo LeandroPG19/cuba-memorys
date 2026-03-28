@@ -2,8 +2,9 @@
 //!
 //! FIX R-001: safe_truncate() for UTF-8 char boundary safety.
 //! FIX R-002: merge loop wrapped in transaction for atomicity.
+//! V3: decay action now uses exponential decay on importance (replaces FSRS-6).
+//!     importance * EXP(-0.693 * days / halflife) — simple, auditable, effective.
 
-use crate::cognitive::fsrs;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -13,8 +14,29 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     match action {
         "decay" => {
-            let decayed = fsrs::batch_decay(pool, &[]).await?;
-            Ok(serde_json::json!({"action": "decay", "decayed": decayed}))
+            // Exponential decay: importance * EXP(-0.693 * days_since_access / halflife)
+            // halflife default=30 days (importance halves every 30 days of no access).
+            // Protected: decision/lesson obs never decay (too valuable to lose).
+            let halflife = args.get("halflife_days").and_then(|v| v.as_f64()).unwrap_or(30.0);
+            let result = sqlx::query(
+                "UPDATE brain_observations SET
+                    importance = GREATEST(
+                        importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / $1),
+                        0.01
+                    ),
+                    updated_at = NOW()
+                 WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+                   AND last_accessed < NOW() - INTERVAL '1 day'"
+            )
+            .bind(halflife)
+            .execute(pool)
+            .await?;
+            Ok(serde_json::json!({
+                "action": "decay",
+                "decayed": result.rows_affected(),
+                "halflife_days": halflife,
+                "formula": "importance * EXP(-0.693 * days / halflife)"
+            }))
         }
         "prune" => {
             let threshold = args.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.1);
@@ -88,12 +110,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             let entities: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as("SELECT id, name, entity_type, importance FROM brain_entities ORDER BY importance DESC LIMIT 500").fetch_all(pool).await?;
             let ent_json: Vec<Value> = entities.iter().map(|(id, n, t, i)| serde_json::json!({"id": id.to_string(), "name": n, "type": t, "importance": i})).collect();
             Ok(serde_json::json!({"action": "export", "entities": ent_json, "count": ent_json.len()}))
-        }
-        "backfill" => {
-            // Backfill missing Dual-Strength columns with defaults
-            let result = sqlx::query("UPDATE brain_observations SET storage_strength = 0.5, retrieval_strength = 1.0 WHERE storage_strength IS NULL")
-                .execute(pool).await?;
-            Ok(serde_json::json!({"action": "backfill", "updated": result.rows_affected()}))
         }
         _ => anyhow::bail!("Invalid action: {action}"),
     }

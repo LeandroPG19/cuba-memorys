@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-/// Verify all 12 tools are defined in constants.
+/// Verify all 13 tools are defined in constants.
 #[test]
 fn test_all_tools_defined() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
@@ -18,7 +18,7 @@ fn test_all_tools_defined() {
     let expected = [
         "cuba_alma", "cuba_cronica", "cuba_faro", "cuba_puente", "cuba_eco",
         "cuba_alarma", "cuba_remedio", "cuba_expediente", "cuba_jornada",
-        "cuba_decreto", "cuba_vigia", "cuba_zafra",
+        "cuba_decreto", "cuba_vigia", "cuba_zafra", "cuba_forget",
     ];
 
     for name in &expected {
@@ -125,18 +125,15 @@ fn test_threshold_invariants() {
         "DEDUP ({DEDUP_THRESHOLD}) must > UPDATE ({PRED_ERROR_UPDATE})"
     );
     assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
-    assert!(HEBBIAN_MAX_IMPORTANCE <= 1.0);
-    // V4: RRF_K removed from public constants — now k=60 inline in rrf.rs/faro.rs
-    assert_eq!(FSRS6_DEFAULT_PARAMS.len(), 21);
 }
 
-/// Verify handler dispatch maps all 12 tools.
+/// Verify handler dispatch maps all 13 tools.
 #[test]
 fn test_handler_dispatch_coverage() {
     let tool_names = [
         "cuba_alma", "cuba_cronica", "cuba_faro", "cuba_puente", "cuba_eco",
         "cuba_alarma", "cuba_remedio", "cuba_expediente", "cuba_jornada",
-        "cuba_decreto", "cuba_vigia", "cuba_zafra",
+        "cuba_decreto", "cuba_vigia", "cuba_zafra", "cuba_forget",
     ];
 
     for name in &tool_names {
@@ -157,8 +154,8 @@ fn test_schema_sql_content() {
 
     assert!(schema.contains("vector"), "Missing pgvector");
     assert!(schema.contains("pg_trgm"), "Missing pg_trgm");
-    assert!(schema.contains("storage_strength"), "Missing Dual-Strength");
-    assert!(schema.contains("retrieval_strength"), "Missing Dual-Strength");
+    assert!(schema.contains("embedding"), "Missing embedding column");
+    assert!(schema.contains("importance"), "Missing importance column");
 }
 
 /// Verify cognitive module constants are valid.
@@ -166,12 +163,8 @@ fn test_schema_sql_content() {
 fn test_cognitive_constants_valid() {
     use cuba_memorys::constants::*;
 
-    assert!(DESIRED_RETENTION > 0.0 && DESIRED_RETENTION <= 1.0);
-    assert!(STORAGE_STRENGTH_INCREMENT > 0.0);
-    assert!(RETRIEVAL_DECAY_FACTOR > 0.0 && RETRIEVAL_DECAY_FACTOR < 1.0);
-    assert!(RETRIEVAL_SEARCH_BOOST > 0.0);
-    assert!(HEBBIAN_OJA_RATE > 0.0 && HEBBIAN_OJA_RATE < 1.0);
-    assert!(HEBBIAN_SEARCH_BOOST > 0.0);
+    assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 1.0);
+    assert!(BCM_THROTTLE_SCALE > 0.0 && BCM_THROTTLE_SCALE <= 1.0);
 }
 
 /// Verify cache constants.

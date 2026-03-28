@@ -1,7 +1,6 @@
 //! Database abstraction layer — sqlx PgPool + schema init + pgvector.
 //!
 //! FIX V3: Built-in connection retry via sqlx pool options.
-//! FIX B4: Schema init includes Dual-Strength columns.
 
 use anyhow::{Context, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -9,24 +8,8 @@ use sqlx::{ConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
 
-/// Schema SQL embedded at compile time — identical to Python + Dual-Strength cols.
+/// Schema SQL embedded at compile time.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
-
-/// Dual-Strength migration — adds storage_strength + retrieval_strength columns.
-const DUAL_STRENGTH_MIGRATION: &str = r#"
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'brain_observations'
-        AND column_name = 'storage_strength'
-    ) THEN
-        ALTER TABLE brain_observations
-            ADD COLUMN storage_strength FLOAT DEFAULT 0.5,
-            ADD COLUMN retrieval_strength FLOAT DEFAULT 1.0;
-    END IF;
-END $$;
-"#;
 
 /// BCM θ_M EMA migration — adds bcm_theta column for persistent sliding threshold.
 /// V3: Deep Research 2026-03-14.
@@ -83,21 +66,13 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
         .await
         .context("failed to initialize schema")?;
 
-    // FIX R-004: Force UTC timezone for FSRS decay + REM consistency
+    // FIX R-004: Force UTC timezone for exponential decay + REM consistency
     sqlx::query("SET timezone TO 'UTC'")
         .execute(pool)
         .await
         .context("failed to set timezone to UTC")?;
 
     tracing::info!("schema initialized (timezone=UTC)");
-
-    // Apply Dual-Strength migration (idempotent)
-    sqlx::raw_sql(DUAL_STRENGTH_MIGRATION)
-        .execute(pool)
-        .await
-        .context("failed to apply Dual-Strength migration")?;
-
-    tracing::info!("Dual-Strength columns verified");
 
     // Apply BCM theta migration (idempotent) — V3 Deep Research
     sqlx::raw_sql(BCM_THETA_MIGRATION)

@@ -3,15 +3,17 @@
 //! FIX B2: embed() runs in spawn_blocking (not blocking event loop).
 //! §A: Weighted RRF Entropy Routing — dynamic weight based on query entropy.
 //! V8: Graceful degradation — if vector search fails, fallback to text.
-//! VF2: Testing Effect — search matches boost retrieval_strength.
+//! VF2: Testing Effect — search matches update access tracking.
 //! V4-RRF: k=60 constant (Cormack 2009) — removed adaptive instability.
+//! V10: importance integrated into SQL score (score*0.7 + importance*0.3).
+//!      Activates the cognitive pipeline — PageRank/Hebbian/decay now affect ranking.
 
 use crate::cognitive::dual_strength;
 use crate::search::confidence as grounding;
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const DEFAULT_LIMIT: i64 = 10;
 const MAX_LIMIT: i64 = 50;
@@ -45,7 +47,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
 async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_tokens: i64) -> Result<Value> {
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
-    let query_entropy = compute_query_entropy(query);
+    let query_entropy = crate::search::rrf::query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
 
     // Run text search (always available — V8 graceful degradation base)
@@ -87,7 +89,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit as usize);
 
-    // VF2: Testing Effect — boost retrieval_strength on matched observations
+    // VF2: Testing Effect — update access tracking on matched observations
     let matched_obs_ids: Vec<uuid::Uuid> = results.iter()
         .filter_map(|(_, _, r)| {
             r.get("id").and_then(|v| v.as_str())
@@ -122,7 +124,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     let graphrag_context = enrich_graphrag(pool, &results, GRAPHRAG_TOP_K).await;
 
     // Token-budget truncation
-    let mut results_json: Vec<Value> = results
+    let results_json: Vec<Value> = results
         .iter()
         .map(|(_, score, result)| {
             let mut r = result.clone();
@@ -133,34 +135,41 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
         })
         .collect();
 
-    // FIX R-005: Check budget BEFORE subtraction to prevent i64 underflow
+    // Token budget enforcement: truncate content per result instead of dropping entire results.
+    // This gives Claude more results with shorter content (better for grounding).
+    // Estimate: 1 token ≈ 4 chars.
     let mut token_budget = max_tokens;
-    results_json = results_json.into_iter().take_while(|r| {
+    let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
+    for mut r in results_json {
         let content_len = r.get("content")
             .and_then(|v| v.as_str())
             .map(|s| s.len() as i64 / 4)
             .unwrap_or(20);
-        if token_budget < content_len {
-            return false;
+        if token_budget <= 0 {
+            break;
+        }
+        if content_len > token_budget {
+            // Truncate content to fit remaining budget instead of dropping
+            let max_chars = (token_budget * 4) as usize;
+            let truncated: Option<String> = r.get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| crate::handlers::zafra::safe_truncate(s, max_chars).to_string());
+            if let (Some(obj), Some(t)) = (r.as_object_mut(), truncated) {
+                obj.insert("content".to_string(), serde_json::json!(t));
+            }
+            budget_results.push(r);
+            break;
         }
         token_budget -= content_len;
-        true
-    }).collect();
+        budget_results.push(r);
+    }
 
     Ok(serde_json::json!({
         "mode": "hybrid",
         "query": query,
-        "results": results_json,
-        "count": results_json.len(),
-        "graphrag_context": graphrag_context,
-        "search_config": {
-            "query_entropy": query_entropy,
-            "text_weight": text_weight,
-            "vector_weight": vector_weight,
-            "rrf_k": rrf_k,
-            "session_aware": !session_boost.is_empty(),
-            "max_tokens": max_tokens
-        }
+        "results": budget_results,
+        "count": budget_results.len(),
+        "graphrag_context": graphrag_context
     }))
 }
 
@@ -233,9 +242,13 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
     if scope == "all" || scope == "entities" {
         let entities = search_table::<(uuid::Uuid, String, String, f64, f64), _>(
             pool,
+            // V10: importance*0.3 activates the cognitive pipeline in ranking.
+            // PageRank, Hebbian boosts, and decay now directly affect which entities surface.
             "SELECT id, name, entity_type, importance::float8,
-                    (ts_rank(search_vector, plainto_tsquery('simple', $1)) +
-                    similarity(name, $1))::float8 AS score
+                    (  (ts_rank(search_vector, plainto_tsquery('simple', $1))
+                      + similarity(name, $1)) * 0.7
+                     + importance::float8 * 0.3
+                    )::float8 AS score
              FROM brain_entities
              WHERE search_vector @@ plainto_tsquery('simple', $1)
                 OR similarity(name, $1) > 0.3
@@ -260,9 +273,12 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
     if scope == "all" || scope == "observations" {
         let observations = search_table::<(uuid::Uuid, String, String, String, f64, f64), _>(
             pool,
+            // V10: importance*0.3 — same as entities query, makes importance real.
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
-                    (ts_rank(o.search_vector, plainto_tsquery('simple', $1)) +
-                    similarity(o.content, $1))::float8 AS score
+                    (  (ts_rank(o.search_vector, plainto_tsquery('simple', $1))
+                      + similarity(o.content, $1)) * 0.7
+                     + o.importance::float8 * 0.3
+                    )::float8 AS score
              FROM brain_observations o
              JOIN brain_entities e ON o.entity_id = e.id
              WHERE (o.search_vector @@ plainto_tsquery('simple', $1)
@@ -388,25 +404,6 @@ fn entropy_weights(entropy: f64) -> (f64, f64) {
 // and violated determinism. Cormack et al. 2009, Azure AI Search, Elasticsearch
 // all converge on k=60 as empirically optimal.
 
-/// §A: Compute query entropy for RRF weighting.
-fn compute_query_entropy(query: &str) -> f64 {
-    let words: Vec<&str> = query.split_whitespace().collect();
-    let total = words.len();
-    if total == 0 {
-        return 0.0;
-    }
-
-    let unique: HashSet<&str> = words.iter().copied().collect();
-    let mut entropy = 0.0;
-    for word in &unique {
-        let freq = words.iter().filter(|w| *w == word).count() as f64 / total as f64;
-        if freq > 0.0 {
-            entropy -= freq * freq.log2();
-        }
-    }
-    entropy
-}
-
 /// Get active session goals for session-aware boosting.
 async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
@@ -441,15 +438,16 @@ async fn enrich_graphrag(
             .and_then(|v| v.as_str());
 
         if let Some(name) = entity_name {
+            // N+1 fix: single CTE resolves entity id once, no subselect repetition.
             let neighbors: Vec<(String, String, f64)> = match sqlx::query_as(
-                "SELECT e.name, r.relation_type, e.importance::float8
+                "WITH src AS (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
+                 SELECT e.name, r.relation_type, e.importance::float8
                  FROM brain_relations r
+                 JOIN src ON r.from_entity = src.id OR r.to_entity = src.id
                  JOIN brain_entities e ON e.id = CASE
-                     WHEN r.from_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1) THEN r.to_entity
+                     WHEN r.from_entity = src.id THEN r.to_entity
                      ELSE r.from_entity
                  END
-                 WHERE r.from_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
-                    OR r.to_entity = (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
                  ORDER BY r.strength DESC
                  LIMIT 5"
             )

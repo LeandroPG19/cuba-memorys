@@ -22,20 +22,16 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 /// Positive RLHF: Oja's rule — importance += η * (1 - importance).
-/// Also updates FSRS stability on recall (V14 — Ye 2023, Karpicke & Roediger 2008).
 async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Option<&str>) -> Result<Value> {
     let mut boosted = 0u32;
 
     if let Some(obs_id_str) = observation_id {
         let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
-        // Oja positive + FSRS stability boost + difficulty decrease
         let result = sqlx::query(
             "UPDATE brain_observations SET
                 importance = LEAST(importance + 0.05 * (1.0 - importance), 1.0),
                 access_count = access_count + 1,
-                last_accessed = NOW(),
-                stability = GREATEST(stability * 1.2, 1.0),
-                difficulty = GREATEST(1, difficulty - 0.1)
+                last_accessed = NOW()
              WHERE id = $1"
         )
         .bind(obs_id)
@@ -61,8 +57,7 @@ async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
     Ok(serde_json::json!({
         "action": "positive",
         "boosted_count": boosted,
-        "rule": "oja_positive",
-        "fsrs_updated": observation_id.is_some()
+        "rule": "oja_positive"
     }))
 }
 

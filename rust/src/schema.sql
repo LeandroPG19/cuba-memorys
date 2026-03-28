@@ -1,4 +1,4 @@
--- cuba-memorys schema v2.2.0 (Deep Research V3: SAC calibration, BCM EMA, configurable γ/TTL)
+-- cuba-memorys schema v3.0.0 (exponential decay, BCM EMA, pgvector embeddings)
 -- Based on v2.1.0 + BCM θ_M persistence (EMA sliding threshold)
 
 -- Extensions
@@ -37,18 +37,8 @@ CREATE TABLE IF NOT EXISTS brain_observations (
     last_accessed TIMESTAMPTZ DEFAULT NOW(),
     source TEXT DEFAULT 'agent'
         CHECK (source IN ('agent', 'error_detection', 'user', 'consolidation', 'inference')),
-    source_id TEXT,
     version INT DEFAULT 1,
     previous_versions JSONB DEFAULT '[]',
-    -- FSRS-6 decay model (Ye 2024, ADR-001: custom implementation)
-    stability FLOAT DEFAULT 1.0,
-    difficulty FLOAT DEFAULT 5.0,
-    -- Dual-Strength Model (Bjork & Bjork 1992, ADR-002: v1.0)
-    storage_strength FLOAT DEFAULT 0.5,
-    retrieval_strength FLOAT DEFAULT 1.0,
-    -- Temporal validity for data lifecycle
-    valid_from TIMESTAMPTZ DEFAULT NOW(),
-    valid_until TIMESTAMPTZ,
     -- Semantic embedding (pgvector — 384d BGE-small)
     embedding vector(384),
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -78,7 +68,6 @@ CREATE TABLE IF NOT EXISTS brain_errors (
     project TEXT DEFAULT 'default',
     solution TEXT,
     resolved BOOLEAN DEFAULT FALSE,
-    attempts INT DEFAULT 0,
     synapse_weight FLOAT DEFAULT 1.0
         CHECK (synapse_weight >= 0.0),
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -116,11 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_errors_project ON brain_errors(project);
 CREATE INDEX IF NOT EXISTS idx_errors_resolved ON brain_errors(resolved);
 CREATE INDEX IF NOT EXISTS idx_relations_from ON brain_relations(from_entity);
 CREATE INDEX IF NOT EXISTS idx_relations_to ON brain_relations(to_entity);
-
--- Partial index for temporal validity filter
-CREATE INDEX IF NOT EXISTS idx_obs_valid_until
-    ON brain_observations(valid_until)
-    WHERE valid_until IS NOT NULL;
 
 -- Partial GIN index excluding superseded — avoids scanning obsolete rows
 CREATE INDEX IF NOT EXISTS idx_obs_active_search

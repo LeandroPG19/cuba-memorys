@@ -34,7 +34,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             }
         }
         "list" => {
-            let sessions: Vec<(uuid::Uuid, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            type SessionRow = (uuid::Uuid, Option<String>, Option<String>, Option<String>);
+            let sessions: Vec<SessionRow> = sqlx::query_as(
                 "SELECT id, session_name, outcome, summary FROM brain_sessions ORDER BY started_at DESC LIMIT 20"
             ).fetch_all(pool).await?;
             let list: Vec<Value> = sessions.iter().map(|(id, name, outcome, summary)| {

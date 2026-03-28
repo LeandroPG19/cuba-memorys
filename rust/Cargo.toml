@@ -1,8 +1,8 @@
 [package]
 name = "cuba-memorys"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
-description = "Knowledge Graph MCP Server — Rust rewrite with FSRS-6 + Dual-Strength"
+description = "Knowledge Graph MCP Server — Rust, importance-aware ranking, vector search"
 license = "CC-BY-NC-4.0"
 
 [dependencies]
@@ -23,9 +23,6 @@ pgvector = { version = "0.4", features = ["sqlx"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Graph algorithms
-petgraph = "0.7"
-
 # Embeddings (ONNX Runtime) — pinned RC (ADR audit 2026-03-14)
 # IMPORTANT: =exact pin until ort 2.0.0 stable releases. Do NOT change.
 ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
@@ -37,13 +34,17 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
+# NOTE: thiserror removed — zero callers found across all 37 source files (dead dep).
+# NOTE: petgraph removed — zero imports found (dead dep; graph algos use own impl).
+# NOTE: rand removed — zero imports found (dead dep).
 
 # Types
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Cache (O(1) LRU eviction)
+# RUSTSEC-2026-0002: lru 0.12.5 has unsound IterMut. We only call .iter() (safe).
+# Update to 0.12.6+ once released, or replace with quick_cache if vuln is critical.
 lru = "0.12"
 
 # Global allocator
@@ -52,12 +53,13 @@ mimalloc = "0.1"
 # Hashing (relation dedup — E-WL inspired triple hash)
 blake3 = "1"
 
-# Misc
-rand = "0.9"
-
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# CL-001: suppress unexpected_cfg warning for kani formal verification annotations
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

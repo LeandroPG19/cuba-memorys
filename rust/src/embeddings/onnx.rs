@@ -76,7 +76,7 @@ fn get_model_status() -> &'static ModelStatus {
 }
 
 /// Initialize ONNX session and tokenizer from model directory.
-fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
+fn init_onnx_session(model_file: &std::path::Path, model_dir: &std::path::Path) -> Result<()> {
     let session = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(2)
@@ -90,8 +90,8 @@ fn init_onnx_session(model_file: &PathBuf, model_dir: &PathBuf) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("ONNX session already initialized"))?;
 
     // Load tokenizer
-    let tokenizer_dir = if model_dir.is_dir() {
-        model_dir.clone()
+    let tokenizer_dir: std::path::PathBuf = if model_dir.is_dir() {
+        model_dir.to_path_buf()
     } else {
         model_dir.parent()
             .map(|p| p.to_path_buf())
@@ -238,8 +238,8 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
     let mut sum_embedding = vec![0.0f32; EMBEDDING_DIM];
     let mut sum_mask = 0.0f32;
 
-    for t in 0..seq_len {
-        let mask_val = attn_mask[t] as f32;
+    for (t, &mask_raw) in attn_mask.iter().enumerate().take(seq_len) {
+        let mask_val = mask_raw as f32;
         sum_mask += mask_val;
         let offset = t * EMBEDDING_DIM;
         for d in 0..EMBEDDING_DIM {

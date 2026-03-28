@@ -4,6 +4,9 @@
 //! FIX B5: information_density uses unique word count, not total.
 //! P3: Batch dedup in batch_add (1 query per batch, not N).
 //! V5: Prediction Error Gating — classify by similarity.
+//! V11: Compute and store embedding on insert — unblocks vector search in faro.
+//!      Previously, embeddings were never written so WHERE embedding IS NOT NULL
+//!      always returned 0 rows (vector search was dead code).
 
 use crate::constants::{
     DEDUP_THRESHOLD,
@@ -108,6 +111,30 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         "observation added"
     );
 
+    // V11: Store embedding for vector search (non-blocking fire-and-forget).
+    // Clones pool (cheap Arc clone) to move into spawned task.
+    // embed() uses spawn_blocking internally (FIX B2) — safe to call from async context.
+    let embed_pool = pool.clone();
+    let obs_id_for_embed = row.0;
+    let content_for_embed = content.to_string();
+    tokio::spawn(async move {
+        match crate::embeddings::onnx::embed(&content_for_embed).await {
+            Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
+                let result = sqlx::query(
+                    "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
+                )
+                .bind(pgvector::Vector::from(emb))
+                .bind(obs_id_for_embed)
+                .execute(&embed_pool)
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "failed to store embedding");
+                }
+            }
+            _ => {} // no ONNX model loaded — skip silently
+        }
+    });
+
     // Overload warning — alert if entity has too many observations
     let obs_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM brain_observations WHERE entity_id = $1 AND observation_type != 'superseded'"
@@ -207,6 +234,10 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         .and_then(|v| v.as_array())
         .context("'observations' array is required for batch_add")?;
 
+    if observations.len() > 100 {
+        anyhow::bail!("batch_add limit is 100 observations per call (got {})", observations.len());
+    }
+
     // Pre-process: resolve entities and dedup checks outside transaction
     // (reads are safe to repeat on retry)
     struct PendingObs {
@@ -261,21 +292,24 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
     let mut added = 0u32;
     let mut reinforced = 0u32;
+    // Collect (obs_id, content) for embedding storage after commit (V11)
+    let mut inserted_for_embed: Vec<(uuid::Uuid, String)> = Vec::new();
 
     for action in &actions {
         match action {
             BatchAction::Insert(pending) => {
-                sqlx::query(
+                let row: (uuid::Uuid,) = sqlx::query_as(
                     "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance)
-                     VALUES ($1, $2, $3, $4, $5)"
+                     VALUES ($1, $2, $3, $4, $5) RETURNING id"
                 )
                 .bind(pending.entity_id)
                 .bind(&pending.content)
                 .bind(&pending.obs_type)
                 .bind(&pending.source)
                 .bind(pending.density)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await?;
+                inserted_for_embed.push((row.0, pending.content.clone()));
                 added += 1;
             }
             BatchAction::Reinforce(obs_id) => {
@@ -295,6 +329,26 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     }
 
     tx.commit().await.context("failed to commit batch_add transaction")?;
+
+    // V11: Store embeddings after commit (non-blocking, best-effort)
+    if !inserted_for_embed.is_empty() {
+        let embed_pool = pool.clone();
+        tokio::spawn(async move {
+            for (obs_id, content) in inserted_for_embed {
+                if let Ok(emb) = crate::embeddings::onnx::embed(&content).await
+                    && !emb.iter().all(|&v| v == 0.0)
+                {
+                    let _ = sqlx::query(
+                        "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
+                    )
+                    .bind(pgvector::Vector::from(emb))
+                    .bind(obs_id)
+                    .execute(&embed_pool)
+                    .await;
+                }
+            }
+        });
+    }
 
     Ok(serde_json::json!({
         "action": "batch_add",

@@ -75,9 +75,9 @@ pub async fn run_mcp() -> Result<()> {
 
     let pool = db::create_pool(&database_url).await?;
 
-    // Spawn REM daemon
+    // Spawn REM daemon — store handle for graceful shutdown (RC-002 fix).
     let rem_pool = pool.clone();
-    let _rem_handle = tokio::spawn(async move {
+    let rem_handle = tokio::spawn(async move {
         rem_daemon(rem_pool).await;
     });
 
@@ -152,6 +152,10 @@ pub async fn run_mcp() -> Result<()> {
         stdout.write_all(b"\n").await?;
         stdout.flush().await?;
     }
+
+    // RC-002: Abort REM daemon on clean shutdown (stdin EOF = MCP client disconnected).
+    rem_handle.abort();
+    tracing::info!("REM daemon aborted, shutting down");
 
     Ok(())
 }
@@ -238,7 +242,9 @@ async fn rem_daemon(pool: PgPool) {
 
 /// Execute REM sleep consolidation steps.
 ///
-/// Steps: FSRS decay → PageRank → Neighbor Diffusion → TF-IDF rebuild.
+/// Steps: decay → PageRank → TF-IDF.
+/// NOTE: Neighbor Diffusion removed — duplicates PageRank topology propagation
+/// with N+1 pattern (120 queries/cycle for 20 seeds × 6 neighbors each).
 async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     // 1. Get active session goals (for session protection - FIX B4)
     let active_session: Option<(uuid::Uuid, Vec<String>)> = {
@@ -267,21 +273,43 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         vec![]
     };
 
-    // 3. FSRS decay (batch UPDATE — V1)
-    let decayed = crate::cognitive::fsrs::batch_decay(pool, &protected_entity_ids).await?;
-    tracing::info!(decayed_count = decayed, "FSRS decay applied");
+    // 3. Exponential decay on importance (replaces FSRS-6 — V3/zafra refactor).
+    // importance decays with halflife=30 days; protected entities are excluded.
+    // Uses the same SQL as zafra "decay" action, but with entity protection.
+    let decayed = if protected_entity_ids.is_empty() {
+        sqlx::query(
+            "UPDATE brain_observations SET
+                importance = GREATEST(importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / 30.0), 0.01),
+                updated_at = NOW()
+             WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+               AND last_accessed < NOW() - INTERVAL '1 day'"
+        )
+        .execute(pool)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "UPDATE brain_observations SET
+                importance = GREATEST(importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / 30.0), 0.01),
+                updated_at = NOW()
+             WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+               AND last_accessed < NOW() - INTERVAL '1 day'
+               AND entity_id NOT IN (SELECT UNNEST($1::uuid[]))"
+        )
+        .bind(&protected_entity_ids)
+        .execute(pool)
+        .await?
+        .rows_affected()
+    };
+    tracing::info!(decayed_count = decayed, "exponential decay applied");
 
     // 4. PageRank (batch — P1 fix)
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
-    // 5. Neighbor Diffusion (§C — Collins & Loftus 1975)
-    crate::cognitive::spreading::neighbor_diffusion(pool).await?;
-    tracing::info!("neighbor diffusion completed");
-
-    // 6. TF-IDF index: BM25 index is in-memory, rebuilt on demand per REM cycle
+    // 5. TF-IDF index: BM25 index is in-memory, rebuilt on demand per REM cycle
     // (no persistent index to rebuild — Bm25Index lives in handler state)
-    tracing::info!("REM consolidation complete (TF-IDF: in-memory, on-demand)");
+    tracing::info!("REM consolidation complete");
 
     Ok(())
 }

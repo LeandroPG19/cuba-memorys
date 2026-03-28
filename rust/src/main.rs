@@ -1,7 +1,7 @@
-//! Cuba-Memorys MCP Server — Rust Rewrite v2.0.0
+//! Cuba-Memorys MCP Server — Rust v3.0.0
 //!
-//! Knowledge Graph MCP server with FSRS-6, Dual-Strength Model,
-//! Hebbian learning, hybrid search, and REM sleep consolidation.
+//! Knowledge Graph MCP server with exponential decay, Hebbian learning,
+//! hybrid search (RRF + pgvector), and REM sleep consolidation.
 
 use mimalloc::MiMalloc;
 

@@ -20,6 +20,12 @@ pub struct TtlLruCache<V> {
     ttl: Duration,
 }
 
+impl<V: Clone> Default for TtlLruCache<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<V: Clone> TtlLruCache<V> {
     /// Create new cache with configured max size and TTL.
     pub fn new() -> Self {
