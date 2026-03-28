@@ -1,0 +1,38 @@
+# Only ship npm/ wrapper, package.json, README, LICENSE, server.json
+# Exclude everything else
+
+# Secrets / auth tokens
+.mcpregistry_*
+.env
+.env.*
+
+# Source code (binary downloaded at install)
+rust/
+src/
+tests/
+
+# Build artifacts
+mcp-publisher
+*.cast
+*.gif
+
+# Config
+.github/
+.claude/
+.fastembed_cache/
+.idea/
+.vscode/
+.pre-commit-config.yaml
+.gitignore
+.gitmodules
+
+# Docs (keep README + LICENSE)
+CONTRIBUTING.md
+Dockerfile
+docker-compose.yml
+setup_db.sh
+pyproject.toml
+deny.toml
+uv.lock
+Cargo.lock
+assets/

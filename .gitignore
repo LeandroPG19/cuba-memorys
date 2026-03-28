@@ -30,6 +30,11 @@ rust/target/
 
 # MCP config (local)
 .mcp.json
+.mcpregistry_*
+
+# npm
+node_modules/
+npm/.bin/
 
 # OS
 .DS_Store
