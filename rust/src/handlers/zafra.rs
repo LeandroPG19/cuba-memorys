@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashMap;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -54,16 +55,46 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  LIMIT 100"
             ).bind(sim_threshold).fetch_all(pool).await?;
 
+            if dupes.is_empty() {
+                return Ok(serde_json::json!({"action": "merge", "merged": 0, "threshold": sim_threshold}));
+            }
+
+            let mut remove_ids = Vec::with_capacity(dupes.len());
+            let mut importance_boosts: HashMap<uuid::Uuid, f64> = HashMap::new();
+
+            for (keep_id, remove_id, _) in &dupes {
+                remove_ids.push(*remove_id);
+                *importance_boosts.entry(*keep_id).or_insert(0.0) += 0.05;
+            }
+
             // FIX R-002: Atomic transaction — all-or-nothing merge
             let mut tx = pool.begin().await.context("failed to begin merge transaction")?;
-            let mut merged = 0u32;
-            for (keep_id, remove_id, _) in &dupes {
-                sqlx::query("UPDATE brain_observations SET observation_type = 'superseded' WHERE id = $1").bind(remove_id).execute(&mut *tx).await?;
-                sqlx::query("UPDATE brain_observations SET importance = LEAST(importance + 0.05, 1.0) WHERE id = $1").bind(keep_id).execute(&mut *tx).await?;
-                merged += 1;
-            }
+
+            // 1. Mark superseded in batch
+            sqlx::query("UPDATE brain_observations SET observation_type = 'superseded' WHERE id = ANY($1::uuid[])")
+                .bind(&remove_ids)
+                .execute(&mut *tx)
+                .await?;
+
+            // 2. Boost importance in batch (P1-style UNNEST)
+            let boost_ids: Vec<uuid::Uuid> = importance_boosts.keys().cloned().collect();
+            let boost_vals: Vec<f64> = importance_boosts.values().cloned().collect();
+
+            sqlx::query(
+                r#"
+                UPDATE brain_observations AS o
+                SET importance = LEAST(o.importance + v.boost, 1.0)
+                FROM (SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::float8[]) AS boost) AS v
+                WHERE o.id = v.id
+                "#
+            )
+            .bind(&boost_ids)
+            .bind(&boost_vals)
+            .execute(&mut *tx)
+            .await?;
+
             tx.commit().await.context("failed to commit merge transaction")?;
-            Ok(serde_json::json!({"action": "merge", "merged": merged, "threshold": sim_threshold}))
+            Ok(serde_json::json!({"action": "merge", "merged": dupes.len(), "threshold": sim_threshold}))
         }
         "stats" => {
             let entities: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_entities").fetch_one(pool).await?;
