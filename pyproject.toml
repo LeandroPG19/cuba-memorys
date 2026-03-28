@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "cuba-memorys"
-version = "0.3.0"
+version = "1.7.0"
 description = "Persistent memory for AI agents — knowledge graph MCP server with Hebbian learning, RRF fusion search, GraphRAG, and anti-hallucination grounding. 13 tools, PostgreSQL, sub-millisecond handlers."
 readme = "README.md"
 license = { text = "CC-BY-NC-4.0" }
