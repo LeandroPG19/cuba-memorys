@@ -1,14 +1,36 @@
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
 dist/
 build/
 .mypy_cache/
 .pytest_cache/
-.env
-*.egg
 venv/
 .venv/
 uv.lock
-.venv/
+
+# Rust
 rust/target/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI/ML caches
+.fastembed_cache/
+.claude/
+
+# MCP config (local)
+.mcp.json
+
+# OS
+.DS_Store
+Thumbs.db
