@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.93+-orange?logo=rust&logoColor=white)](https://rust-lang.org)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-3.0.0-blue)](https://github.com/LeandroPG19/cuba-memorys)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/LeandroPG19/cuba-memorys)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 [![Audit](https://img.shields.io/badge/audit-GO-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
@@ -13,7 +13,7 @@
 13 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v3.0.0** — Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, zero tech debt. 51 tests, 0 clippy warnings, audited GO.
+> **v0.3.0** — Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, zero tech debt. 51 tests, 0 clippy warnings, audited GO.
 
 ---
 
@@ -149,7 +149,7 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 ```
 cuba-memorys/
 ├── docker-compose.yml           # Dedicated PostgreSQL 18 (port 5488)
-├── rust/                        # v3.0.0
+├── rust/                        # v0.3.0
 │   ├── src/
 │   │   ├── main.rs              # mimalloc + graceful shutdown
 │   │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
@@ -162,14 +162,14 @@ cuba-memorys/
 │   │   ├── graph/               # Brandes centrality, Leiden, PageRank
 │   │   └── embeddings/          # ONNX BGE-small (optional, spawn_blocking)
 │   ├── scripts/
-│   │   └── migrate_v3.sql       # v2.x -> v3.0.0 column cleanup
+│   │   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
 │   └── tests/
 └── src/cuba_memorys/            # Python legacy (v1.6.0)
 ```
 
 ### Performance: Rust vs Python
 
-| Metric | Python v1.6.0 | Rust v3.0.0 |
+| Metric | Python v1.6.0 | Rust v0.3.0 |
 | ------ | :-----------: | :---------: |
 | Binary size | ~50MB (venv) | **7.6MB** |
 | Entity create | ~2ms | **498us** |
@@ -350,8 +350,8 @@ Active access resets the clock — frequently used memories stay strong.
 
 | Version | Key Changes |
 |---------|-------------|
-| **3.0.0** | Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, SEC-002 fix, importance in ranking, embeddings storage on write, GraphRAG CTE fix, Opus 4.6 token optimization, zero tech debt. 106 tests (51 unit/smoke + 55 E2E), 0 clippy warnings. |
-| **2.0.0** | Complete Rust rewrite. BCM metaplasticity, Leiden communities, Shannon entropy, blake3 dedup. Internal audit: GO verdict. |
+| **0.3.0** | Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, SEC-002 fix, importance in ranking, embeddings storage on write, GraphRAG CTE fix, Opus 4.6 token optimization, zero tech debt. 106 tests (51 unit/smoke + 55 E2E), 0 clippy warnings. |
+| **0.2.0** | Complete Rust rewrite. BCM metaplasticity, Leiden communities, Shannon entropy, blake3 dedup. Internal audit: GO verdict. |
 | **1.6.0** | KG-neighbor expansion, embedding LRU cache, async embed rebuild, community summaries, batch access tracking |
 | **1.5.0** | Token-budget truncation, post-fusion dedup, source triangulation, adaptive confidence, session-aware decay |
 | **1.3.0** | Modular architecture (CC avg D->A), 87% CC reduction |

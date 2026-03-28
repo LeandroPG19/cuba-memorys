@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.93+-orange?logo=rust&logoColor=white)](https://rust-lang.org)
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green)](https://creativecommons.org/licenses/by-nc/4.0/)
-[![Version](https://img.shields.io/badge/version-3.0.0-blue)](https://github.com/LeandroPG19/cuba-memorys)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/LeandroPG19/cuba-memorys)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![MCP](https://img.shields.io/badge/MCP-compatible-8A2BE2)](https://modelcontextprotocol.io)
 [![Tests](https://img.shields.io/badge/tests-51%20pass-brightgreen)](https://github.com/LeandroPG19/cuba-memorys)
@@ -76,7 +76,7 @@ Without ONNX, the server uses deterministic hash-based embeddings — functional
 
 ## Performance
 
-| Metric | Python v1.6.0 | Rust v3.0.0 |
+| Metric | Python v1.6.0 | Rust v0.3.0 |
 | ------ | :-----------: | :---------: |
 | Binary size | ~50MB (venv) | **7.6MB** |
 | Entity create | ~2ms | **498us** |
@@ -134,7 +134,7 @@ rust/
 │       └── pagerank.rs      # Personalized PageRank (alpha=0.85)
 ├── scripts/
 │   ├── download_model.sh    # ONNX model downloader
-│   └── migrate_v3.sql       # v2.x -> v3.0.0 column cleanup
+│   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
 └── tests/
     ├── smoke_test.rs        # 11 smoke tests (no DB required)
     └── e2e_all_tools.py     # 55 E2E tests (all 13 tools vs real DB)

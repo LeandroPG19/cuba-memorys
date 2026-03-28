@@ -1,4 +1,4 @@
--- cuba-memorys schema v3.0.0 (exponential decay, BCM EMA, pgvector embeddings)
+-- cuba-memorys schema v0.3.0 (exponential decay, BCM EMA, pgvector embeddings)
 -- Based on v2.1.0 + BCM θ_M persistence (EMA sliding threshold)
 
 -- Extensions

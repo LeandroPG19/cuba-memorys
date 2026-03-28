@@ -1,4 +1,4 @@
--- Migration: v2.x → v3.0.0
+-- Migration: v2.x → v0.3.0
 -- Drops columns that were written by FSRS-6/Dual-Strength but never read
 -- by any handler or MCP tool (confirmed via audit 2026-03-27).
 --

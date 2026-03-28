@@ -1,6 +1,6 @@
 [package]
 name = "cuba-memorys"
-version = "3.0.0"
+version = "0.3.0"
 edition = "2024"
 description = "Knowledge Graph MCP Server — Rust, importance-aware ranking, vector search"
 license = "CC-BY-NC-4.0"

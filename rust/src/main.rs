@@ -1,4 +1,4 @@
-//! Cuba-Memorys MCP Server — Rust v3.0.0
+//! Cuba-Memorys MCP Server — Rust v0.3.0
 //!
 //! Knowledge Graph MCP server with exponential decay, Hebbian learning,
 //! hybrid search (RRF + pgvector), and REM sleep consolidation.
