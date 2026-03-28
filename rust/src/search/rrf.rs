@@ -113,7 +113,43 @@ mod tests {
     #[test]
     fn test_query_entropy_repetitive() {
         let e = query_entropy("hello hello hello");
-        assert!(e < 0.01, "repetitive query should have near-zero entropy: got {e}");
+        assert_eq!(e, 0.0, "repetitive query must have exactly zero entropy");
+    }
+
+    #[test]
+    fn test_query_entropy_empty() {
+        assert_eq!(query_entropy(""), 0.0);
+        assert_eq!(query_entropy("   "), 0.0);
+    }
+
+    #[test]
+    fn test_query_entropy_single_word() {
+        assert_eq!(query_entropy("rust"), 0.0);
+    }
+
+    #[test]
+    fn test_query_entropy_known_values() {
+        // 2 unique words, equal frequency: - (0.5 * log2(0.5) + 0.5 * log2(0.5)) = 1.0
+        let e2 = query_entropy("hello world");
+        assert!((e2 - 1.0).abs() < 1e-10);
+
+        // 4 unique words, equal frequency: log2(4) = 2.0
+        let e4 = query_entropy("one two three four");
+        assert!((e4 - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_query_entropy_case_sensitive() {
+        // "Rust" and "rust" are different tokens in current implementation
+        let e = query_entropy("Rust rust");
+        assert!((e - 1.0).abs() < 1e-10, "should be case-sensitive by default");
+    }
+
+    #[test]
+    fn test_query_entropy_whitespace() {
+        let e1 = query_entropy("hello   world");
+        let e2 = query_entropy("hello world");
+        assert_eq!(e1, e2, "extra whitespace should not affect entropy");
     }
 
     #[test]
