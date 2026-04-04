@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.6.0) — used for release name and npm/PyPI skip check"
+        required: false
+        default: ""
+
+# Prevent parallel runs for the same tag — avoids "already published" race conditions
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write   # create GitHub Release + upload assets
@@ -106,6 +117,14 @@ jobs:
           files: dist/*
 
 # ── 3. PyPI — maturin wheels ──────────────────────────────────────────────────
+#
+# FIX: manylinux2014 (CentOS 7) has Perl 5.16 which cannot configure OpenSSL 3.x
+# from source, and an outdated ARM cross-compiler that breaks ring's assembly.
+# manylinux_2_28 (AlmaLinux 8) ships Perl 5.26+ and GCC 10+ — both issues resolved.
+# Minimum glibc requirement rises from 2.17 to 2.28 (Ubuntu 20.04+, RHEL 8+).
+#
+# Publish is split into build + twine upload so --skip-existing makes re-runs
+# idempotent (safe if the tag is re-pushed or the workflow is manually retried).
   publish-pypi:
     name: PyPI (${{ matrix.target }})
     needs: release
@@ -116,10 +135,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64
-            manylinux: auto
+            manylinux: "2_28"
           - os: ubuntu-latest
             target: aarch64
-            manylinux: auto
+            manylinux: "2_28"
           - os: macos-latest
             target: universal2-apple-darwin
             manylinux: ""
@@ -132,15 +151,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and publish (maturin-action)
+      - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          command: publish
-          args: --no-sdist
+          command: build
+          args: --no-sdist --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
+
+      - name: Publish to PyPI (skip existing)
+        shell: bash
+        run: |
+          python -m pip install twine --quiet
+          python -m twine upload --skip-existing dist/*.whl
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
 # ── 4. npm publish ─────────────────────────────────────────────────────────────
   publish-npm:
@@ -158,8 +184,15 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Publish to npm
-        run: npm publish --access public
+      - name: Publish to npm (skip if already published)
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view cuba-memorys version 2>/dev/null || echo "none")
+          if [ "$PUBLISHED" = "$PKG_VERSION" ]; then
+            echo "Version $PKG_VERSION already published on npm — skipping."
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           CUBA_MEMORYS_SKIP_INSTALL: "1"
