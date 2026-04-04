@@ -136,15 +136,29 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: "2_28"
+            # System OpenSSL in quay.io/pypa/manylinux_2_28_x86_64 (/usr/include +
+            # /usr/lib64). Use it instead of openssl-src (Perl Configure fails even
+            # with modern Perl in that image). OPENSSL_STATIC=1 avoids libssl.so dep.
+            openssl_before_script: |
+              export OPENSSL_NO_VENDOR=1
+              export OPENSSL_STATIC=1
+              export OPENSSL_DIR=/usr
           - os: ubuntu-latest
             target: aarch64
             manylinux: "2_28"
+            # For aarch64 cross-compilation (manylinux_2_28-cross:aarch64 image),
+            # tls-native-vendored compiles OpenSSL from source successfully —
+            # the cross container has working Perl and target toolchain.
+            # Do NOT set OPENSSL_NO_VENDOR here, leave vendored as-is.
+            openssl_before_script: ""
           - os: macos-latest
             target: universal2-apple-darwin
             manylinux: ""
+            openssl_before_script: ""
           - os: windows-latest
             target: x86_64
             manylinux: ""
+            openssl_before_script: ""
     environment:
       name: pypi
       url: https://pypi.org/project/cuba-memorys/
@@ -158,14 +172,7 @@ jobs:
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          # Runs inside the manylinux Docker container before cargo build.
-          # OPENSSL_NO_VENDOR: skip compiling OpenSSL from source (Perl Configure
-          # fails in quay.io/pypa/manylinux_2_28_x86_64 even with modern Perl).
-          # OPENSSL_STATIC: link statically so the wheel has no libssl.so dep.
-          # System OpenSSL static libs are present in manylinux_2_28.
-          before-script-linux: |
-            export OPENSSL_NO_VENDOR=1
-            export OPENSSL_STATIC=1
+          before-script-linux: ${{ matrix.openssl_before_script }}
 
       - name: Upload to PyPI
         uses: PyO3/maturin-action@v1
