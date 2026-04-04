@@ -75,7 +75,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to delete sessions")?;
 
-    // 3. Delete the entity itself (FK CASCADE handles observations + relations)
+    // 3. Delete the entity itself (FK CASCADE handles observations, relations, AND episodes)
     let entity_deleted = sqlx::query("DELETE FROM brain_entities WHERE name = $1")
         .bind(entity_name)
         .execute(&mut *tx)
@@ -100,6 +100,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "entity_deleted": entity_found,
         "cascaded": {
             "observations": "via FK CASCADE",
+            "episodes": "via FK CASCADE",
             "relations": "via FK CASCADE",
             "errors_purged": errors_deleted.0,
             "sessions_purged": sessions_deleted.0

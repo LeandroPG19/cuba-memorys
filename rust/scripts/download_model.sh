@@ -1,5 +1,8 @@
 #!/bin/bash
-# Download BGE-small-en-v1.5 ONNX model (quantized) from HuggingFace.
+# Download multilingual-e5-small ONNX model (quantized) from HuggingFace.
+#
+# Model: intfloat/multilingual-e5-small (384d, 94 languages, MIT, ~113MB int8)
+# Replaces BGE-small-en-v1.5 (English-only) for mixed Spanish/English support.
 #
 # Usage:
 #   ./scripts/download_model.sh [target_dir]
@@ -9,7 +12,10 @@
 set -euo pipefail
 
 TARGET_DIR="${1:-$HOME/.cache/cuba-memorys/models}"
-REPO="Qdrant/bge-small-en-v1.5-onnx-Q"
+
+# Primary: Teradata's quantized ONNX export (int8, ~113MB)
+# Fallback: Xenova's ONNX conversion
+REPO="Teradata/multilingual-e5-small"
 BASE_URL="https://huggingface.co/${REPO}/resolve/main"
 
 FILES=(
@@ -19,21 +25,30 @@ FILES=(
 
 mkdir -p "$TARGET_DIR"
 
-echo "📦 Downloading BGE-small-en-v1.5 (quantized) to ${TARGET_DIR}..."
+echo "Downloading multilingual-e5-small (quantized int8) to ${TARGET_DIR}..."
 
 for file in "${FILES[@]}"; do
     dest="${TARGET_DIR}/${file}"
     if [ -f "$dest" ]; then
-        echo "  ✓ ${file} already exists, skipping"
+        echo "  already exists: ${file}, skipping"
     else
-        echo "  ↓ ${file}..."
-        curl -sSL -o "$dest" "${BASE_URL}/${file}"
-        echo "  ✓ ${file} downloaded ($(du -h "$dest" | cut -f1))"
+        echo "  downloading ${file}..."
+        if ! curl -sSL --fail -o "$dest" "${BASE_URL}/${file}"; then
+            # Fallback to Xenova repo
+            FALLBACK_URL="https://huggingface.co/Xenova/multilingual-e5-small/resolve/main/onnx/${file}"
+            echo "  primary failed, trying fallback..."
+            curl -sSL --fail -o "$dest" "$FALLBACK_URL" || {
+                echo "ERROR: failed to download ${file}" >&2
+                rm -f "$dest"
+                exit 1
+            }
+        fi
+        echo "  done: ${file} ($(du -h "$dest" | cut -f1))"
     fi
 done
 
 echo ""
-echo "✅ Model ready. Set env var:"
+echo "Model ready. Set env var:"
 echo "   export ONNX_MODEL_PATH=\"${TARGET_DIR}\""
 echo ""
 echo "Also install ONNX Runtime library:"

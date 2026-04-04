@@ -273,35 +273,60 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         vec![]
     };
 
-    // 3. Exponential decay on importance (replaces FSRS-6 — V3/zafra refactor).
-    // importance decays with halflife=30 days; protected entities are excluded.
-    // Uses the same SQL as zafra "decay" action, but with entity protection.
+    // 3. V4: Stratified exponential decay — different halflife per observation_type.
+    //    fact/preference: 30d | error/solution: 14d | context/tool_usage: 7d
+    //    decision/lesson: never (protected by WHERE clause).
+    let stratified_decay_sql = "UPDATE brain_observations SET
+        importance = GREATEST(
+            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 /
+                CASE observation_type
+                    WHEN 'fact'       THEN 30.0
+                    WHEN 'preference' THEN 30.0
+                    WHEN 'error'      THEN 14.0
+                    WHEN 'solution'   THEN 14.0
+                    WHEN 'context'    THEN  7.0
+                    WHEN 'tool_usage' THEN  7.0
+                    ELSE 30.0
+                END
+            ),
+            0.01
+        ),
+        updated_at = NOW()
+     WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+       AND last_accessed < NOW() - INTERVAL '1 day'";
+
     let decayed = if protected_entity_ids.is_empty() {
-        sqlx::query(
-            "UPDATE brain_observations SET
-                importance = GREATEST(importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / 30.0), 0.01),
-                updated_at = NOW()
-             WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
-               AND last_accessed < NOW() - INTERVAL '1 day'"
-        )
-        .execute(pool)
-        .await?
-        .rows_affected()
+        sqlx::query(stratified_decay_sql)
+            .execute(pool)
+            .await?
+            .rows_affected()
     } else {
-        sqlx::query(
-            "UPDATE brain_observations SET
-                importance = GREATEST(importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / 30.0), 0.01),
-                updated_at = NOW()
-             WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
-               AND last_accessed < NOW() - INTERVAL '1 day'
-               AND entity_id NOT IN (SELECT UNNEST($1::uuid[]))"
-        )
-        .bind(&protected_entity_ids)
-        .execute(pool)
-        .await?
-        .rows_affected()
+        let sql_with_protection = format!(
+            "{} AND entity_id NOT IN (SELECT UNNEST($1::uuid[]))",
+            stratified_decay_sql
+        );
+        sqlx::query(&sql_with_protection)
+            .bind(&protected_entity_ids)
+            .execute(pool)
+            .await?
+            .rows_affected()
     };
-    tracing::info!(decayed_count = decayed, "exponential decay applied");
+    tracing::info!(decayed_count = decayed, "stratified exponential decay applied");
+
+    // 3b. Episode power-law decay (Wixted 2004) — idempotent from initial=0.5
+    let episode_decayed = sqlx::query(
+        "UPDATE brain_episodes SET
+            importance = GREATEST(
+                0.5 / POWER(1.0 + 0.1 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0, 0.5),
+                0.01
+            )
+         WHERE created_at < NOW() - INTERVAL '1 hour'"
+    )
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0); // Non-fatal: episodes table may not exist on old DBs
+    tracing::info!(episode_decayed_count = episode_decayed, "episode power-law decay applied");
 
     // 4. PageRank (batch — P1 fix)
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;

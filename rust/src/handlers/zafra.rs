@@ -14,27 +14,58 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     match action {
         "decay" => {
-            // Exponential decay: importance * EXP(-0.693 * days_since_access / halflife)
-            // halflife default=30 days (importance halves every 30 days of no access).
-            // Protected: decision/lesson obs never decay (too valuable to lose).
-            let halflife = args.get("halflife_days").and_then(|v| v.as_f64()).unwrap_or(30.0);
-            let result = sqlx::query(
-                "UPDATE brain_observations SET
-                    importance = GREATEST(
-                        importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / $1),
-                        0.01
-                    ),
-                    updated_at = NOW()
-                 WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
-                   AND last_accessed < NOW() - INTERVAL '1 day'"
-            )
-            .bind(halflife)
-            .execute(pool)
-            .await?;
+            // V4: Stratified exponential decay — different halflife per observation_type.
+            // fact/preference: 30d  |  error/solution: 14d  |  context/tool_usage: 7d
+            // decision/lesson: ∞ (never decay — protected by WHERE clause).
+            // Override with halflife_days to apply a global halflife (backward compat).
+            let global_override = args.get("halflife_days").and_then(|v| v.as_f64());
+            let result = if let Some(halflife) = global_override {
+                sqlx::query(
+                    "UPDATE brain_observations SET
+                        importance = GREATEST(
+                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / $1),
+                            0.01
+                        ),
+                        updated_at = NOW()
+                     WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+                       AND last_accessed < NOW() - INTERVAL '1 day'"
+                )
+                .bind(halflife)
+                .execute(pool)
+                .await?
+            } else {
+                sqlx::query(
+                    "UPDATE brain_observations SET
+                        importance = GREATEST(
+                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 /
+                                CASE observation_type
+                                    WHEN 'fact'       THEN 30.0
+                                    WHEN 'preference' THEN 30.0
+                                    WHEN 'error'      THEN 14.0
+                                    WHEN 'solution'   THEN 14.0
+                                    WHEN 'context'    THEN  7.0
+                                    WHEN 'tool_usage' THEN  7.0
+                                    ELSE 30.0
+                                END
+                            ),
+                            0.01
+                        ),
+                        updated_at = NOW()
+                     WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
+                       AND last_accessed < NOW() - INTERVAL '1 day'"
+                )
+                .execute(pool)
+                .await?
+            };
             Ok(serde_json::json!({
                 "action": "decay",
                 "decayed": result.rows_affected(),
-                "halflife_days": halflife,
+                "stratification": {
+                    "fact/preference": "30d halflife",
+                    "error/solution": "14d halflife",
+                    "context/tool_usage": "7d halflife",
+                    "decision/lesson": "never decay"
+                },
                 "formula": "importance * EXP(-0.693 * days / halflife)"
             }))
         }
@@ -110,6 +141,84 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             let entities: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as("SELECT id, name, entity_type, importance FROM brain_entities ORDER BY importance DESC LIMIT 500").fetch_all(pool).await?;
             let ent_json: Vec<Value> = entities.iter().map(|(id, n, t, i)| serde_json::json!({"id": id.to_string(), "name": n, "type": t, "importance": i})).collect();
             Ok(serde_json::json!({"action": "export", "entities": ent_json, "count": ent_json.len()}))
+        }
+        "decay_episodes" => {
+            // Power-law decay for episodic memories (Wixted 2004).
+            // I(t) = 0.5 / (1 + c·t)^β — computed from creation time, NOT from current importance.
+            //
+            // FIX: Previous version used `importance / POWER(...)` which compounds multiplicatively
+            // on each invocation (double-decay bug). This version computes the target importance
+            // directly from the initial value (0.5) and age, making it IDEMPOTENT — calling it
+            // twice produces the same result.
+            //
+            // Default: c=0.1, β=0.5 (Wixted & Ebbesen 1991 calibration).
+            let c = args.get("c").and_then(|v| v.as_f64()).unwrap_or(0.1);
+            let beta = args.get("beta").and_then(|v| v.as_f64()).unwrap_or(0.5);
+            let result = sqlx::query(
+                "UPDATE brain_episodes SET
+                    importance = GREATEST(
+                        0.5 / POWER(
+                            1.0 + $1 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0,
+                            $2
+                        ),
+                        0.01
+                    )
+                 WHERE created_at < NOW() - INTERVAL '1 hour'",
+            )
+            .bind(c)
+            .bind(beta)
+            .execute(pool)
+            .await?;
+            Ok(serde_json::json!({
+                "action": "decay_episodes",
+                "decayed": result.rows_affected(),
+                "formula": "0.5 / (1 + c·t)^β  (Wixted 2004, idempotent from initial=0.5)",
+                "c": c,
+                "beta": beta
+            }))
+        }
+        "reembed" => {
+            // Re-encode all observations using the current ONNX model (embed_passage prefix).
+            // Run this after switching embedding models to ensure consistency.
+            let batch_size = args.get("batch_size").and_then(|v| v.as_i64()).unwrap_or(500);
+            let obs: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+                "SELECT id, content FROM brain_observations
+                 WHERE observation_type != 'superseded'
+                 ORDER BY importance DESC
+                 LIMIT $1"
+            )
+            .bind(batch_size)
+            .fetch_all(pool)
+            .await?;
+
+            let total = obs.len();
+            let mut updated = 0u32;
+
+            for (obs_id, content) in obs {
+                match crate::embeddings::onnx::embed_passage(&content).await {
+                    Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
+                        if sqlx::query(
+                            "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
+                        )
+                        .bind(pgvector::Vector::from(emb))
+                        .bind(obs_id)
+                        .execute(pool)
+                        .await
+                        .is_ok() {
+                            updated += 1;
+                        }
+                    }
+                    _ => {} // no ONNX model or hash fallback — skip
+                }
+            }
+
+            Ok(serde_json::json!({
+                "action": "reembed",
+                "total_fetched": total,
+                "updated": updated,
+                "model": "multilingual-e5-small (passage: prefix)",
+                "note": "Run after switching embedding models to ensure vector search consistency"
+            }))
         }
         _ => anyhow::bail!("Invalid action: {action}"),
     }

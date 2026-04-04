@@ -46,3 +46,56 @@ jobs:
         run: |
           cargo install cargo-audit --quiet
           cargo audit
+
+  e2e:
+    name: E2E Tests
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: cuba
+          POSTGRES_PASSWORD: memorys2026
+          POSTGRES_DB: brain
+        ports:
+          - 5488:5432
+        options: >-
+          --health-cmd "pg_isready -U cuba -d brain"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run E2E tests
+        env:
+          DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
+          CUBA_BINARY_PATH: ./target/release/cuba-memorys
+        run: python tests/e2e_all_tools.py

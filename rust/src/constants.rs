@@ -11,8 +11,8 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
-pub const PRED_ERROR_UPDATE: f64 = 0.75;     // Somewhat similar → update existing
-// Below PRED_ERROR_UPDATE → create new observation
+pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
+                                         // Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
@@ -28,24 +28,39 @@ pub const HEBBIAN_ACCESS_BOOST: f64 = 0.01;
 pub const BCM_THROTTLE_SCALE: f64 = 0.8;
 
 /// Relation types.
-pub const VALID_RELATION_TYPES: &[&str] = &[
-    "uses", "causes", "implements", "depends_on", "related_to",
-];
+pub const VALID_RELATION_TYPES: &[&str] =
+    &["uses", "causes", "implements", "depends_on", "related_to"];
 
 /// Entity types.
 pub const VALID_ENTITY_TYPES: &[&str] = &[
-    "concept", "project", "technology", "person", "pattern", "config",
+    "concept",
+    "project",
+    "technology",
+    "person",
+    "pattern",
+    "config",
 ];
 
 /// Observation types.
 pub const VALID_OBSERVATION_TYPES: &[&str] = &[
-    "fact", "decision", "lesson", "preference",
-    "error", "solution", "context", "tool_usage", "superseded",
+    "fact",
+    "decision",
+    "lesson",
+    "preference",
+    "error",
+    "solution",
+    "context",
+    "tool_usage",
+    "superseded",
 ];
 
 /// Observation sources.
 pub const VALID_SOURCES: &[&str] = &[
-    "agent", "error_detection", "user", "consolidation", "inference",
+    "agent",
+    "error_detection",
+    "user",
+    "consolidation",
+    "inference",
 ];
 
 // ── Tool Definitions ─────────────────────────────────────────────
@@ -63,14 +78,16 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["action", "name"]
         })),
-        tool_def("cuba_cronica", "Attach facts/lessons/decisions to entities. Auto-creates entity if not found. Dedup gate blocks near-duplicates. Contradictions auto-supersede old facts. Use batch_add with 'observations' array for bulk writes.", serde_json::json!({
+        tool_def("cuba_cronica", "Attach facts/lessons/decisions to entities. Also manages episodic memories (specific events with actors/artifacts) via episode_add/episode_list. Auto-creates entity if not found. Dedup gate blocks near-duplicates.", serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["add", "delete", "list", "batch_add"], "description": "Operation to perform. batch_add accepts 'observations' array."},
-                "entity_name": {"type": "string", "description": "Entity to attach observation to"},
-                "content": {"type": "string", "description": "Observation text"},
-                "observation_type": {"type": "string", "enum": ["fact", "decision", "lesson", "preference", "context", "tool_usage"], "description": "Type of observation"},
-                "source": {"type": "string", "enum": ["agent", "user", "error_detection"], "description": "Who/what created this observation"}
+                "action": {"type": "string", "enum": ["add", "delete", "list", "batch_add", "episode_add", "episode_list"], "description": "Operation to perform. episode_add stores a temporal event; episode_list retrieves events."},
+                "entity_name": {"type": "string", "description": "Entity to attach observation/episode to"},
+                "content": {"type": "string", "description": "Observation or episode text"},
+                "observation_type": {"type": "string", "enum": ["fact", "decision", "lesson", "preference", "context", "tool_usage"], "description": "Type of observation (for add action)"},
+                "source": {"type": "string", "enum": ["agent", "user", "error_detection"], "description": "Who/what created this observation"},
+                "actors": {"type": "array", "items": {"type": "string"}, "description": "People/agents involved in episode (for episode_add)"},
+                "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Files/resources affected in episode (for episode_add)"}
             },
             "required": ["action", "entity_name"]
         })),
@@ -166,14 +183,18 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["metric"]
         })),
-        tool_def("cuba_zafra", "Memory maintenance: decay (exponential, halflife=30d), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats.", serde_json::json!({
+        tool_def("cuba_zafra", "Memory maintenance: decay (stratified exponential by type), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats, reembed (re-encode with current model).", serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export"], "description": "Consolidation action"},
+                "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export", "reembed", "decay_episodes"], "description": "Consolidation action. decay_episodes applies power-law decay to brain_episodes."},
                 "entity_name": {"type": "string", "description": "Entity to summarize (for summarize action)"},
                 "compressed_summary": {"type": "string", "description": "Compressed text replacing observations (for summarize)"},
                 "threshold": {"type": "number", "description": "Importance threshold for prune (default 0.1)"},
-                "similarity_threshold": {"type": "number", "description": "Similarity threshold for merge (default 0.8)"}
+                "similarity_threshold": {"type": "number", "description": "Similarity threshold for merge (default 0.8)"},
+                "batch_size": {"type": "integer", "description": "Max observations to re-encode in reembed (default 500)"},
+                "halflife_days": {"type": "number", "description": "Global halflife override for decay (overrides per-type stratification)"},
+                "c": {"type": "number", "description": "Power-law c parameter for decay_episodes (default 0.1)"},
+                "beta": {"type": "number", "description": "Power-law β exponent for decay_episodes (default 0.5)"}
             },
             "required": ["action"]
         })),
@@ -184,6 +205,23 @@ pub fn tool_definitions() -> Vec<Value> {
                 "confirm": {"type": "boolean", "description": "Must be true to proceed (safety gate)"}
             },
             "required": ["entity_name", "confirm"]
+        })),
+        tool_def("cuba_reflexion", "Analyze knowledge graph for structural gaps: isolated entities, underconnected hubs, type silos, observation gaps (missing decisions/lessons), and statistical density anomalies. Read-only introspection.", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["analyze"], "description": "Gap analysis action (only 'analyze' supported)"}
+            },
+            "required": ["action"]
+        })),
+        tool_def("cuba_hipotesis", "Abductive inference: given an observed effect, find plausible causes by traversing causal relations backwards. Returns hypotheses ranked by plausibility (path_strength × importance). Read-only.", serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["explain"], "description": "Inference action"},
+                "effect": {"type": "string", "description": "Entity name representing the observed effect"},
+                "max_depth": {"type": "integer", "description": "Max causal chain hops (default 3, max 5)"},
+                "limit": {"type": "integer", "description": "Max hypotheses to return (default 10, max 50)"}
+            },
+            "required": ["action", "effect"]
         })),
     ]
 }

@@ -1,4 +1,4 @@
-//! Handler: cuba_cronica — Observations CRUD.
+//! Handler: cuba_cronica — Observations CRUD + Episodic memory.
 //!
 //! FIX B1: Always fresh entity_id fetch before operations.
 //! FIX B5: information_density uses unique word count, not total.
@@ -7,12 +7,11 @@
 //! V11: Compute and store embedding on insert — unblocks vector search in faro.
 //!      Previously, embeddings were never written so WHERE embedding IS NOT NULL
 //!      always returned 0 rows (vector search was dead code).
+//! V4: Episodic memory (Tulving 1972) — episode_add/episode_list actions.
+//!     Separate from semantic facts: specific events with actors, artifacts, time bounds.
 
-use crate::constants::{
-    DEDUP_THRESHOLD,
-    VALID_OBSERVATION_TYPES, VALID_SOURCES,
-};
 use crate::cognitive::{density, prediction_error};
+use crate::constants::{DEDUP_THRESHOLD, VALID_OBSERVATION_TYPES, VALID_SOURCES};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -26,7 +25,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "delete" => delete_obs(pool, &args).await,
         "list" => list(pool, entity_name).await,
         "batch_add" => batch_add(pool, &args).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use add/delete/list/batch_add"),
+        "episode_add" => episode_add(pool, entity_name, &args).await,
+        "episode_list" => episode_list(pool, entity_name).await,
+        _ => anyhow::bail!(
+            "Invalid action: {action}. Use add/delete/list/batch_add/episode_add/episode_list"
+        ),
     }
 }
 
@@ -118,7 +121,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     let obs_id_for_embed = row.0;
     let content_for_embed = content.to_string();
     tokio::spawn(async move {
-        match crate::embeddings::onnx::embed(&content_for_embed).await {
+        match crate::embeddings::onnx::embed_passage(&content_for_embed).await {
             Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
                 let result = sqlx::query(
                     "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
@@ -335,7 +338,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         let embed_pool = pool.clone();
         tokio::spawn(async move {
             for (obs_id, content) in inserted_for_embed {
-                if let Ok(emb) = crate::embeddings::onnx::embed(&content).await
+                if let Ok(emb) = crate::embeddings::onnx::embed_passage(&content).await
                     && !emb.iter().all(|&v| v == 0.0)
                 {
                     let _ = sqlx::query(
@@ -460,6 +463,137 @@ async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
 
     row.map(|(id,)| id)
         .context(format!("Entity '{name}' not found"))
+}
+
+/// Add an episodic memory — a specific temporal event linked to an entity.
+///
+/// Episodes differ from observations (semantic facts):
+/// - They represent specific events that happened at a point in time
+/// - They have actors (who was involved) and artifacts (what was affected)
+/// - They decay faster (power-law halflife ~3 days vs 30 days for facts)
+async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
+    if entity_name.is_empty() {
+        anyhow::bail!("entity_name is required for episode_add");
+    }
+
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.is_empty() {
+        anyhow::bail!("content is required for episode_add");
+    }
+
+    let actors: Vec<String> = args
+        .get("actors")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let artifacts: Vec<String> = args
+        .get("artifacts")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Auto-create entity if needed (same pattern as add)
+    let entity_id = ensure_entity(pool, entity_name).await?;
+    let density = information_density(content);
+
+    let row: (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(entity_id)
+    .bind(content)
+    .bind(&actors)
+    .bind(&artifacts)
+    .bind(density.min(1.0))
+    .fetch_one(pool)
+    .await?;
+
+    let ep_id = row.0;
+
+    // Async embedding storage (same fire-and-forget pattern as observations)
+    let embed_pool = pool.clone();
+    let content_owned = content.to_string();
+    tokio::spawn(async move {
+        if let Ok(emb) = crate::embeddings::onnx::embed_passage(&content_owned).await
+            && !emb.iter().all(|&v| v == 0.0)
+        {
+            let _ = sqlx::query(
+                "UPDATE brain_episodes SET embedding = $1::vector WHERE id = $2",
+            )
+            .bind(pgvector::Vector::from(emb))
+            .bind(ep_id)
+            .execute(&embed_pool)
+            .await;
+        }
+    });
+
+    tracing::info!(
+        entity = %entity_name,
+        episode_id = %ep_id,
+        actors = actors.len(),
+        artifacts = artifacts.len(),
+        "episode added"
+    );
+
+    Ok(serde_json::json!({
+        "action": "episode_add",
+        "id": ep_id.to_string(),
+        "entity_name": entity_name,
+        "actors": actors,
+        "artifacts": artifacts,
+        "importance": density.min(1.0)
+    }))
+}
+
+/// List episodes for an entity, ordered by recency.
+async fn episode_list(pool: &PgPool, entity_name: &str) -> Result<Value> {
+    if entity_name.is_empty() {
+        anyhow::bail!("entity_name is required for episode_list");
+    }
+
+    type EpisodeRow = (uuid::Uuid, String, Vec<String>, Vec<String>, f64, chrono::DateTime<chrono::Utc>);
+    let episodes: Vec<EpisodeRow> = sqlx::query_as(
+            "SELECT ep.id, ep.content, ep.actors, ep.artifacts,
+                    ep.importance::float8, ep.started_at
+             FROM brain_episodes ep
+             JOIN brain_entities e ON ep.entity_id = e.id
+             WHERE e.name = $1
+             ORDER BY ep.started_at DESC
+             LIMIT 50",
+        )
+        .bind(entity_name)
+        .fetch_all(pool)
+        .await?;
+
+    let items: Vec<Value> = episodes
+        .iter()
+        .map(|(id, content, actors, artifacts, importance, started_at)| {
+            serde_json::json!({
+                "id": id.to_string(),
+                "content": content,
+                "actors": actors,
+                "artifacts": artifacts,
+                "importance": importance,
+                "started_at": started_at.to_rfc3339()
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "action": "episode_list",
+        "entity_name": entity_name,
+        "episodes": items,
+        "count": items.len()
+    }))
 }
 
 /// Delegate to cognitive::density module (DRY — eliminates inline duplication).

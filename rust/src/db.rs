@@ -11,6 +11,58 @@ use std::time::Duration;
 /// Schema SQL embedded at compile time.
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
+/// FIX-OBS-001: Add updated_at to brain_observations.
+/// The column was missing from schema but referenced in decay/eco/REM queries,
+/// causing all those operations to fail silently.
+const OBS_UPDATED_AT_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_observations' AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE brain_observations ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW();
+    END IF;
+END $$;
+"#;
+
+/// Episodic memory migration — creates brain_episodes table if missing.
+/// Safe to run on existing DBs (IF NOT EXISTS throughout).
+const EPISODES_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'brain_episodes'
+    ) THEN
+        CREATE TABLE brain_episodes (
+            id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+            entity_id UUID NOT NULL REFERENCES brain_entities(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            started_at TIMESTAMPTZ DEFAULT NOW(),
+            ended_at TIMESTAMPTZ,
+            actors TEXT[] DEFAULT '{}',
+            artifacts TEXT[] DEFAULT '{}',
+            importance FLOAT DEFAULT 0.5
+                CHECK (importance >= 0.0 AND importance <= 1.0),
+            embedding vector(384),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            search_vector tsvector GENERATED ALWAYS AS (
+                to_tsvector('simple', content)
+            ) STORED
+        );
+        CREATE INDEX idx_episodes_entity ON brain_episodes(entity_id);
+        CREATE INDEX idx_episodes_search ON brain_episodes USING GIN(search_vector);
+        CREATE INDEX idx_episodes_trgm   ON brain_episodes USING GIN(content gin_trgm_ops);
+        CREATE INDEX idx_episodes_time   ON brain_episodes(started_at DESC);
+        -- HNSW vector index for episode semantic search
+        CREATE INDEX idx_episodes_embedding_hnsw
+            ON brain_episodes USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 128);
+    END IF;
+END $$;
+"#;
+
 /// BCM θ_M EMA migration — adds bcm_theta column for persistent sliding threshold.
 /// V3: Deep Research 2026-03-14.
 const BCM_THETA_MIGRATION: &str = r#"
@@ -73,6 +125,22 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
         .context("failed to set timezone to UTC")?;
 
     tracing::info!("schema initialized (timezone=UTC)");
+
+    // Episodic memory table (idempotent)
+    sqlx::raw_sql(EPISODES_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply episodes migration")?;
+
+    tracing::info!("brain_episodes table verified");
+
+    // FIX-OBS-001: Add updated_at to brain_observations (idempotent)
+    sqlx::raw_sql(OBS_UPDATED_AT_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply obs updated_at migration")?;
+
+    tracing::info!("brain_observations.updated_at verified");
 
     // Apply BCM theta migration (idempotent) — V3 Deep Research
     sqlx::raw_sql(BCM_THETA_MIGRATION)

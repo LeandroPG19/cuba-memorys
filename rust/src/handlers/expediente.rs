@@ -119,9 +119,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let mut response = serde_json::json!({"query": query, "results": results, "count": results.len()});
 
     if let Some(action) = proposed_action {
+        // FIX: Match against error_message, not solution.
+        // solution is NULL on unresolved errors (resolved=false), so
+        // similarity(solution, $1) was always NULL > 0.5 → false → never triggered.
         let failed_similar: Vec<(String,)> = sqlx::query_as(
             "SELECT error_message FROM brain_errors
-             WHERE resolved = false AND similarity(solution, $1) > 0.5 LIMIT 3"
+             WHERE resolved = false AND similarity(error_message, $1) > 0.5 LIMIT 3"
         )
         .bind(action)
         .fetch_all(pool)

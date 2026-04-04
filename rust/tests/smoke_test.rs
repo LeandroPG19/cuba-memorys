@@ -5,20 +5,38 @@
 
 use serde_json::{json, Value};
 
-/// Verify all 13 tools are defined in constants.
+/// Verify all 15 tools are defined in constants.
 #[test]
 fn test_all_tools_defined() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
-    assert_eq!(tools.len(), 13, "Expected 13 MCP tools, got {}", tools.len());
+    assert_eq!(
+        tools.len(),
+        15,
+        "Expected 15 MCP tools, got {}",
+        tools.len()
+    );
 
-    let tool_names: Vec<&str> = tools.iter()
+    let tool_names: Vec<&str> = tools
+        .iter()
         .filter_map(|t: &Value| t.get("name").and_then(|n: &Value| n.as_str()))
         .collect();
 
     let expected = [
-        "cuba_alma", "cuba_cronica", "cuba_faro", "cuba_puente", "cuba_eco",
-        "cuba_alarma", "cuba_remedio", "cuba_expediente", "cuba_jornada",
-        "cuba_decreto", "cuba_vigia", "cuba_zafra", "cuba_forget",
+        "cuba_alma",
+        "cuba_cronica",
+        "cuba_faro",
+        "cuba_puente",
+        "cuba_eco",
+        "cuba_alarma",
+        "cuba_remedio",
+        "cuba_expediente",
+        "cuba_jornada",
+        "cuba_decreto",
+        "cuba_vigia",
+        "cuba_zafra",
+        "cuba_forget",
+        "cuba_reflexion",
+        "cuba_hipotesis",
     ];
 
     for name in &expected {
@@ -32,11 +50,20 @@ fn test_tool_schema_structure() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
 
     for tool in &tools {
-        let name = tool.get("name").and_then(|n: &Value| n.as_str()).unwrap_or("???");
+        let name = tool
+            .get("name")
+            .and_then(|n: &Value| n.as_str())
+            .unwrap_or("???");
 
         assert!(tool.get("name").is_some(), "{name}: missing 'name'");
-        assert!(tool.get("description").is_some(), "{name}: missing 'description'");
-        assert!(tool.get("inputSchema").is_some(), "{name}: missing 'inputSchema'");
+        assert!(
+            tool.get("description").is_some(),
+            "{name}: missing 'description'"
+        );
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "{name}: missing 'inputSchema'"
+        );
 
         let schema = tool.get("inputSchema").unwrap();
         assert_eq!(
@@ -127,13 +154,25 @@ fn test_threshold_invariants() {
     assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Verify handler dispatch maps all 13 tools.
+/// Verify handler dispatch maps all 15 tools.
 #[test]
 fn test_handler_dispatch_coverage() {
     let tool_names = [
-        "cuba_alma", "cuba_cronica", "cuba_faro", "cuba_puente", "cuba_eco",
-        "cuba_alarma", "cuba_remedio", "cuba_expediente", "cuba_jornada",
-        "cuba_decreto", "cuba_vigia", "cuba_zafra", "cuba_forget",
+        "cuba_alma",
+        "cuba_cronica",
+        "cuba_faro",
+        "cuba_puente",
+        "cuba_eco",
+        "cuba_alarma",
+        "cuba_remedio",
+        "cuba_expediente",
+        "cuba_jornada",
+        "cuba_decreto",
+        "cuba_vigia",
+        "cuba_zafra",
+        "cuba_forget",
+        "cuba_reflexion",
+        "cuba_hipotesis",
     ];
 
     for name in &tool_names {
@@ -148,7 +187,14 @@ fn test_schema_sql_content() {
     let schema = include_str!("../src/schema.sql");
     assert!(!schema.is_empty());
 
-    for table in &["brain_entities", "brain_observations", "brain_relations", "brain_errors", "brain_sessions"] {
+    for table in &[
+        "brain_entities",
+        "brain_observations",
+        "brain_relations",
+        "brain_errors",
+        "brain_sessions",
+        "brain_episodes",
+    ] {
         assert!(schema.contains(table), "Missing table: {table}");
     }
 

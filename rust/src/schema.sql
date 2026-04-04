@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS brain_observations (
         CHECK (importance >= 0.0 AND importance <= 1.0),
     access_count INT DEFAULT 0,
     last_accessed TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     source TEXT DEFAULT 'agent'
         CHECK (source IN ('agent', 'error_detection', 'user', 'consolidation', 'inference')),
     version INT DEFAULT 1,
@@ -112,8 +113,38 @@ CREATE INDEX IF NOT EXISTS idx_obs_active_search
     WHERE observation_type != 'superseded';
 
 -- HNSW index for ANN vector search — O(log n) cosine similarity
--- m=16: connections/node (optimal for 384d BGE-small)
+-- m=16: connections/node (optimal for 384d multilingual-e5-small)
 -- ef_construction=128: build quality (Google Cloud + pgvector benchmarks 2025)
 CREATE INDEX IF NOT EXISTS idx_obs_embedding_hnsw
     ON brain_observations USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 128);
+
+-- ── Episodic Memory ──────────────────────────────────────────────
+-- Separate from semantic memory (brain_observations) per Tulving (1972).
+-- Episodic = specific temporal events with actors/artifacts.
+-- Decay: power-law I(t) = I₀ / (1 + c·t)^β, halflife ~3d (vs 30d semantic).
+CREATE TABLE IF NOT EXISTS brain_episodes (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    entity_id UUID NOT NULL REFERENCES brain_entities(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    ended_at TIMESTAMPTZ,
+    actors TEXT[] DEFAULT '{}',
+    artifacts TEXT[] DEFAULT '{}',
+    importance FLOAT DEFAULT 0.5
+        CHECK (importance >= 0.0 AND importance <= 1.0),
+    -- Semantic embedding for vector search (same model as observations)
+    embedding vector(384),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    search_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('simple', content)
+    ) STORED
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_entity   ON brain_episodes(entity_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_search   ON brain_episodes USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS idx_episodes_trgm     ON brain_episodes USING GIN(content gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_episodes_time     ON brain_episodes(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw
+    ON brain_episodes USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 128);

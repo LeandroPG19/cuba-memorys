@@ -1,4 +1,11 @@
-//! ONNX embeddings — BGE-small via ort crate.
+//! ONNX embeddings — multilingual-e5-small via ort crate.
+//!
+//! Model: intfloat/multilingual-e5-small (384d, 94 languages, MIT, ~113MB quantized).
+//! Replaces BGE-small-en-v1.5 (English-only) to support mixed-language knowledge graphs.
+//!
+//! E5 models require instruction prefixes:
+//!   - embed()         → "query: " prefix   (for search queries in cuba_faro)
+//!   - embed_passage() → "passage: " prefix  (for content stored in observations)
 //!
 //! FIX B2: All embedding computations run in spawn_blocking
 //! to avoid blocking the Tokio event loop.
@@ -14,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use crate::search::cache::TtlLruCache;
 
-/// Embedding dimension (BGE-small-en-v1.5 uses 384-d vectors).
+/// Embedding dimension (multilingual-e5-small uses 384-d vectors, same as BGE-small).
 pub const EMBEDDING_DIM: usize = 384;
 
 /// Global embedding cache (LRU with TTL — FIX B6, V7).
@@ -125,24 +132,44 @@ fn init_onnx_session(model_file: &std::path::Path, model_dir: &std::path::Path) 
     Ok(())
 }
 
-/// Generate embedding for text.
+/// Generate embedding for a search QUERY (adds "query: " prefix for E5 models).
+///
+/// Use this when encoding queries in cuba_faro hybrid search.
 ///
 /// FIX B2: Uses spawn_blocking for CPU-bound ONNX inference.
 /// FIX B6: Results cached in LRU with TTL.
 ///
 /// Returns 384-dimensional f32 vector.
 pub async fn embed(text: &str) -> Result<Vec<f32>> {
-    // Check cache first
-    let cache_key = text.to_string();
+    embed_with_prefix(text, "query: ").await
+}
+
+/// Generate embedding for a PASSAGE (adds "passage: " prefix for E5 models).
+///
+/// Use this when encoding content to store in observations/episodes.
+/// E5 models show ~2-5% better retrieval quality when query and passage
+/// use their respective prefixes (Wang et al. 2022).
+///
+/// Returns 384-dimensional f32 vector.
+pub async fn embed_passage(text: &str) -> Result<Vec<f32>> {
+    embed_with_prefix(text, "passage: ").await
+}
+
+/// Internal: generate embedding with a given instruction prefix.
+///
+/// Cache key includes the prefix to avoid query/passage collisions.
+async fn embed_with_prefix(text: &str, prefix: &str) -> Result<Vec<f32>> {
+    // Cache key includes prefix to distinguish query vs passage embeddings
+    let cache_key = format!("{}{}", prefix, text);
     if let Ok(mut cache) = get_cache().lock()
         && let Some(cached) = cache.get(&cache_key) {
             return Ok(cached);
         }
 
     // FIX B2: spawn_blocking for CPU-bound work
-    let text_owned = text.to_string();
+    let prefixed = format!("{}{}", prefix, text);
     let embedding = tokio::task::spawn_blocking(move || {
-        compute_embedding(&text_owned)
+        compute_embedding(&prefixed)
     })
     .await
     .context("embedding task panicked")??;
@@ -221,6 +248,10 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
         .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
 
     // 4. Extract token embeddings (shape: [1, seq_len, 384])
+    // ort outputs support index access; check non-empty first to avoid panic
+    if outputs.len() == 0 {
+        return Err(anyhow::anyhow!("ONNX model returned no output tensors"));
+    }
     let (shape, data) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("extract tensor: {e}"))?;

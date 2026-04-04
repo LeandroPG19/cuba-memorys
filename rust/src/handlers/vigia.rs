@@ -23,12 +23,19 @@ async fn summary(pool: &PgPool) -> Result<Value> {
     let relations: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_relations").fetch_one(pool).await?;
     let errors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_errors").fetch_one(pool).await?;
     let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_sessions").fetch_one(pool).await?;
-    let token_estimate = observations.0 * 50;
+    // Episodes — non-fatal if table doesn't exist on older DBs
+    let episodes: i64 = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM brain_episodes")
+        .fetch_one(pool)
+        .await
+        .map(|(c,)| c)
+        .unwrap_or(0);
+    let token_estimate = (observations.0 + episodes) * 50;
 
     Ok(serde_json::json!({
         "metric": "summary",
         "entities": entities.0,
         "observations": observations.0,
+        "episodes": episodes,
         "relations": relations.0,
         "errors": errors.0,
         "sessions": sessions.0,

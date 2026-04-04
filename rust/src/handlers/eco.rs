@@ -114,7 +114,8 @@ async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> R
             ),
             content = $2,
             version = version + 1,
-            last_accessed = NOW()
+            last_accessed = NOW(),
+            updated_at = NOW()
          WHERE id = $1"
     )
     .bind(obs_id)

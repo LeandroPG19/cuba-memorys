@@ -330,6 +330,39 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
         results.extend(errors);
     }
 
+    // Search episodes (always included in "all" scope — separate memory system)
+    if scope == "all" {
+        let episodes = search_table::<(uuid::Uuid, String, String, f64, f64), _>(
+            pool,
+            "SELECT ep.id, e.name, ep.content, ep.importance::float8,
+                    (  (ts_rank(ep.search_vector, plainto_tsquery('simple', $1))
+                      + similarity(ep.content, $1)) * 0.7
+                     + ep.importance::float8 * 0.3
+                    )::float8 AS score
+             FROM brain_episodes ep
+             JOIN brain_entities e ON ep.entity_id = e.id
+             WHERE ep.search_vector @@ plainto_tsquery('simple', $1)
+                OR similarity(ep.content, $1) > 0.3
+             ORDER BY score DESC
+             LIMIT $2",
+            query,
+            limit,
+            |(id, entity_name, content, importance, score)| {
+                serde_json::json!({
+                    "id": id.to_string(),
+                    "type": "episode",
+                    "entity_name": entity_name,
+                    "content": content,
+                    "importance": importance,
+                    "score": score
+                })
+            },
+        )
+        .await
+        .unwrap_or_default(); // Non-fatal if table doesn't exist
+        results.extend(episodes);
+    }
+
     Ok(results)
 }
 
@@ -359,12 +392,12 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
          ORDER BY o.embedding <=> $1::vector
          LIMIT $2"
     )
-    .bind(pgvector::Vector::from(embedding))
+    .bind(pgvector::Vector::from(embedding.clone()))
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    let results: Vec<Value> = observations
+    let mut results: Vec<Value> = observations
         .iter()
         .map(|(id, entity_name, content, sim)| {
             serde_json::json!({
@@ -376,6 +409,32 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
             })
         })
         .collect();
+
+    // Also search episodes via vector similarity (if table exists)
+    let episodes: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
+        "SELECT ep.id, e.name, ep.content,
+                1.0 - (ep.embedding <=> $1::vector) AS cosine_sim
+         FROM brain_episodes ep
+         JOIN brain_entities e ON ep.entity_id = e.id
+         WHERE ep.embedding IS NOT NULL
+         ORDER BY ep.embedding <=> $1::vector
+         LIMIT $2"
+    )
+    .bind(pgvector::Vector::from(embedding))
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default(); // Non-fatal if table doesn't exist
+
+    results.extend(episodes.iter().map(|(id, entity_name, content, sim)| {
+        serde_json::json!({
+            "id": id.to_string(),
+            "type": "episode",
+            "entity_name": entity_name,
+            "content": content,
+            "cosine_similarity": sim
+        })
+    }));
 
     Ok(results)
 }
