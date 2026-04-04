@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.LeandroPG19/cuba-memorys",
-  "description": "Persistent memory for AI agents. 19 tools: knowledge graph, Hebbian learning, RRF search, episodic memory, contradiction detection, prospective triggers, Bayesian calibration, link prediction.",
+  "description": "Persistent memory for AI agents. 19 tools, Hebbian learning, RRF search, knowledge graph.",
   "repository": {
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
