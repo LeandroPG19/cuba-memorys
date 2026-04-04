@@ -155,7 +155,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --no-sdist --out dist
+          args: --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
 
