@@ -114,6 +114,58 @@ BEGIN
 END $$;
 "#;
 
+/// V0.6: Embedding model versioning — track which model produced each embedding.
+const EMBEDDING_MODEL_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_observations' AND column_name = 'embedding_model'
+    ) THEN
+        ALTER TABLE brain_observations ADD COLUMN embedding_model TEXT DEFAULT 'multilingual-e5-small';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_episodes' AND column_name = 'embedding_model'
+    ) THEN
+        ALTER TABLE brain_episodes ADD COLUMN embedding_model TEXT DEFAULT 'multilingual-e5-small';
+    END IF;
+END $$;
+"#;
+
+/// V0.6: Session provenance — link observations/episodes to the session that created them.
+const SESSION_PROVENANCE_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_observations' AND column_name = 'session_id'
+    ) THEN
+        ALTER TABLE brain_observations ADD COLUMN session_id UUID REFERENCES brain_sessions(id) ON DELETE SET NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_episodes' AND column_name = 'session_id'
+    ) THEN
+        ALTER TABLE brain_episodes ADD COLUMN session_id UUID REFERENCES brain_sessions(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+"#;
+
+/// V0.6: Auto-tagging — keyword tags array on observations.
+const TAGS_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'brain_observations' AND column_name = 'tags'
+    ) THEN
+        ALTER TABLE brain_observations ADD COLUMN tags TEXT[] DEFAULT '{}';
+        CREATE INDEX IF NOT EXISTS idx_obs_tags ON brain_observations USING GIN(tags);
+    END IF;
+END $$;
+"#;
+
 /// BCM θ_M EMA migration — adds bcm_theta column for persistent sliding threshold.
 /// V3: Deep Research 2026-03-14.
 const BCM_THETA_MIGRATION: &str = r#"
@@ -216,6 +268,30 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
         .context("failed to apply verify_log migration")?;
 
     tracing::info!("brain_verify_log table verified");
+
+    // V0.6: Embedding model versioning (idempotent)
+    sqlx::raw_sql(EMBEDDING_MODEL_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply embedding_model migration")?;
+
+    tracing::info!("embedding_model columns verified");
+
+    // V0.6: Session provenance (idempotent)
+    sqlx::raw_sql(SESSION_PROVENANCE_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply session_provenance migration")?;
+
+    tracing::info!("session_id provenance columns verified");
+
+    // V0.6: Auto-tagging (idempotent)
+    sqlx::raw_sql(TAGS_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply tags migration")?;
+
+    tracing::info!("tags column verified");
 
     // Check pgvector extension
     let pgvector_check: Option<(String,)> =

@@ -12,7 +12,7 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
 pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-// Below PRED_ERROR_UPDATE → create new observation
+                                         // Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
@@ -63,6 +63,24 @@ pub const VALID_SOURCES: &[&str] = &[
     "inference",
 ];
 
+// ── Importance Priors ────────────────────────────────────────────
+
+/// Importance priors by observation type.
+///
+/// Decisions and lessons inherently more valuable than transient context.
+/// Used by cronica::add to set initial importance based on both the
+/// observation type and the information density of the content.
+pub fn importance_prior(obs_type: &str, density: f64) -> f64 {
+    match obs_type {
+        "decision" => 0.8,
+        "lesson" => 0.75,
+        "error" | "solution" => 0.7,
+        "fact" | "preference" => (density * 0.6).clamp(0.1, 0.9),
+        "context" | "tool_usage" => (density * 0.4).clamp(0.1, 0.7),
+        _ => density.clamp(0.1, 0.8),
+    }
+}
+
 // ── Tool Definitions ─────────────────────────────────────────────
 
 /// Generate MCP tool definitions for tools/list response.
@@ -110,24 +128,27 @@ pub fn tool_definitions() -> Vec<Value> {
                     "scope": {"type": "string", "enum": ["all", "entities", "observations", "errors"], "description": "Where to search (default: all)"},
                     "limit": {"type": "integer", "description": "Max results (default 10, max 50)"},
                     "before": {"type": "string", "description": "ISO8601 datetime — return results created before this time"},
-                    "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"}
+                    "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"},
+                    "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format: verbose (default, full data) or compact (abbreviated keys, ~35% fewer tokens)"},
+                    "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"}
                 },
                 "required": ["query"]
             }),
         ),
         tool_def(
             "cuba_puente",
-            "Create edges between entities (uses, causes, implements, depends_on, related_to). 'traverse' explores connections, 'infer' does transitive reasoning (A→B→C). Relations strengthen with use (Hebbian).",
+            "Create edges between entities (uses, causes, implements, depends_on, related_to). 'traverse' explores connections, 'infer' does transitive reasoning (A→B→C), 'predict' suggests missing links via Adamic-Adar. Relations strengthen with use (Hebbian).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["create", "delete", "traverse", "infer"], "description": "Operation to perform"},
+                    "action": {"type": "string", "enum": ["create", "delete", "traverse", "infer", "predict"], "description": "Operation to perform. 'predict' uses Adamic-Adar to suggest missing relations."},
                     "from_entity": {"type": "string", "description": "Source entity name"},
                     "to_entity": {"type": "string", "description": "Target entity name"},
                     "relation_type": {"type": "string", "description": "Relation: uses, causes, implements, depends_on, related_to"},
                     "bidirectional": {"type": "boolean", "description": "If true, relation goes both ways"},
                     "start_entity": {"type": "string", "description": "Start point for traverse/infer"},
-                    "max_depth": {"type": "integer", "description": "Max hops for traverse/infer (default 3, max 5)"}
+                    "max_depth": {"type": "integer", "description": "Max hops for traverse/infer (default 3, max 5)"},
+                    "entity_name": {"type": "string", "description": "Entity name for predict action (Adamic-Adar link prediction)"}
                 },
                 "required": ["action"]
             }),
@@ -324,6 +345,20 @@ pub fn tool_definitions() -> Vec<Value> {
                     "verify_id": {"type": "string", "description": "Verify log UUID (for resolve)"},
                     "outcome": {"type": "string", "enum": ["correct", "incorrect"], "description": "Whether the verify prediction was right (for resolve)"},
                     "limit": {"type": "integer", "description": "Max results for history (default 20)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_ingesta",
+            "Bulk knowledge ingestion: 'ingest' accepts an array of {entity_name, content, observation_type} items. 'parse' splits long text by paragraphs and auto-classifies each. Internally uses same dedup/embedding pipeline as cronica.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["ingest", "parse"], "description": "Ingestion mode. 'ingest' for structured items, 'parse' for raw text splitting."},
+                    "items": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?} objects (for ingest action, max 200)"},
+                    "entity_name": {"type": "string", "description": "Entity to attach parsed observations to (for parse action)"},
+                    "text": {"type": "string", "description": "Long text to split into observations (for parse action)"}
                 },
                 "required": ["action"]
             }),

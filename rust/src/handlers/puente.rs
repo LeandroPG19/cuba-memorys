@@ -17,7 +17,10 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "delete" => delete(pool, &args).await,
         "traverse" => traverse(pool, &args).await,
         "infer" => infer(pool, &args).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use create/delete/traverse/infer"),
+        "predict" => predict_links(pool, &args).await,
+        _ => anyhow::bail!(
+            "Invalid action: {action}. Use create/delete/traverse/infer/predict"
+        ),
     }
 }
 
@@ -292,6 +295,110 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
         "start": start,
         "inferred_connections": inferred,
         "count": inferred.len()
+    }))
+}
+
+/// V0.6: Adamic-Adar link prediction — predict missing relations via common neighbors.
+///
+/// AA(x,y) = Σ 1/log(|N(z)|) for z in common neighbors of x and y.
+/// High AA score means two entities share many well-connected neighbors,
+/// suggesting a missing direct relation. Simple, effective for small graphs.
+async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
+    let entity_name = args
+        .get("entity_name")
+        .or_else(|| args.get("start_entity"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if entity_name.is_empty() {
+        anyhow::bail!("entity_name is required for predict");
+    }
+
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10)
+        .min(50);
+
+    let entity_id: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1 LIMIT 1")
+            .bind(entity_name)
+            .fetch_optional(pool)
+            .await?;
+
+    let entity_id = match entity_id {
+        Some((id,)) => id,
+        None => {
+            return Ok(serde_json::json!({
+                "action": "predict",
+                "entity": entity_name,
+                "predictions": [],
+                "note": "Entity not found"
+            }))
+        }
+    };
+
+    // Adamic-Adar link prediction via SQL CTEs
+    let predictions: Vec<(String, String, f64)> = sqlx::query_as(
+        r#"
+        WITH entity_neighbors AS (
+            SELECT CASE WHEN from_entity = $1 THEN to_entity ELSE from_entity END AS neighbor
+            FROM brain_relations
+            WHERE from_entity = $1 OR to_entity = $1
+        ),
+        candidate_links AS (
+            SELECT DISTINCT
+                CASE WHEN r.from_entity = en.neighbor THEN r.to_entity ELSE r.from_entity END AS candidate,
+                en.neighbor AS shared_neighbor
+            FROM entity_neighbors en
+            JOIN brain_relations r ON r.from_entity = en.neighbor OR r.to_entity = en.neighbor
+            WHERE CASE WHEN r.from_entity = en.neighbor THEN r.to_entity ELSE r.from_entity END != $1
+              AND CASE WHEN r.from_entity = en.neighbor THEN r.to_entity ELSE r.from_entity END
+                  NOT IN (SELECT neighbor FROM entity_neighbors)
+        ),
+        neighbor_degrees AS (
+            SELECT node, SUM(cnt) AS degree FROM (
+                SELECT from_entity AS node, COUNT(*) AS cnt FROM brain_relations GROUP BY from_entity
+                UNION ALL
+                SELECT to_entity, COUNT(*) FROM brain_relations GROUP BY to_entity
+            ) sub GROUP BY node
+        ),
+        aa_scores AS (
+            SELECT cl.candidate, SUM(1.0 / LN(2.0 + COALESCE(nd.degree, 1))) AS aa_score
+            FROM candidate_links cl
+            LEFT JOIN neighbor_degrees nd ON cl.shared_neighbor = nd.node
+            GROUP BY cl.candidate
+        )
+        SELECT e.name, e.entity_type, aa.aa_score::float8
+        FROM aa_scores aa
+        JOIN brain_entities e ON aa.candidate = e.id
+        ORDER BY aa.aa_score DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(entity_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let prediction_json: Vec<Value> = predictions
+        .iter()
+        .map(|(name, etype, score)| {
+            serde_json::json!({
+                "entity": name,
+                "entity_type": etype,
+                "adamic_adar_score": score,
+                "recommendation": "Consider creating a relation between these entities"
+            })
+        })
+        .collect();
+
+    let count = prediction_json.len();
+    Ok(serde_json::json!({
+        "action": "predict",
+        "entity": entity_name,
+        "predictions": prediction_json,
+        "count": count,
+        "algorithm": "Adamic-Adar (sum of 1/log(degree) for common neighbors)"
     }))
 }
 

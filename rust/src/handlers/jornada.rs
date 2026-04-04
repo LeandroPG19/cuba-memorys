@@ -25,6 +25,25 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
             let mut response = serde_json::json!({"action": "started", "session": {"id": row.0.to_string(), "session_name": name, "started_at": chrono::Utc::now().to_rfc3339()}});
 
+            // V0.6: Fetch previous session summary for context continuity
+            let prev_session: Option<(Option<String>, Option<String>, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT session_name, summary, outcome FROM brain_sessions
+                     WHERE ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1",
+                )
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+
+            if let Some((prev_name, prev_summary, prev_outcome)) = prev_session {
+                response["previous_session"] = serde_json::json!({
+                    "name": prev_name,
+                    "summary": prev_summary,
+                    "outcome": prev_outcome
+                });
+            }
+
             // Centinela: check on_session_start triggers
             let triggered =
                 crate::handlers::centinela::check_triggers(pool, name, "on_session_start")
@@ -42,12 +61,52 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Find the active session id before closing
+            let active_session: Option<(uuid::Uuid,)> = sqlx::query_as(
+                "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await?;
+
             let result = sqlx::query(
                 "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2 WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1)"
             ).bind(outcome).bind(summary).execute(pool).await?;
-            Ok(
-                serde_json::json!({"action": "ended", "outcome": outcome, "updated": result.rows_affected() > 0}),
-            )
+
+            let mut response = serde_json::json!({
+                "action": "ended",
+                "outcome": outcome,
+                "updated": result.rows_affected() > 0
+            });
+
+            // V0.6: Session diff — summarize what was created during this session
+            if let Some((session_id,)) = active_session {
+                let session_diff: Vec<(String, i64)> = sqlx::query_as(
+                    "SELECT observation_type, COUNT(*) FROM brain_observations
+                     WHERE session_id = $1 GROUP BY observation_type",
+                )
+                .bind(session_id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default();
+
+                let episode_count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM brain_episodes WHERE session_id = $1")
+                        .bind(session_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+
+                let mut diff = serde_json::Map::new();
+                for (obs_type, count) in &session_diff {
+                    diff.insert(obs_type.clone(), serde_json::json!(count));
+                }
+                diff.insert("episodes".to_string(), serde_json::json!(episode_count));
+
+                response["session_diff"] = Value::Object(diff);
+            }
+
+            Ok(response)
         }
         "current" => {
             let session: Option<(uuid::Uuid, Option<String>, Value)> = sqlx::query_as(

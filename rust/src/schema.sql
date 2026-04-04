@@ -40,8 +40,15 @@ CREATE TABLE IF NOT EXISTS brain_observations (
         CHECK (source IN ('agent', 'error_detection', 'user', 'consolidation', 'inference')),
     version INT DEFAULT 1,
     previous_versions JSONB DEFAULT '[]',
-    -- Semantic embedding (pgvector — 384d BGE-small)
+    -- Semantic embedding (pgvector — 384d multilingual-e5-small)
     embedding vector(384),
+    -- V0.6: Embedding model versioning — track which model produced each embedding
+    embedding_model TEXT DEFAULT 'multilingual-e5-small',
+    -- V0.6: Auto-extracted keyword tags for filtering
+    tags TEXT[] DEFAULT '{}',
+    -- V0.6: Session provenance — added via migration in db.rs (FK to brain_sessions
+    -- which is defined later in this file; inline FK would cause forward-reference error)
+    session_id UUID,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector('simple', content)
@@ -112,6 +119,14 @@ CREATE INDEX IF NOT EXISTS idx_obs_active_search
     ON brain_observations USING GIN(search_vector)
     WHERE observation_type != 'superseded';
 
+-- V0.6: Partial index for high-importance active observations (covers ~80% of searches)
+CREATE INDEX IF NOT EXISTS idx_obs_high_importance
+    ON brain_observations(importance DESC)
+    WHERE importance > 0.1 AND observation_type != 'superseded';
+
+-- V0.6: GIN index for tags is created via migration in db.rs
+-- (tags column may not exist on existing DBs until migration runs)
+
 -- HNSW index for ANN vector search — O(log n) cosine similarity
 -- m=16: connections/node (optimal for 384d multilingual-e5-small)
 -- ef_construction=128: build quality (Google Cloud + pgvector benchmarks 2025)
@@ -135,6 +150,10 @@ CREATE TABLE IF NOT EXISTS brain_episodes (
         CHECK (importance >= 0.0 AND importance <= 1.0),
     -- Semantic embedding for vector search (same model as observations)
     embedding vector(384),
+    -- V0.6: Embedding model versioning
+    embedding_model TEXT DEFAULT 'multilingual-e5-small',
+    -- V0.6: Session provenance
+    session_id UUID REFERENCES brain_sessions(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector('simple', content)

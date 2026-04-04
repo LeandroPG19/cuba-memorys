@@ -13,10 +13,10 @@
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, neuroscience-inspired algorithms, and anti-hallucination grounding.
 
-13 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
+19 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v0.3.0** — Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, zero tech debt. 51 tests, 0 clippy warnings, audited GO.
+> **v0.6.0** — Contextual Retrieval, importance priors, score breakdown, session provenance, compact format, semantic dedup, auto-tagging, Adamic-Adar link prediction, contradiction detection, prospective memory triggers, Bayesian calibration, bulk ingest, episodic memory with power-law decay, temporal search filters, and gap detection. 56 tests, 0 clippy warnings.
 
 ## Demo
 
@@ -30,14 +30,19 @@
 
 AI agents forget everything between conversations. Cuba-Memorys solves this:
 
-- **Exponential decay** — Memories fade realistically (halflife=30d), strengthen with access
+- **Stratified exponential decay** — Memories fade by type (facts=30d, errors=14d, context=7d), strengthen with access
 - **Hebbian + BCM metaplasticity** — Self-normalizing importance via Oja's rule with EMA sliding threshold
-- **Hybrid RRF fusion search** — pg_trgm + full-text + pgvector HNSW, with entropy-routed weighting (k=60)
-- **Knowledge graph** — Entities, observations, typed relations with Leiden community detection
-- **Anti-hallucination grounding** — Verify claims against stored knowledge with graduated confidence scoring
-- **REM Sleep consolidation** — Autonomous background decay + PageRank after idle
-- **Graph intelligence** — Personalized PageRank, Leiden communities, Brandes centrality, Shannon entropy
-- **Error memory** — Never repeat the same mistake (anti-repetition guard)
+- **Hybrid RRF fusion search** — pg_trgm + full-text + pgvector HNSW, entropy-routed weighting (k=60), temporal filters, tag filters, compact format
+- **Knowledge graph** — Entities, observations, typed relations with Leiden community detection and Adamic-Adar link prediction
+- **Anti-hallucination grounding** — Verify claims with graduated confidence + Bayesian calibration over time
+- **Episodic memory** — Separate temporal events (Tulving 1972) with power-law decay I(t) = I₀/(1+ct)^β (Wixted 2004)
+- **Contradiction detection** — Scan for semantic conflicts via embedding cosine + bilingual negation heuristics
+- **Prospective memory** — Triggers that fire on entity access, session start, or error match ("remind me when X")
+- **Contextual Retrieval** — Entity context prepended before embedding (Anthropic technique, +20% recall)
+- **REM Sleep consolidation** — Autonomous stratified decay + PageRank + auto-prune + auto-merge + episode decay
+- **Graph intelligence** — PageRank, Leiden communities, Brandes centrality, Shannon entropy, gap detection
+- **Session awareness** — Provenance tracking, session diff, importance priors per observation type
+- **Error memory** — Never repeat the same mistake (anti-repetition guard + pattern detection)
 
 ### Comparison
 
@@ -151,7 +156,7 @@ Without ONNX, the server uses deterministic hash-based embeddings — functional
 
 ---
 
-## The 13 Tools
+## The 19 Tools
 
 Every tool is named after Cuban culture — memorable, professional, meaningful.
 
@@ -159,21 +164,22 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_alma` | **Alma** — soul | CRUD entities. Types: `concept`, `project`, `technology`, `person`, `pattern`, `config`. Triggers Hebbian boost + access tracking. |
-| `cuba_cronica` | **Cronica** — chronicle | Attach observations with **dedup gate**, **contradiction detection**, **Shannon density gating**, and **adaptive PE gating V5.1**. Supports `batch_add`. |
-| `cuba_puente` | **Puente** — bridge | Typed relations (`uses`, `causes`, `implements`, `depends_on`, `related_to`). **Traverse** walks the graph. **Infer** discovers transitive paths. blake3 dedup. |
+| `cuba_alma` | **Alma** — soul | CRUD entities. Types: `concept`, `project`, `technology`, `person`, `pattern`, `config`. Hebbian boost + access tracking. Fires prospective triggers on access. |
+| `cuba_cronica` | **Cronica** — chronicle | Observations with **semantic dedup**, **PE gating V5.2**, **importance priors** by type, **auto-tagging** (TF-IDF top-5 keywords), **session provenance**, **contextual embedding**. Also manages **episodic memories** (episode_add/episode_list) and **timeline** view. |
+| `cuba_puente` | **Puente** — bridge | Typed relations. **Traverse** walks the graph. **Infer** discovers transitive paths. **Predict** suggests missing relations via Adamic-Adar link prediction. |
+| `cuba_ingesta` | **Ingesta** — intake | Bulk knowledge ingestion: accepts arrays of observations or long text with auto-classification by paragraph. |
 
 ### Search & Verification
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_faro` | **Faro** — lighthouse | RRF fusion (k=60) with entropy routing and pgvector. KG-neighbor expansion for low recall. `verify` mode with source triangulation. Session-aware boost. |
+| `cuba_faro` | **Faro** — lighthouse | RRF fusion (k=60) with entropy routing, pgvector, temporal filters (`before`/`after`), tag filters, **score breakdown** (text/vector/importance/session), **compact format** (~35% fewer tokens), Bayesian **calibrated accuracy**. |
 
 ### Error Memory
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_alarma` | **Alarma** — alarm | Report errors. Auto-detects patterns (>=3 similar = warning). |
+| `cuba_alarma` | **Alarma** — alarm | Report errors. Auto-detects patterns (>=3 similar = warning). Fires prospective triggers on error match. |
 | `cuba_remedio` | **Remedio** — remedy | Resolve errors with cross-reference to similar unresolved issues. |
 | `cuba_expediente` | **Expediente** — case file | Search past errors. **Anti-repetition guard**: warns if similar approach failed before. |
 
@@ -181,17 +187,27 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_jornada` | **Jornada** — workday | Session tracking with goals and outcomes. Goals used for decay exemption and search boost. |
+| `cuba_jornada` | **Jornada** — workday | Session tracking with goals, outcomes, **session diff** (what was learned), and **previous session** context on start. Fires prospective triggers. |
 | `cuba_decreto` | **Decreto** — decree | Record architecture decisions with context, alternatives, rationale. |
+
+### Cognition & Analysis
+
+| Tool | Meaning | What it does |
+|------|---------|-------------|
+| `cuba_reflexion` | **Reflexion** — reflection | Gap detection: isolated entities, underconnected hubs, type silos, observation gaps, density anomalies (z-score). |
+| `cuba_hipotesis` | **Hipotesis** — hypothesis | Abductive inference: given an effect, find plausible causes via backward causal traversal. Plausibility = path_strength x importance. |
+| `cuba_contradiccion` | **Contradiccion** — contradiction | Scan for semantic conflicts between same-entity observations via embedding cosine + bilingual negation heuristics. |
+| `cuba_centinela` | **Centinela** — sentinel | Prospective memory triggers: "remind me when X is accessed / session starts / error matches". Auto-deactivate on max_fires, expiration support. |
+| `cuba_calibrar` | **Calibrar** — calibrate | Bayesian confidence calibration: track faro/verify predictions, compute P(correct\|grounding_level) via Beta distribution. Closes the verify-correct feedback loop. |
 
 ### Memory Maintenance
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_zafra` | **Zafra** — sugar harvest | Consolidation: exponential decay (halflife=30d), prune, merge, summarize, pagerank, find_duplicates, export, stats. |
+| `cuba_zafra` | **Zafra** — sugar harvest | Stratified decay (30d/14d/7d by type), power-law episode decay, prune, merge, summarize, pagerank, find_duplicates, export, stats, **reembed** (model migration with versioning). Auto-consolidation on >50 observations. |
 | `cuba_eco` | **Eco** — echo | RLHF feedback: positive (Oja boost), negative (decrease), correct (update with versioning). |
-| `cuba_vigia` | **Vigia** — watchman | Analytics: summary, health (Shannon entropy), drift (chi-squared), Leiden communities, Brandes bridges. |
-| `cuba_forget` | **Forget** — forget | GDPR Right to Erasure: cascading hard-delete of entity and ALL references. Irreversible. |
+| `cuba_vigia` | **Vigia** — watchman | Analytics: summary, **enhanced health** (null embeddings, active triggers, table sizes, embedding model), drift (chi-squared), Leiden communities, Brandes bridges. |
+| `cuba_forget` | **Forget** — forget | GDPR Right to Erasure: cascading hard-delete of entity and ALL references (observations, episodes, relations, errors, sessions). Irreversible. |
 
 ---
 
@@ -205,22 +221,22 @@ cuba-memorys/
 │   │   ├── main.rs              # mimalloc + graceful shutdown
 │   │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
 │   │   ├── db.rs                # sqlx PgPool (10 max, 600s idle, 1800s lifetime)
-│   │   ├── schema.sql           # 5 tables, 15+ indexes, HNSW
-│   │   ├── constants.rs         # Tool definitions, thresholds, enums
-│   │   ├── handlers/            # 13 MCP tool handlers (1 file each)
-│   │   ├── cognitive/           # Hebbian/BCM, access tracking, PE gating
+│   │   ├── schema.sql           # 8 tables, 20+ indexes, HNSW
+│   │   ├── constants.rs         # Tool definitions, thresholds, importance priors
+│   │   ├── handlers/            # 19 MCP tool handlers (1 file each)
+│   │   ├── cognitive/           # Hebbian/BCM, access tracking, PE gating V5.2
 │   │   ├── search/              # RRF fusion, confidence, LRU cache
-│   │   ├── graph/               # Brandes centrality, Leiden, PageRank
-│   │   └── embeddings/          # ONNX BGE-small (optional, spawn_blocking)
+│   │   ├── graph/               # Brandes centrality, Leiden, PageRank (NF-IDF)
+│   │   └── embeddings/          # ONNX multilingual-e5-small (contextual, spawn_blocking)
 │   ├── scripts/
-│   │   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
+│   │   └── download_model.sh    # Download multilingual-e5-small ONNX
 │   └── tests/
 └── server.json                  # MCP Registry manifest
 ```
 
 ### Performance: Rust vs Python
 
-| Metric | Python v1.6.0 | Rust v0.3.0 |
+| Metric | Python v1.6.0 | Rust v0.6.0 |
 | ------ | :-----------: | :---------: |
 | Binary size | ~50MB (venv) | **7.6MB** |
 | Entity create | ~2ms | **498us** |
@@ -235,10 +251,13 @@ cuba-memorys/
 | Table | Purpose | Key Features |
 |-------|---------|-------------|
 | `brain_entities` | KG nodes | tsvector + pg_trgm + GIN indexes, importance, bcm_theta |
-| `brain_observations` | Facts with provenance | 9 types, versioning, `vector(384)` (pgvector), exponential decay |
+| `brain_observations` | Facts with provenance | 9 types, versioning, `vector(384)`, importance priors, auto-tags TEXT[], session_id FK, embedding_model tracking |
 | `brain_relations` | Typed edges | 5 types, bidirectional, Hebbian strength, blake3 dedup |
 | `brain_errors` | Error memory | JSONB context, synapse weight, pattern detection |
-| `brain_sessions` | Working sessions | Goals (JSONB), outcome tracking, duration |
+| `brain_sessions` | Working sessions | Goals (JSONB), outcome tracking, session diff |
+| `brain_episodes` | Episodic memory | Tulving 1972, actors/artifacts TEXT[], power-law decay (Wixted 2004) |
+| `brain_triggers` | Prospective memory | on_access/on_session_start/on_error_match, max_fires, expiration |
+| `brain_verify_log` | Bayesian calibration | claim, confidence, grounding_level, outcome (correct/incorrect) |
 
 ### Search Pipeline
 

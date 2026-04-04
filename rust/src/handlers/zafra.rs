@@ -232,13 +232,17 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .get("batch_size")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(500);
+            let current_model = crate::embeddings::onnx::CURRENT_MODEL;
+            // V0.6: Only re-encode observations with stale/missing model or embedding
             let obs: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                 "SELECT id, content FROM brain_observations
                  WHERE observation_type != 'superseded'
+                   AND (embedding_model != $2 OR embedding_model IS NULL OR embedding IS NULL)
                  ORDER BY importance DESC
                  LIMIT $1",
             )
             .bind(batch_size)
+            .bind(current_model)
             .fetch_all(pool)
             .await?;
 
@@ -249,10 +253,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 match crate::embeddings::onnx::embed_passage(&content).await {
                     Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
                         if sqlx::query(
-                            "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
+                            "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
                         )
                         .bind(pgvector::Vector::from(emb))
                         .bind(obs_id)
+                        .bind(current_model)
                         .execute(pool)
                         .await
                         .is_ok()

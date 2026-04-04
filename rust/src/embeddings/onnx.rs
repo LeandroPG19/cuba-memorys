@@ -24,6 +24,10 @@ use std::sync::OnceLock;
 /// Embedding dimension (multilingual-e5-small uses 384-d vectors, same as BGE-small).
 pub const EMBEDDING_DIM: usize = 384;
 
+/// Current embedding model identifier — stored alongside embeddings for versioning.
+/// Used by zafra::reembed to detect stale embeddings needing re-encoding.
+pub const CURRENT_MODEL: &str = "multilingual-e5-small";
+
 /// Global embedding cache (LRU with TTL — FIX B6, V7).
 static CACHE: OnceLock<std::sync::Mutex<TtlLruCache<Vec<f32>>>> = OnceLock::new();
 
@@ -160,6 +164,20 @@ pub async fn embed(text: &str) -> Result<Vec<f32>> {
 /// Returns 384-dimensional f32 vector.
 pub async fn embed_passage(text: &str) -> Result<Vec<f32>> {
     embed_with_prefix(text, "passage: ").await
+}
+
+/// Embed passage with entity context prepended (Contextual Retrieval).
+///
+/// Improves retrieval quality by ~20% (Anthropic benchmarks) by prepending
+/// `[entity_type:entity_name]` before the content. This gives the embedding
+/// model richer context about what the text refers to.
+pub async fn embed_passage_contextual(
+    text: &str,
+    entity_type: &str,
+    entity_name: &str,
+) -> Result<Vec<f32>> {
+    let contextualized = format!("[{}:{}] {}", entity_type, entity_name, text);
+    embed_with_prefix(&contextualized, "passage: ").await
 }
 
 /// Internal: generate embedding with a given instruction prefix.

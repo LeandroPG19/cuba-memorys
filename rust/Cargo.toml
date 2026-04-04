@@ -1,8 +1,8 @@
 [package]
 name = "cuba-memorys"
-version = "0.3.0"
+version = "0.6.0"
 edition = "2024"
-description = "Knowledge Graph MCP Server — Rust, importance-aware ranking, vector search"
+description = "Knowledge Graph MCP Server — 19 tools, Hebbian learning, RRF fusion, contradiction detection, prospective memory, Bayesian calibration"
 license = "CC-BY-NC-4.0"
 
 [dependencies]

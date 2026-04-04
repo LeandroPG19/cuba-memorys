@@ -19,6 +19,7 @@ pub mod expediente;
 pub mod faro;
 pub mod forget;
 pub mod hipotesis;
+pub mod ingesta;
 pub mod jornada;
 pub mod puente;
 pub mod reflexion;
@@ -57,6 +58,7 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
         "cuba_centinela" => centinela::handle(pool, args).await?,
         "cuba_contradiccion" => contradiccion::handle(pool, args).await?,
         "cuba_calibrar" => calibrar::handle(pool, args).await?,
+        "cuba_ingesta" => ingesta::handle(pool, args).await?,
         _ => {
             tracing::warn!(tool = %tool_name, "unknown tool");
             anyhow::bail!("Unknown tool: {tool_name}")

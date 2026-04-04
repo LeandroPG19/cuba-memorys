@@ -219,12 +219,14 @@ async fn find_density_anomalies(pool: &PgPool) -> Result<Vec<(String, i64, i64, 
                    STDDEV_POP(rel_count)::float8 AS std_rel
             FROM stats
         )
-        SELECT s.name, s.obs_count, s.rel_count,
-               (s.obs_count - g.avg_obs) / GREATEST(g.std_obs, 1.0) AS obs_zscore,
-               (s.rel_count - g.avg_rel) / GREATEST(g.std_rel, 1.0) AS rel_zscore
-        FROM stats s, global g
-        WHERE ABS((s.obs_count - g.avg_obs) / GREATEST(g.std_obs, 1.0)) > 2.0
-           OR ABS((s.rel_count - g.avg_rel) / GREATEST(g.std_rel, 1.0)) > 2.0
+        SELECT name, obs_count, rel_count, obs_zscore, rel_zscore FROM (
+            SELECT s.name, s.obs_count, s.rel_count,
+                   (s.obs_count - g.avg_obs) / GREATEST(g.std_obs, 1.0) AS obs_zscore,
+                   (s.rel_count - g.avg_rel) / GREATEST(g.std_rel, 1.0) AS rel_zscore
+            FROM stats s, global g
+            WHERE ABS((s.obs_count - g.avg_obs) / GREATEST(g.std_obs, 1.0)) > 2.0
+               OR ABS((s.rel_count - g.avg_rel) / GREATEST(g.std_rel, 1.0)) > 2.0
+        ) sub
         ORDER BY ABS(obs_zscore) + ABS(rel_zscore) DESC
         LIMIT 10",
     )

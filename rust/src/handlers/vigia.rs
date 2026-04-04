@@ -126,12 +126,48 @@ async fn health(pool: &PgPool) -> Result<Value> {
         0.0
     };
 
+    // V0.6: Enhanced health metrics — null embeddings, active triggers, table sizes
+    let null_embeddings: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_observations WHERE embedding IS NULL AND observation_type != 'superseded'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+
+    let active_triggers: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_triggers WHERE active = TRUE",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+
+    let obs_table_size: (String,) = sqlx::query_as(
+        "SELECT pg_size_pretty(pg_total_relation_size('brain_observations'))",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(("unknown".to_string(),));
+
+    let entities_table_size: (String,) = sqlx::query_as(
+        "SELECT pg_size_pretty(pg_total_relation_size('brain_entities'))",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(("unknown".to_string(),));
+
     Ok(serde_json::json!({
         "metric": "health",
         "avg_importance": avg_importance.0,
         "stale_observations": stale_count.0,
         "unused_entities": unused_entities.0,
         "database_size": db_size.0,
+        "null_embeddings": null_embeddings.0,
+        "active_triggers": active_triggers.0,
+        "table_sizes": {
+            "brain_observations": obs_table_size.0,
+            "brain_entities": entities_table_size.0
+        },
+        "embedding_model": crate::embeddings::onnx::CURRENT_MODEL,
         "entropy": {
             "entity_types": (entity_entropy * 1000.0).round() / 1000.0,
             "observation_types": (obs_entropy * 1000.0).round() / 1000.0,

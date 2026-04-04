@@ -3,16 +3,16 @@
 //! Validates JSON-RPC message format, tool definitions, and
 //! protocol invariants without requiring a live database.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-/// Verify all 18 tools are defined in constants.
+/// Verify all 19 tools are defined in constants.
 #[test]
 fn test_all_tools_defined() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
     assert_eq!(
         tools.len(),
-        18,
-        "Expected 18 MCP tools, got {}",
+        19,
+        "Expected 19 MCP tools, got {}",
         tools.len()
     );
 
@@ -40,6 +40,7 @@ fn test_all_tools_defined() {
         "cuba_contradiccion",
         "cuba_centinela",
         "cuba_calibrar",
+        "cuba_ingesta",
     ];
 
     for name in &expected {
@@ -157,7 +158,7 @@ fn test_threshold_invariants() {
     assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Verify handler dispatch maps all 18 tools.
+/// Verify handler dispatch maps all 19 tools.
 #[test]
 fn test_handler_dispatch_coverage() {
     let tool_names = [
@@ -179,6 +180,7 @@ fn test_handler_dispatch_coverage() {
         "cuba_contradiccion",
         "cuba_centinela",
         "cuba_calibrar",
+        "cuba_ingesta",
     ];
 
     for name in &tool_names {
@@ -210,6 +212,23 @@ fn test_schema_sql_content() {
     assert!(schema.contains("pg_trgm"), "Missing pg_trgm");
     assert!(schema.contains("embedding"), "Missing embedding column");
     assert!(schema.contains("importance"), "Missing importance column");
+    // V0.6 schema additions
+    assert!(
+        schema.contains("embedding_model"),
+        "Missing embedding_model column"
+    );
+    assert!(schema.contains("session_id"), "Missing session_id column");
+    assert!(schema.contains("tags TEXT[]"), "Missing tags column");
+    assert!(
+        schema.contains("idx_obs_high_importance"),
+        "Missing partial importance index"
+    );
+    // idx_obs_tags is created in db.rs migration (not base schema) to avoid
+    // forward-reference on existing DBs where tags column doesn't exist yet
+    assert!(
+        schema.contains("tags TEXT[]"),
+        "Missing tags column definition"
+    );
 }
 
 /// Verify cognitive module constants are valid.
@@ -243,4 +262,41 @@ fn test_valid_types_lists() {
     assert!(VALID_OBSERVATION_TYPES.contains(&"fact"));
     assert!(VALID_SOURCES.contains(&"agent"));
     assert!(VALID_RELATION_TYPES.contains(&"uses"));
+}
+
+/// V0.6: Verify importance priors produce expected values.
+#[test]
+fn test_importance_priors() {
+    use cuba_memorys::constants::importance_prior;
+
+    // Fixed priors for high-value types
+    assert!((importance_prior("decision", 0.5) - 0.8).abs() < f64::EPSILON);
+    assert!((importance_prior("lesson", 0.5) - 0.75).abs() < f64::EPSILON);
+    assert!((importance_prior("error", 0.5) - 0.7).abs() < f64::EPSILON);
+    assert!((importance_prior("solution", 0.5) - 0.7).abs() < f64::EPSILON);
+
+    // Density-scaled priors
+    let fact_high = importance_prior("fact", 1.0);
+    let fact_low = importance_prior("fact", 0.2);
+    assert!(
+        fact_high > fact_low,
+        "Higher density should yield higher importance"
+    );
+    assert!(fact_high <= 0.9, "fact importance capped at 0.9");
+
+    let ctx = importance_prior("context", 1.0);
+    assert!(ctx <= 0.7, "context importance capped at 0.7");
+
+    // Clamp lower bound
+    assert!(importance_prior("fact", 0.0) >= 0.1);
+    assert!(importance_prior("context", 0.0) >= 0.1);
+}
+
+/// V0.6: Verify embedding model constant is set.
+#[test]
+fn test_embedding_model_constant() {
+    assert_eq!(
+        cuba_memorys::embeddings::onnx::CURRENT_MODEL,
+        "multilingual-e5-small"
+    );
 }

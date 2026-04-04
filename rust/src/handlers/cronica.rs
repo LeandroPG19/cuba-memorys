@@ -103,16 +103,30 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         DedupResult::Unique => {}
     }
 
-    // Insert observation
+    // Insert observation with importance priors, session provenance, and auto-tags
+    let importance = crate::constants::importance_prior(obs_type, density);
+    let tags = extract_tags(content);
+
+    // V0.6: Session provenance — link observation to active session
+    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
     .bind(obs_type)
     .bind(source)
-    .bind(density.min(1.0))
+    .bind(importance)
+    .bind(active_session_id)
+    .bind(&tags)
     .fetch_one(pool)
     .await
     .context("failed to insert observation")?;
@@ -121,23 +135,45 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         entity = %entity_name,
         obs_type = %obs_type,
         density = %density,
+        importance = %importance,
         "observation added"
     );
 
     // V11: Store embedding for vector search (non-blocking fire-and-forget).
     // Clones pool (cheap Arc clone) to move into spawned task.
     // embed() uses spawn_blocking internally (FIX B2) — safe to call from async context.
+    // V0.6: Contextual Retrieval — prepend [entity_type:entity_name] for +20% recall.
     let embed_pool = pool.clone();
     let obs_id_for_embed = row.0;
     let content_for_embed = content.to_string();
+    let entity_name_for_embed = entity_name.to_string();
     tokio::spawn(async move {
-        match crate::embeddings::onnx::embed_passage(&content_for_embed).await {
+        // Fetch entity type for contextual embedding
+        let entity_type: String = sqlx::query_scalar(
+            "SELECT entity_type FROM brain_entities WHERE name = $1",
+        )
+        .bind(&entity_name_for_embed)
+        .fetch_optional(&embed_pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "concept".to_string());
+
+        match crate::embeddings::onnx::embed_passage_contextual(
+            &content_for_embed,
+            &entity_type,
+            &entity_name_for_embed,
+        )
+        .await
+        {
             Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
+                let model = crate::embeddings::onnx::CURRENT_MODEL;
                 let result = sqlx::query(
-                    "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
+                    "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
                 )
                 .bind(pgvector::Vector::from(emb))
                 .bind(obs_id_for_embed)
+                .bind(model)
                 .execute(&embed_pool)
                 .await;
                 if let Err(e) = result {
@@ -148,7 +184,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         }
     });
 
-    // Overload warning — alert if entity has too many observations
+    // Overload warning + auto-consolidation trigger
     let obs_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM brain_observations WHERE entity_id = $1 AND observation_type != 'superseded'"
     )
@@ -158,9 +194,40 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .unwrap_or((0,));
 
     let overload_warning = if obs_count.0 > 50 {
+        // V0.6: Auto-consolidation — spawn merge+prune for overloaded entities
+        let pool_clone = pool.clone();
+        let eid = entity_id;
+        tokio::spawn(async move {
+            // Auto-merge >0.9 similarity within this entity
+            let _ = sqlx::query(
+                "WITH dupes AS (
+                    SELECT a.id AS keep_id, b.id AS remove_id
+                    FROM brain_observations a JOIN brain_observations b
+                    ON a.entity_id = b.entity_id AND a.id < b.id
+                    WHERE a.entity_id = $1
+                      AND similarity(a.content, b.content) > 0.9
+                      AND a.observation_type != 'superseded' AND b.observation_type != 'superseded'
+                    LIMIT 10
+                )
+                UPDATE brain_observations SET observation_type = 'superseded'
+                WHERE id IN (SELECT remove_id FROM dupes)",
+            )
+            .bind(eid)
+            .execute(&pool_clone)
+            .await;
+
+            // Auto-prune <0.05 importance for this entity (protect decisions/lessons)
+            let _ = sqlx::query(
+                "DELETE FROM brain_observations WHERE entity_id = $1 AND importance < 0.05 AND observation_type NOT IN ('decision', 'lesson')",
+            )
+            .bind(eid)
+            .execute(&pool_clone)
+            .await;
+        });
+
         Some(format!(
-            "Entity '{}' has {} observations. Consider running cuba_zafra(action='summarize', entity_name='{}') to consolidate.",
-            entity_name, obs_count.0, entity_name
+            "Entity '{}' has {} observations. Auto-consolidation triggered. Consider cuba_zafra(action='summarize') for further compression.",
+            entity_name, obs_count.0
         ))
     } else {
         None
@@ -172,6 +239,8 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         "entity_name": entity_name,
         "observation_type": obs_type,
         "information_density": density,
+        "importance": importance,
+        "tags": tags,
         "overload_warning": overload_warning
     }))
 }
@@ -261,10 +330,13 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     // (reads are safe to repeat on retry)
     struct PendingObs {
         entity_id: uuid::Uuid,
+        entity_name: String,
+        entity_type: String,
         content: String,
         obs_type: String,
         source: String,
-        density: f64,
+        importance: f64,
+        tags: Vec<String>,
     }
     enum BatchAction {
         Insert(PendingObs),
@@ -294,6 +366,15 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         }
 
         let entity_id = ensure_entity(pool, entity_name).await?;
+        // Fetch entity_type for contextual embedding
+        let entity_type: String = sqlx::query_scalar(
+            "SELECT entity_type FROM brain_entities WHERE id = $1",
+        )
+        .bind(entity_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|_| "concept".to_string());
+
         let dedup = check_dedup(pool, entity_id, content).await?;
 
         match dedup {
@@ -305,39 +386,60 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
             }
             DedupResult::Unique => {
                 let density = information_density(content);
+                let importance = crate::constants::importance_prior(obs_type, density);
+                let tags = extract_tags(content);
                 actions.push(BatchAction::Insert(PendingObs {
                     entity_id,
+                    entity_name: entity_name.to_string(),
+                    entity_type,
                     content: content.to_string(),
                     obs_type: obs_type.to_string(),
                     source: source.to_string(),
-                    density: density.min(1.0),
+                    importance,
+                    tags,
                 }));
             }
         }
     }
 
+    // V0.6: Fetch active session once for provenance
+    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
     // Execute all writes atomically in a single transaction
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
     let mut added = 0u32;
     let mut reinforced = 0u32;
-    // Collect (obs_id, content) for embedding storage after commit (V11)
-    let mut inserted_for_embed: Vec<(uuid::Uuid, String)> = Vec::new();
+    // Collect (obs_id, content, entity_name, entity_type) for contextual embedding after commit
+    let mut inserted_for_embed: Vec<(uuid::Uuid, String, String, String)> = Vec::new();
 
     for action in &actions {
         match action {
             BatchAction::Insert(pending) => {
                 let row: (uuid::Uuid,) = sqlx::query_as(
-                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance)
-                     VALUES ($1, $2, $3, $4, $5) RETURNING id"
+                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
                 )
                 .bind(pending.entity_id)
                 .bind(&pending.content)
                 .bind(&pending.obs_type)
                 .bind(&pending.source)
-                .bind(pending.density)
+                .bind(pending.importance)
+                .bind(active_session_id)
+                .bind(&pending.tags)
                 .fetch_one(&mut *tx)
                 .await?;
-                inserted_for_embed.push((row.0, pending.content.clone()));
+                inserted_for_embed.push((
+                    row.0,
+                    pending.content.clone(),
+                    pending.entity_name.clone(),
+                    pending.entity_type.clone(),
+                ));
                 added += 1;
             }
             BatchAction::Reinforce(obs_id) => {
@@ -360,18 +462,24 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         .await
         .context("failed to commit batch_add transaction")?;
 
-    // V11: Store embeddings after commit (non-blocking, best-effort)
+    // V11+V0.6: Store contextual embeddings with model versioning after commit
     if !inserted_for_embed.is_empty() {
         let embed_pool = pool.clone();
         tokio::spawn(async move {
-            for (obs_id, content) in inserted_for_embed {
-                if let Ok(emb) = crate::embeddings::onnx::embed_passage(&content).await
+            for (obs_id, content, entity_name, entity_type) in inserted_for_embed {
+                if let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
+                    &content,
+                    &entity_type,
+                    &entity_name,
+                )
+                .await
                     && !emb.iter().all(|&v| v == 0.0)
                 {
                     let _ = sqlx::query(
-                        "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
+                        "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                     )
                     .bind(pgvector::Vector::from(emb))
+                    .bind(crate::embeddings::onnx::CURRENT_MODEL)
                     .bind(obs_id)
                     .execute(&embed_pool)
                     .await;
@@ -495,7 +603,8 @@ enum DedupResult {
     Reinforce(uuid::Uuid),
 }
 
-/// Check for near-duplicates using pg_trgm similarity + adaptive PE gating (V5.1).
+/// Check for near-duplicates using pg_trgm similarity + adaptive PE gating (V5.1)
+/// + V0.6 semantic dedup via embedding cosine similarity.
 async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Result<DedupResult> {
     let dupes: Vec<(uuid::Uuid, String, f64)> = sqlx::query_as(
         "SELECT id, content, similarity(content, $2)::float8 AS sim
@@ -509,6 +618,28 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
     .await?;
 
     if dupes.is_empty() {
+        // V0.6: Even if no trigram match, check semantic dedup via embedding
+        // This catches paraphrases that differ lexically but mean the same thing
+        if let Ok(emb) = crate::embeddings::onnx::embed_passage(content).await
+            && !emb.iter().all(|&v| v == 0.0)
+        {
+            let semantic_match: Option<(uuid::Uuid, f64)> = sqlx::query_as(
+                "SELECT id, (1.0 - (embedding <=> $1::vector))::float8 AS sim
+                 FROM brain_observations
+                 WHERE entity_id = $2 AND embedding IS NOT NULL AND observation_type != 'superseded'
+                 ORDER BY embedding <=> $1::vector LIMIT 1",
+            )
+            .bind(pgvector::Vector::from(emb))
+            .bind(entity_id)
+            .fetch_optional(pool)
+            .await?;
+
+            if let Some((obs_id, sim)) = semantic_match
+                && sim > 0.92
+            {
+                return Ok(DedupResult::Reinforce(obs_id));
+            }
+        }
         return Ok(DedupResult::Unique);
     }
 
@@ -629,32 +760,63 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     let entity_id = ensure_entity(pool, entity_name).await?;
     let density = information_density(content);
 
+    // V0.6: Session provenance for episodes
+    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
     .bind(&actors)
     .bind(&artifacts)
     .bind(density.min(1.0))
+    .bind(active_session_id)
     .fetch_one(pool)
     .await?;
 
     let ep_id = row.0;
 
     // Async embedding storage (same fire-and-forget pattern as observations)
+    // V0.6: Contextual Retrieval for episodes too.
     let embed_pool = pool.clone();
     let content_owned = content.to_string();
+    let entity_name_owned = entity_name.to_string();
     tokio::spawn(async move {
-        if let Ok(emb) = crate::embeddings::onnx::embed_passage(&content_owned).await
+        let entity_type: String = sqlx::query_scalar(
+            "SELECT entity_type FROM brain_entities WHERE name = $1",
+        )
+        .bind(&entity_name_owned)
+        .fetch_optional(&embed_pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "concept".to_string());
+
+        if let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
+            &content_owned,
+            &entity_type,
+            &entity_name_owned,
+        )
+        .await
             && !emb.iter().all(|&v| v == 0.0)
         {
-            let _ = sqlx::query("UPDATE brain_episodes SET embedding = $1::vector WHERE id = $2")
-                .bind(pgvector::Vector::from(emb))
-                .bind(ep_id)
-                .execute(&embed_pool)
-                .await;
+            let model = crate::embeddings::onnx::CURRENT_MODEL;
+            let _ = sqlx::query(
+                "UPDATE brain_episodes SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
+            )
+            .bind(pgvector::Vector::from(emb))
+            .bind(ep_id)
+            .bind(model)
+            .execute(&embed_pool)
+            .await;
         }
     });
 
@@ -728,6 +890,43 @@ async fn episode_list(pool: &PgPool, entity_name: &str) -> Result<Value> {
 /// Delegate to cognitive::density module (DRY — eliminates inline duplication).
 fn information_density(content: &str) -> f64 {
     density::information_density(content)
+}
+
+/// V0.6: Extract top-5 keywords from text (frequency-based, bilingual stopwords).
+///
+/// Simple TF extraction — no IDF since we don't have corpus stats.
+/// Returns lowercase keywords sorted by descending frequency.
+fn extract_tags(content: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall",
+        "can", "for", "and", "but", "or", "nor", "not", "no", "so", "yet", "both", "either",
+        "neither", "each", "every", "all", "any", "few", "more", "most", "other", "some", "such",
+        "than", "too", "very", "just", "about", "above", "after", "again", "also", "as", "at",
+        "before", "between", "by", "from", "how", "in", "into", "it", "its", "of", "on", "only",
+        "out", "over", "own", "same", "that", "this", "these", "those", "through", "to", "under",
+        "until", "up", "what", "when", "where", "which", "while", "who", "whom", "why", "with",
+        // Spanish
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "con", "por",
+        "para", "es", "son", "fue", "ser", "estar", "que", "se", "si", "como", "pero", "mas",
+        "ya", "entre", "cuando", "todo", "esta", "desde", "su", "sus", "le", "les",
+    ];
+
+    let words: Vec<String> = content
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .filter(|w| w.len() > 2 && !STOPWORDS.contains(&&**w))
+        .map(String::from)
+        .collect();
+
+    let mut freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for w in &words {
+        *freq.entry(w.clone()).or_default() += 1;
+    }
+
+    let mut sorted: Vec<(String, usize)> = freq.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.into_iter().take(5).map(|(w, _)| w).collect()
 }
 
 #[cfg(test)]

@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.LeandroPG19/cuba-memorys",
-  "description": "Persistent memory for AI agents. Knowledge graph, Hebbian learning, RRF search, GraphRAG.",
+  "description": "Persistent memory for AI agents. 19 tools: knowledge graph, Hebbian learning, RRF search, episodic memory, contradiction detection, prospective triggers, Bayesian calibration, link prediction.",
   "repository": {
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.3.0",
+  "version": "0.6.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.3.0",
+      "version": "0.6.0",
       "transport": {
         "type": "stdio"
       },
@@ -28,7 +28,7 @@
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "0.3.0",
+      "version": "1.8.0",
       "transport": {
         "type": "stdio"
       },

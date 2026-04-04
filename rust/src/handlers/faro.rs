@@ -20,6 +20,15 @@ const MAX_LIMIT: i64 = 50;
 const DEFAULT_MAX_TOKENS: i64 = 5000;
 const GRAPHRAG_TOP_K: usize = 3;
 
+/// V0.6: Score breakdown — tracks individual RRF components per result.
+struct FusedResult {
+    text_score: f64,
+    vector_score: f64,
+    session_boosted: bool,
+    total: f64,
+    data: Value,
+}
+
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.is_empty() {
@@ -42,13 +51,31 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
+    // V0.6: Compact format — abbreviated keys, ~35% token savings
+    let format = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("verbose");
+
+    // V0.6: Tag filter
+    let tag_filter = args.get("tags").and_then(|v| v.as_str());
+
     // Temporal filters (ISO8601 strings)
     let before = args.get("before").and_then(|v| v.as_str());
     let after = args.get("after").and_then(|v| v.as_str());
     let time_bounds = parse_time_bounds(before, after);
 
+    let search_opts = SearchOpts {
+        scope,
+        limit,
+        max_tokens,
+        time_bounds,
+        format,
+        tag_filter,
+    };
+
     match mode {
-        "hybrid" => hybrid_search(pool, query, scope, limit, max_tokens, &time_bounds).await,
+        "hybrid" => hybrid_search(pool, query, &search_opts).await,
         "verify" => verify_claim(pool, query).await,
         _ => anyhow::bail!("Invalid mode: {mode}. Use hybrid/verify"),
     }
@@ -76,30 +103,73 @@ fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> TimeBounds {
     }
 }
 
-/// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
-async fn hybrid_search(
-    pool: &PgPool,
-    query: &str,
-    scope: &str,
+/// Search options for hybrid search.
+struct SearchOpts<'a> {
+    scope: &'a str,
     limit: i64,
     max_tokens: i64,
-    time_bounds: &TimeBounds,
-) -> Result<Value> {
+    time_bounds: TimeBounds,
+    format: &'a str,
+    tag_filter: Option<&'a str>,
+}
+
+/// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
+async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Result<Value> {
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = crate::search::rrf::query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
 
     // Run text search (always available — V8 graceful degradation base)
-    let text_results = text_search(pool, query, scope, limit * 2, time_bounds).await?;
+    let mut text_results =
+        text_search(pool, query, opts.scope, opts.limit * 2, &opts.time_bounds).await?;
+
+    // V0.6: Tag filter — if specified, run additional tag-based query and merge
+    if let Some(tag) = opts.tag_filter {
+        let tagged_obs: Vec<(uuid::Uuid, String, String, String, f64, f64)> = sqlx::query_as(
+            "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
+                    (o.importance::float8 * 0.8 + 0.2)::float8 AS score
+             FROM brain_observations o
+             JOIN brain_entities e ON o.entity_id = e.id
+             WHERE $1 = ANY(o.tags)
+               AND o.observation_type != 'superseded'
+             ORDER BY o.importance DESC
+             LIMIT $2",
+        )
+        .bind(tag)
+        .bind(opts.limit)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        for (id, entity_name, content, obs_type, importance, score) in tagged_obs {
+            // Avoid duplicates
+            let id_str = id.to_string();
+            if !text_results
+                .iter()
+                .any(|r| r.get("id").and_then(|v| v.as_str()) == Some(&id_str))
+            {
+                text_results.push(serde_json::json!({
+                    "id": id_str,
+                    "type": "observation",
+                    "entity_name": entity_name,
+                    "content": content,
+                    "observation_type": obs_type,
+                    "importance": importance,
+                    "score": score,
+                    "matched_tag": tag
+                }));
+            }
+        }
+    }
 
     // Run vector search (may fail gracefully — V8)
-    let vector_results = vector_search(pool, query, scope, limit * 2, time_bounds).await;
+    let vector_results =
+        vector_search(pool, query, opts.scope, opts.limit * 2, &opts.time_bounds).await;
 
     // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
     let rrf_k: f64 = 60.0;
 
-    // RRF Fusion with entropy-weighted scores and adaptive k
-    let mut fused_scores: HashMap<String, (f64, Value)> = HashMap::new();
+    let mut fused_scores: HashMap<String, FusedResult> = HashMap::new();
 
     // Add text results with RRF rank score
     for (rank, result) in text_results.iter().enumerate() {
@@ -109,7 +179,16 @@ async fn hybrid_search(
             .unwrap_or("")
             .to_string();
         let rrf_score = text_weight / (rrf_k + rank as f64 + 1.0);
-        fused_scores.insert(id, (rrf_score, result.clone()));
+        fused_scores.insert(
+            id,
+            FusedResult {
+                text_score: rrf_score,
+                vector_score: 0.0,
+                session_boosted: false,
+                total: rrf_score,
+                data: result.clone(),
+            },
+        );
     }
 
     // Add vector results (V8: only if available)
@@ -123,24 +202,35 @@ async fn hybrid_search(
             let rrf_score = vector_weight / (rrf_k + rank as f64 + 1.0);
             fused_scores
                 .entry(id.clone())
-                .and_modify(|(score, _)| *score += rrf_score)
-                .or_insert((rrf_score, result.clone()));
+                .and_modify(|fr| {
+                    fr.vector_score = rrf_score;
+                    fr.total += rrf_score;
+                })
+                .or_insert(FusedResult {
+                    text_score: 0.0,
+                    vector_score: rrf_score,
+                    session_boosted: false,
+                    total: rrf_score,
+                    data: result.clone(),
+                });
         }
     }
 
     // Sort by fused score
-    let mut results: Vec<(String, f64, Value)> = fused_scores
-        .into_iter()
-        .map(|(id, (score, result))| (id, score, result))
-        .collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(limit as usize);
+    let mut results: Vec<(String, FusedResult)> = fused_scores.into_iter().collect();
+    results.sort_by(|a, b| {
+        b.1.total
+            .partial_cmp(&a.1.total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(opts.limit as usize);
 
     // VF2: Testing Effect — update access tracking on matched observations
     let matched_obs_ids: Vec<uuid::Uuid> = results
         .iter()
-        .filter_map(|(_, _, r)| {
-            r.get("id")
+        .filter_map(|(_, fr)| {
+            fr.data
+                .get("id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<uuid::Uuid>().ok())
         })
@@ -155,31 +245,45 @@ async fn hybrid_search(
     // Session awareness: check active session and boost matching results
     let session_boost = get_session_goals(pool).await.unwrap_or_default();
     if !session_boost.is_empty() {
-        for (_, score, result) in &mut results {
-            if let Some(content) = result.get("content").and_then(|v| v.as_str()) {
+        for (_, fr) in &mut results {
+            if let Some(content) = fr.data.get("content").and_then(|v| v.as_str()) {
                 let content_lower = content.to_lowercase();
                 for goal in &session_boost {
                     if content_lower.contains(&goal.to_lowercase()) {
-                        *score *= 1.3; // 30% boost for session-relevant results
+                        fr.total *= 1.3; // 30% boost for session-relevant results
+                        fr.session_boosted = true;
                         break;
                     }
                 }
             }
         }
         // Re-sort after session boost
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.1.total
+                .partial_cmp(&a.1.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     // GraphRAG enrichment — add degree-1 neighbors for top-K results (V9)
     let graphrag_context = enrich_graphrag(pool, &results, GRAPHRAG_TOP_K).await;
 
-    // Token-budget truncation
+    // V0.6: Score breakdown — include component scores in each result
     let results_json: Vec<Value> = results
         .iter()
-        .map(|(_, score, result)| {
-            let mut r = result.clone();
+        .map(|(_, fr)| {
+            let mut r = fr.data.clone();
             if let Some(obj) = r.as_object_mut() {
-                obj.insert("fused_score".to_string(), serde_json::json!(score));
+                obj.insert("fused_score".to_string(), serde_json::json!(fr.total));
+                obj.insert("text_score".to_string(), serde_json::json!(fr.text_score));
+                obj.insert(
+                    "vector_score".to_string(),
+                    serde_json::json!(fr.vector_score),
+                );
+                obj.insert(
+                    "session_boosted".to_string(),
+                    serde_json::json!(fr.session_boosted),
+                );
             }
             r
         })
@@ -188,7 +292,7 @@ async fn hybrid_search(
     // Token budget enforcement: truncate content per result instead of dropping entire results.
     // This gives Claude more results with shorter content (better for grounding).
     // Estimate: 1 token ≈ 4 chars.
-    let mut token_budget = max_tokens;
+    let mut token_budget = opts.max_tokens;
     let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
     for mut r in results_json {
         let content_len = r
@@ -216,13 +320,35 @@ async fn hybrid_search(
         budget_results.push(r);
     }
 
+    // V0.6: Compact format — abbreviated keys for ~35% token savings
+    let final_results: Vec<Value> = if opts.format == "compact" {
+        budget_results.iter().map(compact_result).collect()
+    } else {
+        budget_results
+    };
+
     Ok(serde_json::json!({
         "mode": "hybrid",
         "query": query,
-        "results": budget_results,
-        "count": budget_results.len(),
+        "results": final_results,
+        "count": final_results.len(),
         "graphrag_context": graphrag_context
     }))
+}
+
+/// V0.6: Transform a result into compact format with abbreviated keys.
+fn compact_result(r: &Value) -> Value {
+    let content = r
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(|s| crate::handlers::zafra::safe_truncate(s, 200));
+    serde_json::json!({
+        "e": r.get("entity_name").or_else(|| r.get("name")),
+        "c": content,
+        "s": r.get("fused_score"),
+        "t": r.get("type").or_else(|| r.get("observation_type")),
+        "i": r.get("importance")
+    })
 }
 
 /// Verify a claim against stored knowledge with source diversity scoring.
@@ -601,14 +727,19 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
 /// For each top result that has an entity name, we query its related entities
 /// to provide graph context. This helps the AI understand the broader
 /// knowledge structure around search matches.
-async fn enrich_graphrag(pool: &PgPool, results: &[(String, f64, Value)], top_k: usize) -> Value {
+async fn enrich_graphrag(
+    pool: &PgPool,
+    results: &[(String, FusedResult)],
+    top_k: usize,
+) -> Value {
     let mut context: Vec<Value> = Vec::new();
 
-    for (_, _, result) in results.iter().take(top_k) {
-        let entity_name = result
+    for (_, fr) in results.iter().take(top_k) {
+        let entity_name = fr
+            .data
             .get("entity_name")
-            .or_else(|| result.get("name"))
-            .and_then(|v| v.as_str());
+            .or_else(|| fr.data.get("name"))
+            .and_then(|v: &Value| v.as_str());
 
         if let Some(name) = entity_name {
             // N+1 fix: single CTE resolves entity id once, no subselect repetition.
