@@ -176,7 +176,7 @@ If you already have PostgreSQL with pgvector, set the environment variable:
 For real multilingual-e5-small semantic embeddings (94 languages, 384d) instead of hash-based fallback:
 
 ```bash
-./scripts/download_model.sh  # Downloads ~113MB model
+./rust/scripts/download_model.sh  # Downloads ~113MB model
 export ONNX_MODEL_PATH="$HOME/.cache/cuba-memorys/models"
 export ORT_DYLIB_PATH="/path/to/libonnxruntime.so"
 ```
@@ -245,22 +245,31 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 ```
 cuba-memorys/
 ├── docker-compose.yml           # Dedicated PostgreSQL 18 (port 5488)
-├── rust/                        # v0.6.0
-│   ├── src/
-│   │   ├── main.rs              # mimalloc + graceful shutdown
-│   │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
-│   │   ├── db.rs                # sqlx PgPool (10 max, 600s idle, 1800s lifetime)
-│   │   ├── schema.sql           # 8 tables, 20+ indexes, HNSW
-│   │   ├── constants.rs         # Tool definitions, thresholds, importance priors
-│   │   ├── handlers/            # 19 MCP tool handlers (1 file each)
-│   │   ├── cognitive/           # Hebbian/BCM, access tracking, PE gating V5.2
-│   │   ├── search/              # RRF fusion, confidence, LRU cache
-│   │   ├── graph/               # Brandes centrality, Leiden, PageRank (NF-IDF)
-│   │   └── embeddings/          # ONNX multilingual-e5-small (contextual, spawn_blocking)
-│   ├── scripts/
-│   │   └── download_model.sh    # Download multilingual-e5-small ONNX
-│   └── tests/
-└── server.json                  # MCP Registry manifest
+├── server.json                  # MCP Registry manifest
+├── pyproject.toml               # Maturin (bindings = "bin") — PyPI wheel
+├── package.json                 # npm wrapper
+└── rust/                        # v0.6.0
+    ├── src/
+    │   ├── main.rs              # mimalloc + graceful shutdown (SIGTERM/SIGINT)
+    │   ├── lib.rs               # Shared types and utilities
+    │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
+    │   ├── db.rs                # sqlx PgPool (10 max, 600s idle, 1800s lifetime)
+    │   ├── setup.rs             # Zero-config Docker PostgreSQL auto-provisioning
+    │   ├── schema.sql           # 8 tables, 20+ indexes, HNSW
+    │   ├── constants.rs         # Tool definitions, thresholds, importance priors
+    │   ├── handlers/            # 19 MCP tool handlers (1 file each)
+    │   ├── cognitive/           # Hebbian/BCM (hebbian.rs), PE gating V5.2
+    │   │                        # (prediction_error.rs), dual-strength learning
+    │   │                        # (dual_strength.rs), Shannon entropy (density.rs)
+    │   ├── search/              # RRF fusion (rrf.rs), confidence (confidence.rs),
+    │   │                        # LRU cache (cache.rs)
+    │   ├── graph/               # Brandes centrality (centrality.rs), Leiden
+    │   │                        # communities (community.rs), PageRank (pagerank.rs)
+    │   └── embeddings/          # ONNX multilingual-e5-small (contextual embedding,
+    │                            # spawn_blocking, hash fallback)
+    ├── scripts/
+    │   └── download_model.sh    # Download multilingual-e5-small ONNX (~113MB)
+    └── tests/                   # 56 unit + smoke tests
 ```
 
 ### Performance: Rust vs Python

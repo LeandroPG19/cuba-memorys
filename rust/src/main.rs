@@ -1,7 +1,8 @@
-//! Cuba-Memorys MCP Server — Rust v0.3.0
+//! Cuba-Memorys MCP Server — Rust v0.6.0
 //!
-//! Knowledge Graph MCP server with exponential decay, Hebbian learning,
-//! hybrid search (RRF + pgvector), and REM sleep consolidation.
+//! Knowledge Graph MCP server: 19 tools, Hebbian/BCM learning, RRF hybrid
+//! search, episodic memory, contradiction detection, Bayesian calibration,
+//! contextual retrieval, and autonomous REM sleep consolidation.
 
 use mimalloc::MiMalloc;
 
