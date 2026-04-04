@@ -11,3 +11,4 @@ pub mod graph;
 pub mod handlers;
 pub mod protocol;
 pub mod search;
+pub mod setup;

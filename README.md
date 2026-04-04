@@ -62,7 +62,16 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 | Error pattern detection | Yes | No |
 | Session-aware search boost | Yes | No |
 | REM Sleep autonomous consolidation | Yes | No |
-| Optional ONNX BGE embeddings | Yes | No |
+| Multilingual ONNX embeddings (e5-small) | Yes | No |
+| Episodic memory (power-law decay) | Yes | No |
+| Contradiction detection | Yes | No |
+| Prospective memory triggers | Yes | No |
+| Bayesian confidence calibration | Yes | No |
+| Link prediction (Adamic-Adar) | Yes | No |
+| Auto-tagging (TF-IDF) | Yes | No |
+| Contextual Retrieval (Anthropic) | Yes | No |
+| Temporal search filters | Yes | No |
+| Zero-config Docker auto-setup | Yes | No |
 | Write-time dedup gate | Yes | No |
 | Contradiction auto-supersede | Yes | No |
 | GDPR Right to Erasure | Yes | No |
@@ -100,29 +109,31 @@ Pre-built binaries available at [GitHub Releases](https://github.com/LeandroPG19
 
 ## Quick Start
 
-**1. Start PostgreSQL** (if you don't have one running):
+**Zero configuration required** — just install and add to your editor. Cuba-memorys automatically provisions a PostgreSQL database via Docker on first run.
 
-```bash
-docker compose up -d
-```
-
-**2. Configure your AI editor** (Claude Code, Cursor, Windsurf, etc.):
+> **Prerequisite**: [Docker](https://docs.docker.com/get-docker/) must be installed and running.
 
 <details>
 <summary><b>Claude Code</b></summary>
 
 ```bash
+npm install -g cuba-memorys
 claude mcp add cuba-memorys -- cuba-memorys
 ```
-Set the environment variable:
-```bash
-export DATABASE_URL="postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
-```
+That's it. On first run, Cuba-memorys will:
+1. Detect that no database is configured
+2. Create a Docker container with PostgreSQL + pgvector
+3. Initialize the schema automatically
+4. Start serving 19 MCP tools
 
 </details>
 
 <details>
 <summary><b>Cursor / Windsurf / VS Code</b></summary>
+
+```bash
+npm install -g cuba-memorys
+```
 
 Add to your MCP config (`.cursor/mcp.json`, `.windsurf/mcp.json`, or `.vscode/mcp.json`):
 
@@ -130,9 +141,28 @@ Add to your MCP config (`.cursor/mcp.json`, `.windsurf/mcp.json`, or `.vscode/mc
 {
   "mcpServers": {
     "cuba-memorys": {
+      "command": "cuba-memorys"
+    }
+  }
+}
+```
+
+No `DATABASE_URL` needed — auto-provisioned via Docker on first run.
+
+</details>
+
+<details>
+<summary><b>Advanced: Custom PostgreSQL</b></summary>
+
+If you already have PostgreSQL with pgvector, set the environment variable:
+
+```json
+{
+  "mcpServers": {
+    "cuba-memorys": {
       "command": "cuba-memorys",
       "env": {
-        "DATABASE_URL": "postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
+        "DATABASE_URL": "postgresql://user:pass@localhost:5432/brain"
       }
     }
   }
@@ -141,18 +171,17 @@ Add to your MCP config (`.cursor/mcp.json`, `.windsurf/mcp.json`, or `.vscode/mc
 
 </details>
 
-The server auto-creates the `brain` database and all tables on first run.
+### Optional: Multilingual ONNX Embeddings
 
-### Optional: ONNX Embeddings
-
-For real BGE-small-en-v1.5 semantic embeddings instead of hash-based fallback:
+For real multilingual-e5-small semantic embeddings (94 languages, 384d) instead of hash-based fallback:
 
 ```bash
+./scripts/download_model.sh  # Downloads ~113MB model
 export ONNX_MODEL_PATH="$HOME/.cache/cuba-memorys/models"
 export ORT_DYLIB_PATH="/path/to/libonnxruntime.so"
 ```
 
-Without ONNX, the server uses deterministic hash-based embeddings — functional but without semantic understanding.
+Without ONNX, the server uses deterministic hash-based embeddings — functional but without semantic understanding. With ONNX, Contextual Retrieval prepends `[entity_type:entity_name]` to content before embedding for +20% recall.
 
 ---
 
@@ -216,7 +245,7 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 ```
 cuba-memorys/
 ├── docker-compose.yml           # Dedicated PostgreSQL 18 (port 5488)
-├── rust/                        # v0.3.0
+├── rust/                        # v0.6.0
 │   ├── src/
 │   │   ├── main.rs              # mimalloc + graceful shutdown
 │   │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
@@ -269,8 +298,11 @@ cuba-memorys/
 | 2 | Observations (ts_rank + trigrams + importance) | `brain_observations` | Always |
 | 3 | Errors (ts_rank + trigrams + synapse_weight) | `brain_errors` | Always |
 | 4 | **Vector cosine distance (HNSW)** | `brain_observations.embedding` | pgvector installed |
+| 5 | Episodes (ts_rank + trigrams + importance) | `brain_episodes` | Always |
 
-**Post-fusion pipeline:** Dedup -> KG-neighbor expansion -> Session boost -> GraphRAG enrichment -> Token-budget truncation -> Batch access tracking
+**Post-fusion pipeline:** Dedup -> KG-neighbor expansion -> Session boost -> Score breakdown -> GraphRAG enrichment -> Token-budget truncation -> Compact format (optional) -> Batch access tracking
+
+**Filters:** `before`/`after` (ISO8601 temporal), `tags` (keyword), `format` (verbose/compact)
 
 ---
 
@@ -278,11 +310,11 @@ cuba-memorys/
 
 Built on peer-reviewed algorithms, not ad-hoc heuristics:
 
-### Exponential Decay (V3)
+### Stratified Exponential Decay (V4)
 ```
 importance_new = importance * exp(-0.693 * days_since_access / halflife)
 ```
-halflife=30d by default. Decision/lesson observations are protected from decay. Importance directly affects search ranking (score*0.7 + importance*0.3).
+Stratified by observation type: facts/preferences=30d, errors/solutions=14d, context/tool_usage=7d. Decision/lesson observations are protected (never decay). Episodic memories use power-law: `I(t) = 0.5 / (1 + 0.1*t)^0.5` (Wixted 2004). Importance directly affects search ranking (score*0.7 + importance*0.3).
 
 ### Hebbian + BCM — Oja (1982), Bienenstock-Cooper-Munro (1982)
 ```
@@ -307,6 +339,11 @@ Entropy-routed weighting: keyword-dominant vs mixed vs semantic queries get diff
 | **Adaptive PE gating** | Friston (Nature 2023) | `prediction_error.rs` -> `cronica.rs` |
 | **Shannon entropy** | Shannon (1948) | `density.rs` -> information gating |
 | **Chi-squared drift** | Pearson (1900) | Error distribution change detection |
+| **Power-law forgetting** | Wixted (2004) | `setup.rs` -> episodic memory decay |
+| **Contextual Retrieval** | Anthropic (2024) | `onnx.rs` -> entity context prepend |
+| **Adamic-Adar** | Adamic & Adar (2003) | `puente.rs` -> link prediction |
+| **Episodic/Semantic** | Tulving (1972) | `brain_episodes` vs `brain_observations` |
+| **Bayesian calibration** | Beta distribution | `calibrar.rs` -> P(correct\|level) |
 
 ---
 
@@ -316,8 +353,8 @@ Entropy-routed weighting: keyword-dominant vs mixed vs semantic queries get diff
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | — | PostgreSQL connection string (**required**) |
-| `ONNX_MODEL_PATH` | — | Path to BGE model directory (optional) |
+| `DATABASE_URL` | — | PostgreSQL connection string (auto-provisioned via Docker if not set) |
+| `ONNX_MODEL_PATH` | — | Path to multilingual-e5-small model directory (optional) |
 | `ORT_DYLIB_PATH` | — | Path to libonnxruntime.so (optional) |
 | `RUST_LOG` | `cuba_memorys=info` | Log level filter |
 
@@ -393,7 +430,7 @@ Active access resets the clock — frequently used memories stay strong.
 | Division by zero | Protected with `.max(1e-9)` |
 | Error handling | All `?` propagated with `anyhow::Context` |
 | Clippy | 0 warnings |
-| Tests | 106/106 passing (51 unit/smoke + 55 E2E) |
+| Tests | 56 passing (43 unit + 13 smoke) + 49 E2E |
 | Licenses | All MIT/Apache-2.0 (0 GPL/AGPL) |
 
 ---
@@ -420,13 +457,12 @@ Active access resets the clock — frequently used memories stay strong.
 
 | Version | Key Changes |
 |---------|-------------|
-| **0.3.0** | Deep Research V3: exponential decay replaces FSRS-6, dead code/columns eliminated, SEC-002 fix, importance in ranking, embeddings storage on write, GraphRAG CTE fix, Opus 4.6 token optimization, zero tech debt. 106 tests (51 unit/smoke + 55 E2E), 0 clippy warnings. |
-| **0.2.0** | Complete Rust rewrite. BCM metaplasticity, Leiden communities, Shannon entropy, blake3 dedup. Internal audit: GO verdict. |
-| **1.6.0** | KG-neighbor expansion, embedding LRU cache, async embed rebuild, community summaries, batch access tracking |
-| **1.5.0** | Token-budget truncation, post-fusion dedup, source triangulation, adaptive confidence, session-aware decay |
-| **1.3.0** | Modular architecture (CC avg D->A), 87% CC reduction |
-| **1.1.0** | GraphRAG, REM Sleep, conditional pgvector, 4-signal RRF |
-| **1.0.0** | Initial release: 12 tools, Hebbian learning |
+| **0.6.0** | Contextual Retrieval (+20% recall), importance priors, score breakdown, compact format (~35% fewer tokens), session provenance/diff, semantic dedup, auto-tagging (TF-IDF), Adamic-Adar link prediction, bulk ingest (cuba_ingesta), enhanced health metrics, partial indexes, embedding model versioning. Auto Docker PostgreSQL setup. 19 tools, 56 tests. |
+| **0.5.0** | Temporal reasoning (before/after/timeline), contradiction detection (cosine + negation heuristics), prospective memory triggers (centinela), Bayesian calibration (calibrar), abductive inference (hipotesis), gap detection (reflexion). 18 tools. |
+| **0.4.0** | Multilingual embeddings (e5-small, 94 languages), episodic memory (Tulving 1972, power-law Wixted 2004), stratified decay (30d/14d/7d by type), E2E tests in CI with PostgreSQL. 15 tools. |
+| **0.3.0** | Deep Research V3: exponential decay replaces FSRS-6, dead code eliminated, SEC-002 fix, embeddings storage on write, GraphRAG CTE fix. 13 tools. |
+| **0.2.0** | Complete Rust rewrite. BCM metaplasticity, Leiden communities, Shannon entropy, blake3 dedup. |
+| **1.0-1.6** | Python era: 12 tools, Hebbian learning, GraphRAG, REM Sleep, token-budget truncation. |
 
 ---
 
@@ -445,4 +481,4 @@ Active access resets the clock — frequently used memories stay strong.
 
 ## Credits
 
-Mathematical foundations: Oja (1982), Bienenstock, Cooper & Munro (1982, BCM), Cormack (2009, RRF), Brin & Page (1998, PageRank), Traag et al. (2019, Leiden), Brandes (2001), Shannon (1948), Pearson (1900, chi-squared), Friston (2023, PE gating), BAAI (2023, BGE), Malkov & Yashunin (2018, HNSW), O'Connor et al. (2020, blake3).
+Mathematical foundations: Oja (1982), Bienenstock, Cooper & Munro (1982, BCM), Cormack (2009, RRF), Brin & Page (1998, PageRank), Traag et al. (2019, Leiden), Brandes (2001), Shannon (1948), Pearson (1900, chi-squared), Friston (2023, PE gating), Tulving (1972, episodic memory), Wixted (2004, power-law forgetting), Adamic & Adar (2003, link prediction), Anthropic (2024, Contextual Retrieval), Wang et al. (2022, E5 embeddings), Malkov & Yashunin (2018, HNSW), O'Connor et al. (2020, blake3).

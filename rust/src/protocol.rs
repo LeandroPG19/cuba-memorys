@@ -69,9 +69,8 @@ fn server_info() -> Value {
 
 /// Run the MCP protocol over stdin/stdout.
 pub async fn run_mcp() -> Result<()> {
-    // Connect to database (credentials from env, never hardcoded)
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set (e.g., postgresql://user:pass@host:port/db)");
+    // Connect to database — auto-provision Docker PostgreSQL if DATABASE_URL not set
+    let database_url = crate::setup::resolve_database_url().await;
 
     let pool = db::create_pool(&database_url).await?;
 
