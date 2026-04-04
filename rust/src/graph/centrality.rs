@@ -9,17 +9,14 @@ use std::collections::{HashMap, VecDeque};
 /// Compute betweenness centrality and return top entities.
 pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String, f64)>> {
     // Fetch graph
-    let edges: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-        "SELECT from_entity, to_entity FROM brain_relations"
-    )
-    .fetch_all(pool)
-    .await?;
+    let edges: Vec<(uuid::Uuid, uuid::Uuid)> =
+        sqlx::query_as("SELECT from_entity, to_entity FROM brain_relations")
+            .fetch_all(pool)
+            .await?;
 
-    let entities: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT id, name FROM brain_entities"
-    )
-    .fetch_all(pool)
-    .await?;
+    let entities: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, name FROM brain_entities")
+        .fetch_all(pool)
+        .await?;
 
     if entities.is_empty() || edges.is_empty() {
         return Ok(vec![]);
@@ -89,13 +86,18 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
     }
 
     // Normalize (undirected: divide by 2)
-    let norm = if n > 2 { ((n - 1) * (n - 2)) as f64 } else { 1.0 };
+    let norm = if n > 2 {
+        ((n - 1) * (n - 2)) as f64
+    } else {
+        1.0
+    };
     for b in betweenness.iter_mut() {
         *b /= norm;
     }
 
     // Sort and return top_k
-    let mut ranked: Vec<(String, f64)> = names.into_iter()
+    let mut ranked: Vec<(String, f64)> = names
+        .into_iter()
         .zip(betweenness)
         .filter(|(_, b)| *b > 0.0)
         .collect();

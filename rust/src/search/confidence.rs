@@ -6,10 +6,7 @@
 ///
 /// Returns (confidence, level) where level is one of:
 /// "verified" (>0.7), "partial" (>0.5), "weak" (>0.3), "unknown" (<0.3).
-pub fn compute_grounding(
-    similarities: &[f64],
-    sources: &[&str],
-) -> (f64, &'static str) {
+pub fn compute_grounding(similarities: &[f64], sources: &[&str]) -> (f64, &'static str) {
     if similarities.is_empty() {
         return (0.0, "unknown");
     }
@@ -24,8 +21,8 @@ pub fn compute_grounding(
 
     // Weights sum to 1.0: 0.45 + 0.25 + 0.20 + 0.10 = 1.00
     let coverage = (count as f64 / 10.0).min(1.0);
-    let confidence = (max_sim * 0.45 + avg_sim * 0.25 + coverage * 0.20 + diversity * 0.10)
-        .min(1.0);
+    let confidence =
+        (max_sim * 0.45 + avg_sim * 0.25 + coverage * 0.20 + diversity * 0.10).min(1.0);
 
     let level = if confidence > 0.7 {
         "verified"
@@ -63,10 +60,7 @@ mod tests {
 
     #[test]
     fn test_weak_evidence() {
-        let (conf, _level) = compute_grounding(
-            &[0.35],
-            &["agent"],
-        );
+        let (conf, _level) = compute_grounding(&[0.35], &["agent"]);
         assert!(conf < 0.5, "single weak match: got {conf}");
     }
 }

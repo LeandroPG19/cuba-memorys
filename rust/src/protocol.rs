@@ -227,10 +227,7 @@ async fn rem_daemon(pool: PgPool) {
 
         // Run consolidation in a spawned task (I/O-bound: DB queries + graph ops)
         let pool_clone = pool.clone();
-        let result = tokio::spawn(async move {
-            run_rem_consolidation(&pool_clone).await
-        })
-        .await;
+        let result = tokio::spawn(async move { run_rem_consolidation(&pool_clone).await }).await;
 
         match result {
             Ok(Ok(())) => tracing::info!("REM sleep cycle completed"),
@@ -265,7 +262,7 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         // Protect entities accessed during active session (last 8h)
         sqlx::query_scalar(
             "SELECT DISTINCT entity_id FROM brain_observations
-             WHERE created_at > NOW() - INTERVAL '8 hours'"
+             WHERE created_at > NOW() - INTERVAL '8 hours'",
         )
         .fetch_all(pool)
         .await?
@@ -311,7 +308,10 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
             .await?
             .rows_affected()
     };
-    tracing::info!(decayed_count = decayed, "stratified exponential decay applied");
+    tracing::info!(
+        decayed_count = decayed,
+        "stratified exponential decay applied"
+    );
 
     // 3b. Episode power-law decay (Wixted 2004) — idempotent from initial=0.5
     let episode_decayed = sqlx::query(
@@ -320,13 +320,16 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
                 0.5 / POWER(1.0 + 0.1 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0, 0.5),
                 0.01
             )
-         WHERE created_at < NOW() - INTERVAL '1 hour'"
+         WHERE created_at < NOW() - INTERVAL '1 hour'",
     )
     .execute(pool)
     .await
     .map(|r| r.rows_affected())
     .unwrap_or(0); // Non-fatal: episodes table may not exist on old DBs
-    tracing::info!(episode_decayed_count = episode_decayed, "episode power-law decay applied");
+    tracing::info!(
+        episode_decayed_count = episode_decayed,
+        "episode power-law decay applied"
+    );
 
     // 4. PageRank (batch — P1 fix)
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;

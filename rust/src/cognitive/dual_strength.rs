@@ -14,7 +14,7 @@ pub async fn on_entity_access(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()
             last_accessed = NOW(),
             access_count = access_count + 1
          WHERE entity_id = $1
-           AND observation_type != 'superseded'"
+           AND observation_type != 'superseded'",
     )
     .bind(entity_id)
     .execute(pool)
@@ -33,7 +33,7 @@ pub async fn on_search_match(pool: &PgPool, observation_ids: &[uuid::Uuid]) -> R
         "UPDATE brain_observations SET
             last_accessed = NOW(),
             access_count = access_count + 1
-         WHERE id = ANY($1)"
+         WHERE id = ANY($1)",
     )
     .bind(observation_ids)
     .execute(pool)

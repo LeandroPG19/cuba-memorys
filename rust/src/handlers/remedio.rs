@@ -20,7 +20,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     // Mark error as resolved
     let result = sqlx::query(
-        "UPDATE brain_errors SET solution = $2, resolved = true, resolved_at = NOW() WHERE id = $1"
+        "UPDATE brain_errors SET solution = $2, resolved = true, resolved_at = NOW() WHERE id = $1",
     )
     .bind(error_id)
     .bind(solution)
@@ -35,7 +35,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let similar: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT e2.id, e2.error_message FROM brain_errors e1
          JOIN brain_errors e2 ON similarity(e1.error_message, e2.error_message) > 0.5
-         WHERE e1.id = $1 AND e2.resolved = false AND e2.id != $1 LIMIT 5"
+         WHERE e1.id = $1 AND e2.resolved = false AND e2.id != $1 LIMIT 5",
     )
     .bind(error_id)
     .fetch_all(pool)

@@ -13,10 +13,7 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::constants::{
-    HEBBIAN_ACCESS_BOOST,
-    BCM_THROTTLE_SCALE,
-};
+use crate::constants::{BCM_THROTTLE_SCALE, HEBBIAN_ACCESS_BOOST};
 
 // ── BCM V3: EMA Parameters ────────────────────────────────────────
 /// Minimum BCM threshold floor — prevents division by near-zero.
@@ -66,7 +63,7 @@ pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usi
              END
              FROM brain_relations
              WHERE from_entity = $2 OR to_entity = $2
-         )"
+         )",
     )
     .bind(HEBBIAN_ACCESS_BOOST)
     .bind(entity_id)
@@ -75,4 +72,3 @@ pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usi
 
     Ok(result.rows_affected() as usize)
 }
-

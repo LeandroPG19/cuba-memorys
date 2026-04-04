@@ -14,7 +14,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("analyze");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("analyze");
     match action {
         "analyze" => analyze(pool).await,
         _ => anyhow::bail!("Invalid action: {action}. Use 'analyze'"),
@@ -110,7 +113,7 @@ async fn find_isolated(pool: &PgPool) -> Result<Vec<(String, String)>> {
          LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
          WHERE r.id IS NULL
          ORDER BY e.importance DESC
-         LIMIT 20"
+         LIMIT 20",
     )
     .fetch_all(pool)
     .await?;
@@ -131,7 +134,7 @@ async fn find_underconnected(pool: &PgPool) -> Result<Vec<(String, f64, i64)>> {
         FROM entity_degree
         WHERE importance > 0.4 AND degree < 3
         ORDER BY importance DESC
-        LIMIT 10"
+        LIMIT 10",
     )
     .fetch_all(pool)
     .await?;
@@ -141,11 +144,10 @@ async fn find_underconnected(pool: &PgPool) -> Result<Vec<(String, f64, i64)>> {
 /// 3. Pairs of entity types with no cross-connections (silos).
 async fn find_type_silos(pool: &PgPool) -> Result<Vec<(String, String)>> {
     // Get all entity types present
-    let types: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT entity_type FROM brain_entities ORDER BY entity_type"
-    )
-    .fetch_all(pool)
-    .await?;
+    let types: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT entity_type FROM brain_entities ORDER BY entity_type")
+            .fetch_all(pool)
+            .await?;
 
     // Get all connected type pairs
     let connected: Vec<(String, String)> = sqlx::query_as(
@@ -154,7 +156,7 @@ async fn find_type_silos(pool: &PgPool) -> Result<Vec<(String, String)>> {
          FROM brain_relations r
          JOIN brain_entities e1 ON r.from_entity = e1.id
          JOIN brain_entities e2 ON r.to_entity = e2.id
-         WHERE e1.entity_type != e2.entity_type"
+         WHERE e1.entity_type != e2.entity_type",
     )
     .fetch_all(pool)
     .await?;
@@ -190,7 +192,7 @@ async fn find_observation_gaps(pool: &PgPool) -> Result<Vec<(String, i64, i64, i
             AND (COUNT(*) FILTER (WHERE o.observation_type = 'decision') = 0
              OR  COUNT(*) FILTER (WHERE o.observation_type = 'lesson') = 0)
          ORDER BY facts DESC
-         LIMIT 10"
+         LIMIT 10",
     )
     .fetch_all(pool)
     .await?;
@@ -224,7 +226,7 @@ async fn find_density_anomalies(pool: &PgPool) -> Result<Vec<(String, i64, i64, 
         WHERE ABS((s.obs_count - g.avg_obs) / GREATEST(g.std_obs, 1.0)) > 2.0
            OR ABS((s.rel_count - g.avg_rel) / GREATEST(g.std_rel, 1.0)) > 2.0
         ORDER BY ABS(obs_zscore) + ABS(rel_zscore) DESC
-        LIMIT 10"
+        LIMIT 10",
     )
     .fetch_all(pool)
     .await?;

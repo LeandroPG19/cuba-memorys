@@ -20,17 +20,14 @@ const MAX_LOCAL_ITERATIONS: usize = 50;
 /// label propagation. Guarantees internally connected communities.
 pub async fn detect(pool: &PgPool) -> Result<Vec<(usize, Vec<String>)>> {
     // Fetch graph
-    let edges: Vec<(uuid::Uuid, uuid::Uuid, f64)> = sqlx::query_as(
-        "SELECT from_entity, to_entity, strength FROM brain_relations"
-    )
-    .fetch_all(pool)
-    .await?;
+    let edges: Vec<(uuid::Uuid, uuid::Uuid, f64)> =
+        sqlx::query_as("SELECT from_entity, to_entity, strength FROM brain_relations")
+            .fetch_all(pool)
+            .await?;
 
-    let entities: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT id, name FROM brain_entities"
-    )
-    .fetch_all(pool)
-    .await?;
+    let entities: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, name FROM brain_entities")
+        .fetch_all(pool)
+        .await?;
 
     if entities.is_empty() {
         return Ok(vec![]);
@@ -146,8 +143,14 @@ fn leiden_phase(
             let mut best_community = current_community;
             let mut best_delta_q = 0.0;
 
-            let ki_in_current = community_weights.get(&current_community).copied().unwrap_or(0.0);
-            let sigma_tot_current = community_totals.get(&current_community).copied().unwrap_or(0.0);
+            let ki_in_current = community_weights
+                .get(&current_community)
+                .copied()
+                .unwrap_or(0.0);
+            let sigma_tot_current = community_totals
+                .get(&current_community)
+                .copied()
+                .unwrap_or(0.0);
 
             for (&candidate, &ki_in_candidate) in &community_weights {
                 if candidate == current_community {
@@ -270,9 +273,11 @@ mod tests {
             .map(|n| n.iter().map(|(_, w)| w).sum())
             .collect();
 
-        let total_weight: f64 = neighbors.iter()
+        let total_weight: f64 = neighbors
+            .iter()
             .flat_map(|n| n.iter().map(|(_, w)| w))
-            .sum::<f64>() / 2.0;
+            .sum::<f64>()
+            / 2.0;
 
         let mut labels: Vec<usize> = (0..6).collect();
 
@@ -294,10 +299,10 @@ mod tests {
     fn test_refinement_splits_disconnected() {
         // Community {0,1,2,3} but 0-1 connected and 2-3 connected, no bridge
         let neighbors = vec![
-            vec![(1, 1.0)],     // 0
-            vec![(0, 1.0)],     // 1
-            vec![(3, 1.0)],     // 2
-            vec![(2, 1.0)],     // 3
+            vec![(1, 1.0)], // 0
+            vec![(0, 1.0)], // 1
+            vec![(3, 1.0)], // 2
+            vec![(2, 1.0)], // 3
         ];
 
         let mut labels = vec![0, 0, 0, 0]; // All in community 0

@@ -18,7 +18,10 @@ use sqlx::PgPool;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    let entity_name = args.get("entity_name").and_then(|v| v.as_str()).unwrap_or("");
+    let entity_name = args
+        .get("entity_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     match action {
         "add" => add(pool, entity_name, &args).await,
@@ -27,8 +30,9 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "batch_add" => batch_add(pool, &args).await,
         "episode_add" => episode_add(pool, entity_name, &args).await,
         "episode_list" => episode_list(pool, entity_name).await,
+        "timeline" => timeline(pool, entity_name).await,
         _ => anyhow::bail!(
-            "Invalid action: {action}. Use add/delete/list/batch_add/episode_add/episode_list"
+            "Invalid action: {action}. Use add/delete/list/batch_add/episode_add/episode_list/timeline"
         ),
     }
 }
@@ -44,12 +48,18 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         anyhow::bail!("content must be 1-10000 characters");
     }
 
-    let obs_type = args.get("observation_type").and_then(|v| v.as_str()).unwrap_or("fact");
+    let obs_type = args
+        .get("observation_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("fact");
     if !VALID_OBSERVATION_TYPES.contains(&obs_type) {
         anyhow::bail!("Invalid observation_type: {obs_type}");
     }
 
-    let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("agent");
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent");
     if !VALID_SOURCES.contains(&source) {
         anyhow::bail!("Invalid source: {source}");
     }
@@ -77,7 +87,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
                     importance = LEAST(importance + 0.05, 1.0),
                     access_count = access_count + 1,
                     last_accessed = NOW()
-                 WHERE id = $1"
+                 WHERE id = $1",
             )
             .bind(obs_id)
             .execute(pool)
@@ -96,7 +106,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     // Insert observation
     let row: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id"
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
@@ -124,7 +134,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         match crate::embeddings::onnx::embed_passage(&content_for_embed).await {
             Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
                 let result = sqlx::query(
-                    "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
+                    "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
                 )
                 .bind(pgvector::Vector::from(emb))
                 .bind(obs_id_for_embed)
@@ -168,7 +178,9 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
 
 /// Delete an observation by ID.
 async fn delete_obs(pool: &PgPool, args: &Value) -> Result<Value> {
-    let obs_id = args.get("observation_id").or_else(|| args.get("id"))
+    let obs_id = args
+        .get("observation_id")
+        .or_else(|| args.get("id"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -201,7 +213,7 @@ async fn list(pool: &PgPool, entity_name: &str) -> Result<Value> {
         "SELECT id, content, observation_type, importance, source, access_count
          FROM brain_observations
          WHERE entity_id = $1 AND observation_type != 'superseded'
-         ORDER BY importance DESC, created_at DESC"
+         ORDER BY importance DESC, created_at DESC",
     )
     .bind(entity_id)
     .fetch_all(pool)
@@ -233,12 +245,16 @@ async fn list(pool: &PgPool, entity_name: &str) -> Result<Value> {
 ///
 /// Uses explicit transaction — all-or-nothing atomicity.
 async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
-    let observations = args.get("observations")
+    let observations = args
+        .get("observations")
         .and_then(|v| v.as_array())
         .context("'observations' array is required for batch_add")?;
 
     if observations.len() > 100 {
-        anyhow::bail!("batch_add limit is 100 observations per call (got {})", observations.len());
+        anyhow::bail!(
+            "batch_add limit is 100 observations per call (got {})",
+            observations.len()
+        );
     }
 
     // Pre-process: resolve entities and dedup checks outside transaction
@@ -259,10 +275,19 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut deduplicated = 0u32;
 
     for obs in observations {
-        let entity_name = obs.get("entity_name").and_then(|v| v.as_str()).unwrap_or("");
+        let entity_name = obs
+            .get("entity_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let content = obs.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let obs_type = obs.get("observation_type").and_then(|v| v.as_str()).unwrap_or("fact");
-        let source = obs.get("source").and_then(|v| v.as_str()).unwrap_or("agent");
+        let obs_type = obs
+            .get("observation_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fact");
+        let source = obs
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
 
         if entity_name.is_empty() || content.is_empty() {
             continue;
@@ -321,7 +346,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                         importance = LEAST(importance + 0.05, 1.0),
                         access_count = access_count + 1,
                         last_accessed = NOW()
-                     WHERE id = $1"
+                     WHERE id = $1",
                 )
                 .bind(obs_id)
                 .execute(&mut *tx)
@@ -331,7 +356,9 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         }
     }
 
-    tx.commit().await.context("failed to commit batch_add transaction")?;
+    tx.commit()
+        .await
+        .context("failed to commit batch_add transaction")?;
 
     // V11: Store embeddings after commit (non-blocking, best-effort)
     if !inserted_for_embed.is_empty() {
@@ -342,7 +369,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     && !emb.iter().all(|&v| v == 0.0)
                 {
                     let _ = sqlx::query(
-                        "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2"
+                        "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
                     )
                     .bind(pgvector::Vector::from(emb))
                     .bind(obs_id)
@@ -362,6 +389,103 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
+/// Chronological timeline of all observations + episodes for an entity,
+/// including version history diffs.
+async fn timeline(pool: &PgPool, entity_name: &str) -> Result<Value> {
+    if entity_name.is_empty() {
+        anyhow::bail!("entity_name is required for timeline");
+    }
+
+    type ObsRow = (
+        uuid::Uuid,
+        String,
+        String,
+        f64,
+        i32,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let observations: Vec<ObsRow> = sqlx::query_as(
+        "SELECT o.id, o.content, o.observation_type, o.importance::float8,
+                o.version, o.previous_versions, o.created_at
+         FROM brain_observations o
+         JOIN brain_entities e ON o.entity_id = e.id
+         WHERE e.name = $1 AND o.observation_type != 'superseded'
+         ORDER BY o.created_at ASC
+         LIMIT 100",
+    )
+    .bind(entity_name)
+    .fetch_all(pool)
+    .await?;
+
+    type EpRow = (
+        uuid::Uuid,
+        String,
+        Vec<String>,
+        Vec<String>,
+        f64,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let episodes: Vec<EpRow> = sqlx::query_as(
+        "SELECT ep.id, ep.content, ep.actors, ep.artifacts,
+                ep.importance::float8, ep.started_at
+         FROM brain_episodes ep
+         JOIN brain_entities e ON ep.entity_id = e.id
+         WHERE e.name = $1
+         ORDER BY ep.started_at ASC
+         LIMIT 50",
+    )
+    .bind(entity_name)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut timeline_items: Vec<Value> = Vec::new();
+
+    for (id, content, obs_type, importance, version, prev_versions, created_at) in &observations {
+        let mut item = serde_json::json!({
+            "type": "observation",
+            "id": id.to_string(),
+            "content": content,
+            "observation_type": obs_type,
+            "importance": importance,
+            "version": version,
+            "timestamp": created_at.to_rfc3339()
+        });
+        if *version > 1 {
+            item["previous_versions"] = prev_versions.clone();
+        }
+        timeline_items.push(item);
+    }
+
+    for (id, content, actors, artifacts, importance, started_at) in &episodes {
+        timeline_items.push(serde_json::json!({
+            "type": "episode",
+            "id": id.to_string(),
+            "content": content,
+            "actors": actors,
+            "artifacts": artifacts,
+            "importance": importance,
+            "timestamp": started_at.to_rfc3339()
+        }));
+    }
+
+    // Sort by timestamp (chronological)
+    timeline_items.sort_by(|a, b| {
+        let ts_a = a.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let ts_b = b.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        ts_a.cmp(ts_b)
+    });
+
+    let count = timeline_items.len();
+    Ok(serde_json::json!({
+        "action": "timeline",
+        "entity_name": entity_name,
+        "items": timeline_items,
+        "count": count
+    }))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 /// Dedup result with Prediction Error Gating (V5).
@@ -377,7 +501,7 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
         "SELECT id, content, similarity(content, $2)::float8 AS sim
          FROM brain_observations
          WHERE entity_id = $1 AND similarity(content, $2) > 0.3
-         ORDER BY sim DESC LIMIT 5"
+         ORDER BY sim DESC LIMIT 5",
     )
     .bind(entity_id)
     .bind(content)
@@ -393,7 +517,7 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
         "SELECT similarity(content, $2)::float8
          FROM brain_observations
          WHERE entity_id = $1 AND observation_type != 'superseded'
-         ORDER BY created_at DESC LIMIT 20"
+         ORDER BY created_at DESC LIMIT 20",
     )
     .bind(entity_id)
     .bind(content)
@@ -406,7 +530,9 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
     for (obs_id, existing_content, sim) in &dupes {
         let sim = *sim;
         if sim > DEDUP_THRESHOLD {
-            return Ok(DedupResult::Duplicate(super::zafra::safe_truncate(existing_content, 80).to_string()));
+            return Ok(DedupResult::Duplicate(
+                super::zafra::safe_truncate(existing_content, 80).to_string(),
+            ));
         }
         // V5.1: Adaptive PE gating (Friston, Nature 2023)
         let action = prediction_error::adaptive_gate(sim, &recent);
@@ -426,12 +552,11 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
 /// Ensure entity exists, creating if necessary. Returns entity_id.
 async fn ensure_entity(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
     // Try to find existing
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM brain_entities WHERE name = $1"
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let existing: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
 
     if let Some((id,)) = existing {
         return Ok(id);
@@ -442,7 +567,7 @@ async fn ensure_entity(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
         "INSERT INTO brain_entities (name, entity_type)
          VALUES ($1, 'concept')
          ON CONFLICT (name) DO UPDATE SET updated_at = NOW()
-         RETURNING id"
+         RETURNING id",
     )
     .bind(name)
     .fetch_one(pool)
@@ -454,12 +579,11 @@ async fn ensure_entity(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
 
 /// Get entity_id by name (strict — errors if not found).
 async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM brain_entities WHERE name = $1"
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
 
     row.map(|(id,)| id)
         .context(format!("Entity '{name}' not found"))
@@ -526,13 +650,11 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
         if let Ok(emb) = crate::embeddings::onnx::embed_passage(&content_owned).await
             && !emb.iter().all(|&v| v == 0.0)
         {
-            let _ = sqlx::query(
-                "UPDATE brain_episodes SET embedding = $1::vector WHERE id = $2",
-            )
-            .bind(pgvector::Vector::from(emb))
-            .bind(ep_id)
-            .execute(&embed_pool)
-            .await;
+            let _ = sqlx::query("UPDATE brain_episodes SET embedding = $1::vector WHERE id = $2")
+                .bind(pgvector::Vector::from(emb))
+                .bind(ep_id)
+                .execute(&embed_pool)
+                .await;
         }
     });
 
@@ -560,19 +682,26 @@ async fn episode_list(pool: &PgPool, entity_name: &str) -> Result<Value> {
         anyhow::bail!("entity_name is required for episode_list");
     }
 
-    type EpisodeRow = (uuid::Uuid, String, Vec<String>, Vec<String>, f64, chrono::DateTime<chrono::Utc>);
+    type EpisodeRow = (
+        uuid::Uuid,
+        String,
+        Vec<String>,
+        Vec<String>,
+        f64,
+        chrono::DateTime<chrono::Utc>,
+    );
     let episodes: Vec<EpisodeRow> = sqlx::query_as(
-            "SELECT ep.id, ep.content, ep.actors, ep.artifacts,
+        "SELECT ep.id, ep.content, ep.actors, ep.artifacts,
                     ep.importance::float8, ep.started_at
              FROM brain_episodes ep
              JOIN brain_entities e ON ep.entity_id = e.id
              WHERE e.name = $1
              ORDER BY ep.started_at DESC
              LIMIT 50",
-        )
-        .bind(entity_name)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(entity_name)
+    .fetch_all(pool)
+    .await?;
 
     let items: Vec<Value> = episodes
         .iter()

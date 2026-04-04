@@ -18,7 +18,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("explain");
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("explain");
     match action {
         "explain" => explain(pool, &args).await,
         _ => anyhow::bail!("Invalid action: {action}. Use 'explain'"),
@@ -27,10 +30,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
 /// Find plausible causes for an observed effect via backward graph traversal.
 async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
-    let effect = args
-        .get("effect")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let effect = args.get("effect").and_then(|v| v.as_str()).unwrap_or("");
     if effect.is_empty() {
         anyhow::bail!("'effect' parameter is required");
     }
@@ -48,12 +48,11 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
         .min(50);
 
     // Check effect entity exists
-    let effect_exists: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM brain_entities WHERE name = $1 LIMIT 1"
-    )
-    .bind(effect)
-    .fetch_optional(pool)
-    .await?;
+    let effect_exists: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1 LIMIT 1")
+            .bind(effect)
+            .fetch_optional(pool)
+            .await?;
 
     if effect_exists.is_none() {
         return Ok(serde_json::json!({
@@ -108,7 +107,7 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
         FROM causal_chain cc
         JOIN brain_entities e ON cc.current_node = e.id
         ORDER BY plausibility_score DESC
-        LIMIT $3"
+        LIMIT $3",
     )
     .bind(effect)
     .bind(max_depth)
@@ -118,16 +117,18 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let hypotheses: Vec<Value> = rows
         .iter()
-        .map(|(name, entity_type, importance, depth, path_strength, plausibility)| {
-            serde_json::json!({
-                "cause": name,
-                "entity_type": entity_type,
-                "importance": importance,
-                "hops": depth,
-                "path_strength": path_strength,
-                "plausibility": plausibility
-            })
-        })
+        .map(
+            |(name, entity_type, importance, depth, path_strength, plausibility)| {
+                serde_json::json!({
+                    "cause": name,
+                    "entity_type": entity_type,
+                    "importance": importance,
+                    "hops": depth,
+                    "path_strength": path_strength,
+                    "plausibility": plausibility
+                })
+            },
+        )
         .collect();
 
     let count = hypotheses.len();

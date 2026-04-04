@@ -12,10 +12,7 @@
 //!       Create:    z ≤ 1σ (bottom 84.1%)
 //!       Handles vector space anisotropy better than static thresholds.
 
-use crate::constants::{
-    PRED_ERROR_REINFORCE,
-    PRED_ERROR_UPDATE,
-};
+use crate::constants::{PRED_ERROR_REINFORCE, PRED_ERROR_UPDATE};
 
 /// Action to take based on prediction error.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,9 +81,11 @@ pub fn adaptive_thresholds_zscore(recent_similarities: &[f64]) -> (f64, f64) {
 
     let n = recent_similarities.len() as f64;
     let mean = recent_similarities.iter().sum::<f64>() / n;
-    let variance = recent_similarities.iter()
+    let variance = recent_similarities
+        .iter()
         .map(|x| (x - mean).powi(2))
-        .sum::<f64>() / n;
+        .sum::<f64>()
+        / n;
     let sigma = variance.sqrt();
 
     // V5.2: Z-score thresholds — μ + Nσ

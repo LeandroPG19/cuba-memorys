@@ -52,7 +52,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             WHERE POSITION(LOWER($1) IN LOWER(error_message)) > 0
                OR POSITION(LOWER($1) IN LOWER(context::text)) > 0
             RETURNING 1
-        ) SELECT COUNT(*) FROM deleted"
+        ) SELECT COUNT(*) FROM deleted",
     )
     .bind(entity_name)
     .fetch_one(&mut *tx)
@@ -68,7 +68,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                OR POSITION(LOWER($1) IN LOWER(session_name)) > 0
                OR POSITION(LOWER($1) IN LOWER(COALESCE(summary, ''))) > 0
             RETURNING 1
-        ) SELECT COUNT(*) FROM deleted"
+        ) SELECT COUNT(*) FROM deleted",
     )
     .bind(entity_name)
     .fetch_one(&mut *tx)

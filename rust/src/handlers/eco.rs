@@ -22,7 +22,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 /// Positive RLHF: Oja's rule — importance += η * (1 - importance).
-async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Option<&str>) -> Result<Value> {
+async fn positive(
+    pool: &PgPool,
+    entity_name: Option<&str>,
+    observation_id: Option<&str>,
+) -> Result<Value> {
     let mut boosted = 0u32;
 
     if let Some(obs_id_str) = observation_id {
@@ -32,7 +36,7 @@ async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
                 importance = LEAST(importance + 0.05 * (1.0 - importance), 1.0),
                 access_count = access_count + 1,
                 last_accessed = NOW()
-             WHERE id = $1"
+             WHERE id = $1",
         )
         .bind(obs_id)
         .execute(pool)
@@ -46,7 +50,7 @@ async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
                 importance = LEAST(importance + 0.05 * (1.0 - importance), 1.0),
                 access_count = access_count + 1,
                 updated_at = NOW()
-             WHERE name = $1"
+             WHERE name = $1",
         )
         .bind(name)
         .execute(pool)
@@ -62,7 +66,11 @@ async fn positive(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
 }
 
 /// Negative RLHF: anti-Oja — importance -= η * importance.
-async fn negative(pool: &PgPool, entity_name: Option<&str>, observation_id: Option<&str>) -> Result<Value> {
+async fn negative(
+    pool: &PgPool,
+    entity_name: Option<&str>,
+    observation_id: Option<&str>,
+) -> Result<Value> {
     let mut decreased = 0u32;
 
     if let Some(obs_id_str) = observation_id {
@@ -71,7 +79,7 @@ async fn negative(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
             "UPDATE brain_observations SET
                 importance = GREATEST(importance - 0.05 * importance, 0.0),
                 last_accessed = NOW()
-             WHERE id = $1"
+             WHERE id = $1",
         )
         .bind(obs_id)
         .execute(pool)
@@ -84,7 +92,7 @@ async fn negative(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
             "UPDATE brain_entities SET
                 importance = GREATEST(importance - 0.05 * importance, 0.0),
                 updated_at = NOW()
-             WHERE name = $1"
+             WHERE name = $1",
         )
         .bind(name)
         .execute(pool)
@@ -103,7 +111,9 @@ async fn negative(pool: &PgPool, entity_name: Option<&str>, observation_id: Opti
 async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> Result<Value> {
     let obs_id_str = observation_id.context("observation_id required for correct")?;
     let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
-    let correction = args.get("correction").and_then(|v| v.as_str())
+    let correction = args
+        .get("correction")
+        .and_then(|v| v.as_str())
         .context("correction text is required")?;
 
     // Archive old content in previous_versions, then update

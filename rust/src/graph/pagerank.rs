@@ -26,7 +26,7 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
             FROM brain_relations
             GROUP BY from_entity
         ) deg ON r.from_entity = deg.from_entity
-        "#
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -90,7 +90,9 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
         }
 
         // Convergence check
-        let delta: f64 = ranks.iter().zip(new_ranks.iter())
+        let delta: f64 = ranks
+            .iter()
+            .zip(new_ranks.iter())
             .map(|(old, new)| (old - new).abs())
             .sum();
 
@@ -113,7 +115,7 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
             updated_at = NOW()
         FROM (SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::float8[]) AS rank) AS v
         WHERE e.id = v.id
-        "#
+        "#,
     )
     .bind(&ids)
     .bind(&scores)

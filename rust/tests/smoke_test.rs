@@ -3,16 +3,16 @@
 //! Validates JSON-RPC message format, tool definitions, and
 //! protocol invariants without requiring a live database.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-/// Verify all 15 tools are defined in constants.
+/// Verify all 18 tools are defined in constants.
 #[test]
 fn test_all_tools_defined() {
     let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
     assert_eq!(
         tools.len(),
-        15,
-        "Expected 15 MCP tools, got {}",
+        18,
+        "Expected 18 MCP tools, got {}",
         tools.len()
     );
 
@@ -37,6 +37,9 @@ fn test_all_tools_defined() {
         "cuba_forget",
         "cuba_reflexion",
         "cuba_hipotesis",
+        "cuba_contradiccion",
+        "cuba_centinela",
+        "cuba_calibrar",
     ];
 
     for name in &expected {
@@ -154,7 +157,7 @@ fn test_threshold_invariants() {
     assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Verify handler dispatch maps all 15 tools.
+/// Verify handler dispatch maps all 18 tools.
 #[test]
 fn test_handler_dispatch_coverage() {
     let tool_names = [
@@ -173,6 +176,9 @@ fn test_handler_dispatch_coverage() {
         "cuba_forget",
         "cuba_reflexion",
         "cuba_hipotesis",
+        "cuba_contradiccion",
+        "cuba_centinela",
+        "cuba_calibrar",
     ];
 
     for name in &tool_names {
@@ -194,6 +200,8 @@ fn test_schema_sql_content() {
         "brain_errors",
         "brain_sessions",
         "brain_episodes",
+        "brain_triggers",
+        "brain_verify_log",
     ] {
         assert!(schema.contains(table), "Missing table: {table}");
     }

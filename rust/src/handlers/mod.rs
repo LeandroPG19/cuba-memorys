@@ -7,8 +7,11 @@ use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
 
-pub mod alma;
 pub mod alarma;
+pub mod alma;
+pub mod calibrar;
+pub mod centinela;
+pub mod contradiccion;
 pub mod cronica;
 pub mod decreto;
 pub mod eco;
@@ -51,6 +54,9 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
         "cuba_decreto" => decreto::handle(pool, args).await?,
         "cuba_vigia" => vigia::handle(pool, args).await?,
         "cuba_zafra" => zafra::handle(pool, args).await?,
+        "cuba_centinela" => centinela::handle(pool, args).await?,
+        "cuba_contradiccion" => contradiccion::handle(pool, args).await?,
+        "cuba_calibrar" => calibrar::handle(pool, args).await?,
         _ => {
             tracing::warn!(tool = %tool_name, "unknown tool");
             anyhow::bail!("Unknown tool: {tool_name}")

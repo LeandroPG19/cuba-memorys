@@ -148,3 +148,34 @@ CREATE INDEX IF NOT EXISTS idx_episodes_time     ON brain_episodes(started_at DE
 CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw
     ON brain_episodes USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 128);
+
+-- ── Prospective Memory Triggers (cuba_centinela) ────────────────
+CREATE TABLE IF NOT EXISTS brain_triggers (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    entity_pattern TEXT NOT NULL,
+    condition_type TEXT NOT NULL
+        CHECK (condition_type IN ('on_access', 'on_session_start', 'on_error_match')),
+    message TEXT NOT NULL,
+    observation_id UUID REFERENCES brain_observations(id) ON DELETE SET NULL,
+    active BOOLEAN DEFAULT TRUE,
+    fire_count INT DEFAULT 0,
+    max_fires INT DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_triggers_active ON brain_triggers(active) WHERE active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_triggers_pattern ON brain_triggers USING GIN(entity_pattern gin_trgm_ops);
+
+-- ── Bayesian Calibration Log (cuba_calibrar) ────────────────────
+CREATE TABLE IF NOT EXISTS brain_verify_log (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    claim TEXT NOT NULL,
+    entity_name TEXT,
+    confidence FLOAT NOT NULL,
+    grounding_level TEXT NOT NULL,
+    outcome TEXT DEFAULT 'pending'
+        CHECK (outcome IN ('pending', 'correct', 'incorrect', 'unknown')),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_verify_log_entity ON brain_verify_log(entity_name);
+CREATE INDEX IF NOT EXISTS idx_verify_log_outcome ON brain_verify_log(outcome);

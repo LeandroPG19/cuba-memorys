@@ -23,10 +23,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
 /// Create a relation between entities.
 async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
-    let from = args.get("from_entity").and_then(|v| v.as_str()).unwrap_or("");
+    let from = args
+        .get("from_entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let to = args.get("to_entity").and_then(|v| v.as_str()).unwrap_or("");
-    let rel_type = args.get("relation_type").and_then(|v| v.as_str()).unwrap_or("related_to");
-    let bidirectional = args.get("bidirectional").and_then(|v| v.as_bool()).unwrap_or(false);
+    let rel_type = args
+        .get("relation_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("related_to");
+    let bidirectional = args
+        .get("bidirectional")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if from.is_empty() || to.is_empty() {
         anyhow::bail!("from_entity and to_entity are required");
@@ -54,7 +63,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
          ON CONFLICT (from_entity, to_entity, relation_type)
          DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
                        last_traversed = NOW()
-         RETURNING (xmax = 0) AS is_insert"
+         RETURNING (xmax = 0) AS is_insert",
     )
     .bind(from_id)
     .bind(to_id)
@@ -78,7 +87,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
              VALUES ($1, $2, $3, true)
              ON CONFLICT (from_entity, to_entity, relation_type)
              DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
-                           last_traversed = NOW()"
+                           last_traversed = NOW()",
         )
         .bind(to_id)
         .bind(from_id)
@@ -98,16 +107,22 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
 
 /// Delete a relation.
 async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
-    let from = args.get("from_entity").and_then(|v| v.as_str()).unwrap_or("");
+    let from = args
+        .get("from_entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let to = args.get("to_entity").and_then(|v| v.as_str()).unwrap_or("");
-    let rel_type = args.get("relation_type").and_then(|v| v.as_str()).unwrap_or("");
+    let rel_type = args
+        .get("relation_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     let from_id = get_entity_id(pool, from).await?;
     let to_id = get_entity_id(pool, to).await?;
 
     let result = sqlx::query(
         "DELETE FROM brain_relations
-         WHERE from_entity = $1 AND to_entity = $2 AND relation_type = $3"
+         WHERE from_entity = $1 AND to_entity = $2 AND relation_type = $3",
     )
     .bind(from_id)
     .bind(to_id)
@@ -123,8 +138,15 @@ async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
 
 /// Traverse graph from a starting entity using CTE.
 async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
-    let start = args.get("start_entity").and_then(|v| v.as_str()).unwrap_or("");
-    let max_depth = args.get("max_depth").and_then(|v| v.as_i64()).unwrap_or(3).min(5);
+    let start = args
+        .get("start_entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let max_depth = args
+        .get("max_depth")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3)
+        .min(5);
 
     if start.is_empty() {
         anyhow::bail!("start_entity is required");
@@ -163,7 +185,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
         FROM graph_walk
         ORDER BY depth, strength DESC
         LIMIT 50
-        "#
+        "#,
     )
     .bind(start_id)
     .bind(max_depth)
@@ -175,7 +197,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
         "UPDATE brain_relations SET
             strength = LEAST(strength + 0.02, 1.0),
             last_traversed = NOW()
-         WHERE from_entity = $1"
+         WHERE from_entity = $1",
     )
     .bind(start_id)
     .execute(pool)
@@ -204,8 +226,15 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
 /// Infer transitive connections (A→B→C).
 async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
-    let start = args.get("start_entity").and_then(|v| v.as_str()).unwrap_or("");
-    let max_depth = args.get("max_depth").and_then(|v| v.as_i64()).unwrap_or(3).min(5);
+    let start = args
+        .get("start_entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let max_depth = args
+        .get("max_depth")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3)
+        .min(5);
 
     if start.is_empty() {
         anyhow::bail!("start_entity is required");
@@ -240,7 +269,7 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
         WHERE tc.depth > 1
         ORDER BY tc.path_strength DESC
         LIMIT 20
-        "#
+        "#,
     )
     .bind(start_id)
     .bind(max_depth)
@@ -268,12 +297,11 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
 
 /// Get entity_id by name.
 async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM brain_entities WHERE name = $1"
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?;
 
     row.map(|(id,)| id)
         .context(format!("Entity '{name}' not found"))

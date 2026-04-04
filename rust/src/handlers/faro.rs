@@ -26,35 +26,74 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("query is required");
     }
 
-    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("hybrid");
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("hybrid");
     let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
-    let limit = args.get("limit")
+    let limit = args
+        .get("limit")
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_LIMIT)
         .min(MAX_LIMIT);
 
-    let max_tokens = args.get("max_tokens")
+    let max_tokens = args
+        .get("max_tokens")
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
+    // Temporal filters (ISO8601 strings)
+    let before = args.get("before").and_then(|v| v.as_str());
+    let after = args.get("after").and_then(|v| v.as_str());
+    let time_bounds = parse_time_bounds(before, after);
+
     match mode {
-        "hybrid" => hybrid_search(pool, query, scope, limit, max_tokens).await,
+        "hybrid" => hybrid_search(pool, query, scope, limit, max_tokens, &time_bounds).await,
         "verify" => verify_claim(pool, query).await,
         _ => anyhow::bail!("Invalid mode: {mode}. Use hybrid/verify"),
     }
 }
 
+/// Parsed temporal bounds for search filtering.
+struct TimeBounds {
+    after: chrono::DateTime<chrono::Utc>,
+    before: chrono::DateTime<chrono::Utc>,
+}
+
+/// Parse optional before/after ISO8601 strings into DateTime bounds.
+fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> TimeBounds {
+    let after_ts = after
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+    let before_ts = before
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::days(365));
+    TimeBounds {
+        after: after_ts,
+        before: before_ts,
+    }
+}
+
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
-async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_tokens: i64) -> Result<Value> {
+async fn hybrid_search(
+    pool: &PgPool,
+    query: &str,
+    scope: &str,
+    limit: i64,
+    max_tokens: i64,
+    time_bounds: &TimeBounds,
+) -> Result<Value> {
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = crate::search::rrf::query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
 
     // Run text search (always available — V8 graceful degradation base)
-    let text_results = text_search(pool, query, scope, limit * 2).await?;
+    let text_results = text_search(pool, query, scope, limit * 2, time_bounds).await?;
 
     // Run vector search (may fail gracefully — V8)
-    let vector_results = vector_search(pool, query, scope, limit * 2).await;
+    let vector_results = vector_search(pool, query, scope, limit * 2, time_bounds).await;
 
     // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
     let rrf_k: f64 = 60.0;
@@ -64,7 +103,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
 
     // Add text results with RRF rank score
     for (rank, result) in text_results.iter().enumerate() {
-        let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = result
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let rrf_score = text_weight / (rrf_k + rank as f64 + 1.0);
         fused_scores.insert(id, (rrf_score, result.clone()));
     }
@@ -72,7 +115,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     // Add vector results (V8: only if available)
     if let Ok(vec_results) = vector_results {
         for (rank, result) in vec_results.iter().enumerate() {
-            let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = result
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let rrf_score = vector_weight / (rrf_k + rank as f64 + 1.0);
             fused_scores
                 .entry(id.clone())
@@ -90,17 +137,20 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     results.truncate(limit as usize);
 
     // VF2: Testing Effect — update access tracking on matched observations
-    let matched_obs_ids: Vec<uuid::Uuid> = results.iter()
+    let matched_obs_ids: Vec<uuid::Uuid> = results
+        .iter()
         .filter_map(|(_, _, r)| {
-            r.get("id").and_then(|v| v.as_str())
+            r.get("id")
+                .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<uuid::Uuid>().ok())
         })
         .collect();
 
     if !matched_obs_ids.is_empty()
-        && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await {
-            tracing::warn!(error = %e, "failed to apply Testing Effect boost");
-        }
+        && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await
+    {
+        tracing::warn!(error = %e, "failed to apply Testing Effect boost");
+    }
 
     // Session awareness: check active session and boost matching results
     let session_boost = get_session_goals(pool).await.unwrap_or_default();
@@ -141,7 +191,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
     let mut token_budget = max_tokens;
     let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
     for mut r in results_json {
-        let content_len = r.get("content")
+        let content_len = r
+            .get("content")
             .and_then(|v| v.as_str())
             .map(|s| s.len() as i64 / 4)
             .unwrap_or(20);
@@ -151,7 +202,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, scope: &str, limit: i64, max_
         if content_len > token_budget {
             // Truncate content to fit remaining budget instead of dropping
             let max_chars = (token_budget * 4) as usize;
-            let truncated: Option<String> = r.get("content")
+            let truncated: Option<String> = r
+                .get("content")
                 .and_then(|v| v.as_str())
                 .map(|s| crate::handlers::zafra::safe_truncate(s, max_chars).to_string());
             if let (Some(obj), Some(t)) = (r.as_object_mut(), truncated) {
@@ -181,7 +233,7 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
          WHERE similarity(content, $1) > 0.3
            AND observation_type != 'superseded'
          ORDER BY sim DESC
-         LIMIT 10"
+         LIMIT 10",
     )
     .bind(claim)
     .fetch_all(pool)
@@ -191,6 +243,49 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     let sources: Vec<&str> = evidence.iter().map(|(_, _, t)| t.as_str()).collect();
 
     let (confidence, level) = grounding::compute_grounding(&similarities, &sources);
+
+    // Log verify prediction to brain_verify_log (Feature: cuba_calibrar integration)
+    let top_entity: Option<String> = if !evidence.is_empty() {
+        sqlx::query_as::<_, (String,)>(
+            "SELECT e.name FROM brain_observations o
+             JOIN brain_entities e ON o.entity_id = e.id
+             WHERE similarity(o.content, $1) > 0.3
+             ORDER BY similarity(o.content, $1) DESC LIMIT 1",
+        )
+        .bind(claim)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(n,)| n)
+    } else {
+        None
+    };
+
+    sqlx::query(
+        "INSERT INTO brain_verify_log (claim, entity_name, confidence, grounding_level)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(claim)
+    .bind(top_entity.as_deref())
+    .bind(confidence)
+    .bind(level)
+    .execute(pool)
+    .await
+    .ok(); // Non-fatal
+
+    // Fetch historical calibration for this grounding level
+    let calibration: Option<(f64,)> = sqlx::query_as(
+        "SELECT (COUNT(*) FILTER (WHERE outcome = 'correct') + 1)::float8 /
+                (COUNT(*) FILTER (WHERE outcome = 'correct') + COUNT(*) FILTER (WHERE outcome = 'incorrect') + 2)::float8
+         FROM brain_verify_log
+         WHERE grounding_level = $1 AND outcome != 'pending'"
+    )
+    .bind(level)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
 
     let evidence_json: Vec<Value> = evidence
         .iter()
@@ -203,7 +298,7 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
         })
         .collect();
 
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "mode": "verify",
         "claim": claim,
         "confidence": confidence,
@@ -211,69 +306,63 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
         "evidence": evidence_json,
         "evidence_count": evidence_json.len(),
         "source_diversity": sources.len()
-    }))
-}
+    });
 
-/// Execute a parameterized text search query and map results to JSON via closure.
-async fn search_table<T, F>(
-    pool: &PgPool,
-    sql: &str,
-    query: &str,
-    limit: i64,
-    mapper: F,
-) -> Result<Vec<Value>>
-where
-    T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
-    F: Fn(T) -> Value,
-{
-    let rows: Vec<T> = sqlx::query_as(sql)
-        .bind(query)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    if let Some((cal,)) = calibration {
+        response["calibrated_accuracy"] = serde_json::json!(cal);
+    }
 
-    Ok(rows.into_iter().map(mapper).collect())
+    Ok(response)
 }
 
 /// Text search using PostgreSQL full-text + trigram similarity.
-async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Result<Vec<Value>> {
+/// Temporal filtering: $3=after, $4=before applied to created_at on each table.
+async fn text_search(
+    pool: &PgPool,
+    query: &str,
+    scope: &str,
+    limit: i64,
+    tb: &TimeBounds,
+) -> Result<Vec<Value>> {
     let mut results = Vec::new();
 
     if scope == "all" || scope == "entities" {
-        let entities = search_table::<(uuid::Uuid, String, String, f64, f64), _>(
-            pool,
-            // V10: importance*0.3 activates the cognitive pipeline in ranking.
-            // PageRank, Hebbian boosts, and decay now directly affect which entities surface.
+        let rows: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT id, name, entity_type, importance::float8,
                     (  (ts_rank(search_vector, plainto_tsquery('simple', $1))
                       + similarity(name, $1)) * 0.7
                      + importance::float8 * 0.3
                     )::float8 AS score
              FROM brain_entities
-             WHERE search_vector @@ plainto_tsquery('simple', $1)
-                OR similarity(name, $1) > 0.3
+             WHERE (search_vector @@ plainto_tsquery('simple', $1)
+                OR similarity(name, $1) > 0.3)
+               AND created_at >= $3 AND created_at <= $4
              ORDER BY score DESC
              LIMIT $2",
-            query,
-            limit,
-            |(id, name, entity_type, importance, score)| {
-                serde_json::json!({
-                    "id": id.to_string(),
-                    "type": "entity",
-                    "name": name,
-                    "entity_type": entity_type,
-                    "importance": importance,
-                    "score": score
-                })
-            },
-        ).await?;
-        results.extend(entities);
+        )
+        .bind(query)
+        .bind(limit)
+        .bind(tb.after)
+        .bind(tb.before)
+        .fetch_all(pool)
+        .await?;
+        results.extend(
+            rows.into_iter()
+                .map(|(id, name, entity_type, importance, score)| {
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "type": "entity",
+                        "name": name,
+                        "entity_type": entity_type,
+                        "importance": importance,
+                        "score": score
+                    })
+                }),
+        );
     }
 
     if scope == "all" || scope == "observations" {
-        let observations = search_table::<(uuid::Uuid, String, String, String, f64, f64), _>(
-            pool,
-            // V10: importance*0.3 — same as entities query, makes importance real.
+        let rows: Vec<(uuid::Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
                     (  (ts_rank(o.search_vector, plainto_tsquery('simple', $1))
                       + similarity(o.content, $1)) * 0.7
@@ -284,10 +373,17 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
              WHERE (o.search_vector @@ plainto_tsquery('simple', $1)
                 OR similarity(o.content, $1) > 0.3)
                AND o.observation_type != 'superseded'
+               AND o.created_at >= $3 AND o.created_at <= $4
              ORDER BY score DESC
              LIMIT $2",
-            query,
-            limit,
+        )
+        .bind(query)
+        .bind(limit)
+        .bind(tb.after)
+        .bind(tb.before)
+        .fetch_all(pool)
+        .await?;
+        results.extend(rows.into_iter().map(
             |(id, entity_name, content, obs_type, importance, score)| {
                 serde_json::json!({
                     "id": id.to_string(),
@@ -299,41 +395,45 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
                     "score": score
                 })
             },
-        ).await?;
-        results.extend(observations);
+        ));
     }
 
     if scope == "all" || scope == "errors" {
-        let errors = search_table::<(uuid::Uuid, String, String, bool, f64), _>(
-            pool,
+        let rows: Vec<(uuid::Uuid, String, String, bool, f64)> = sqlx::query_as(
             "SELECT id, error_type, error_message, resolved,
                     (ts_rank(search_vector, plainto_tsquery('simple', $1)) +
                     similarity(error_message, $1))::float8 AS score
              FROM brain_errors
-             WHERE search_vector @@ plainto_tsquery('simple', $1)
-                OR similarity(error_message, $1) > 0.3
+             WHERE (search_vector @@ plainto_tsquery('simple', $1)
+                OR similarity(error_message, $1) > 0.3)
+               AND created_at >= $3 AND created_at <= $4
              ORDER BY score DESC
              LIMIT $2",
-            query,
-            limit,
-            |(id, error_type, error_message, resolved, score)| {
-                serde_json::json!({
-                    "id": id.to_string(),
-                    "type": "error",
-                    "error_type": error_type,
-                    "error_message": error_message,
-                    "resolved": resolved,
-                    "score": score
-                })
-            },
-        ).await?;
-        results.extend(errors);
+        )
+        .bind(query)
+        .bind(limit)
+        .bind(tb.after)
+        .bind(tb.before)
+        .fetch_all(pool)
+        .await?;
+        results.extend(
+            rows.into_iter()
+                .map(|(id, error_type, error_message, resolved, score)| {
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "type": "error",
+                        "error_type": error_type,
+                        "error_message": error_message,
+                        "resolved": resolved,
+                        "score": score
+                    })
+                }),
+        );
     }
 
     // Search episodes (always included in "all" scope — separate memory system)
     if scope == "all" {
-        let episodes = search_table::<(uuid::Uuid, String, String, f64, f64), _>(
-            pool,
+        let rows: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT ep.id, e.name, ep.content, ep.importance::float8,
                     (  (ts_rank(ep.search_vector, plainto_tsquery('simple', $1))
                       + similarity(ep.content, $1)) * 0.7
@@ -341,26 +441,32 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
                     )::float8 AS score
              FROM brain_episodes ep
              JOIN brain_entities e ON ep.entity_id = e.id
-             WHERE ep.search_vector @@ plainto_tsquery('simple', $1)
-                OR similarity(ep.content, $1) > 0.3
+             WHERE (ep.search_vector @@ plainto_tsquery('simple', $1)
+                OR similarity(ep.content, $1) > 0.3)
+               AND ep.created_at >= $3 AND ep.created_at <= $4
              ORDER BY score DESC
              LIMIT $2",
-            query,
-            limit,
-            |(id, entity_name, content, importance, score)| {
-                serde_json::json!({
-                    "id": id.to_string(),
-                    "type": "episode",
-                    "entity_name": entity_name,
-                    "content": content,
-                    "importance": importance,
-                    "score": score
-                })
-            },
         )
+        .bind(query)
+        .bind(limit)
+        .bind(tb.after)
+        .bind(tb.before)
+        .fetch_all(pool)
         .await
         .unwrap_or_default(); // Non-fatal if table doesn't exist
-        results.extend(episodes);
+        results.extend(
+            rows.into_iter()
+                .map(|(id, entity_name, content, importance, score)| {
+                    serde_json::json!({
+                        "id": id.to_string(),
+                        "type": "episode",
+                        "entity_name": entity_name,
+                        "content": content,
+                        "importance": importance,
+                        "score": score
+                    })
+                }),
+        );
     }
 
     Ok(results)
@@ -368,9 +474,14 @@ async fn text_search(pool: &PgPool, query: &str, scope: &str, limit: i64) -> Res
 
 /// Vector search via pgvector cosine similarity.
 /// V8: Returns Result — callers can gracefully degrade on failure.
-async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> Result<Vec<Value>> {
+async fn vector_search(
+    pool: &PgPool,
+    query: &str,
+    _scope: &str,
+    limit: i64,
+    tb: &TimeBounds,
+) -> Result<Vec<Value>> {
     // Compute embedding via ONNX (or hash fallback).
-    // embed() already runs in spawn_blocking internally (FIX B2).
     let embedding = match crate::embeddings::onnx::embed(query).await {
         Ok(emb) => emb,
         Err(_) => return Ok(vec![]), // V8: graceful degradation
@@ -381,7 +492,7 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
         return Ok(vec![]); // V8: graceful degradation
     }
 
-    // If we had real embeddings:
+    // Vector search with temporal filtering on observations
     let observations: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
         "SELECT o.id, e.name, o.content,
                 1.0 - (o.embedding <=> $1::vector) AS cosine_sim
@@ -389,11 +500,14 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
          JOIN brain_entities e ON o.entity_id = e.id
          WHERE o.embedding IS NOT NULL
            AND o.observation_type != 'superseded'
+           AND o.created_at >= $3 AND o.created_at <= $4
          ORDER BY o.embedding <=> $1::vector
-         LIMIT $2"
+         LIMIT $2",
     )
     .bind(pgvector::Vector::from(embedding.clone()))
     .bind(limit)
+    .bind(tb.after)
+    .bind(tb.before)
     .fetch_all(pool)
     .await?;
 
@@ -410,21 +524,24 @@ async fn vector_search(pool: &PgPool, query: &str, _scope: &str, limit: i64) -> 
         })
         .collect();
 
-    // Also search episodes via vector similarity (if table exists)
+    // Also search episodes with temporal filtering
     let episodes: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
         "SELECT ep.id, e.name, ep.content,
                 1.0 - (ep.embedding <=> $1::vector) AS cosine_sim
          FROM brain_episodes ep
          JOIN brain_entities e ON ep.entity_id = e.id
          WHERE ep.embedding IS NOT NULL
+           AND ep.created_at >= $3 AND ep.created_at <= $4
          ORDER BY ep.embedding <=> $1::vector
-         LIMIT $2"
+         LIMIT $2",
     )
     .bind(pgvector::Vector::from(embedding))
     .bind(limit)
+    .bind(tb.after)
+    .bind(tb.before)
     .fetch_all(pool)
     .await
-    .unwrap_or_default(); // Non-fatal if table doesn't exist
+    .unwrap_or_default();
 
     results.extend(episodes.iter().map(|(id, entity_name, content, sim)| {
         serde_json::json!({
@@ -466,7 +583,7 @@ fn entropy_weights(entropy: f64) -> (f64, f64) {
 /// Get active session goals for session-aware boosting.
 async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     let row: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
@@ -484,15 +601,12 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
 /// For each top result that has an entity name, we query its related entities
 /// to provide graph context. This helps the AI understand the broader
 /// knowledge structure around search matches.
-async fn enrich_graphrag(
-    pool: &PgPool,
-    results: &[(String, f64, Value)],
-    top_k: usize,
-) -> Value {
+async fn enrich_graphrag(pool: &PgPool, results: &[(String, f64, Value)], top_k: usize) -> Value {
     let mut context: Vec<Value> = Vec::new();
 
     for (_, _, result) in results.iter().take(top_k) {
-        let entity_name = result.get("entity_name")
+        let entity_name = result
+            .get("entity_name")
             .or_else(|| result.get("name"))
             .and_then(|v| v.as_str());
 
@@ -508,11 +622,12 @@ async fn enrich_graphrag(
                      ELSE r.from_entity
                  END
                  ORDER BY r.strength DESC
-                 LIMIT 5"
+                 LIMIT 5",
             )
             .bind(name)
             .fetch_all(pool)
-            .await {
+            .await
+            {
                 Ok(n) => n,
                 Err(_) => continue,
             };

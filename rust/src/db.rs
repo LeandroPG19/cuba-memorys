@@ -63,6 +63,57 @@ BEGIN
 END $$;
 "#;
 
+/// Prospective memory triggers migration (cuba_centinela).
+const TRIGGERS_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'brain_triggers'
+    ) THEN
+        CREATE TABLE brain_triggers (
+            id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+            entity_pattern TEXT NOT NULL,
+            condition_type TEXT NOT NULL
+                CHECK (condition_type IN ('on_access', 'on_session_start', 'on_error_match')),
+            message TEXT NOT NULL,
+            observation_id UUID REFERENCES brain_observations(id) ON DELETE SET NULL,
+            active BOOLEAN DEFAULT TRUE,
+            fire_count INT DEFAULT 0,
+            max_fires INT DEFAULT 1,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            expires_at TIMESTAMPTZ
+        );
+        CREATE INDEX idx_triggers_active ON brain_triggers(active) WHERE active = TRUE;
+        CREATE INDEX idx_triggers_pattern ON brain_triggers USING GIN(entity_pattern gin_trgm_ops);
+    END IF;
+END $$;
+"#;
+
+/// Bayesian calibration verify log migration (cuba_calibrar).
+const VERIFY_LOG_MIGRATION: &str = r#"
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_name = 'brain_verify_log'
+    ) THEN
+        CREATE TABLE brain_verify_log (
+            id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+            claim TEXT NOT NULL,
+            entity_name TEXT,
+            confidence FLOAT NOT NULL,
+            grounding_level TEXT NOT NULL,
+            outcome TEXT DEFAULT 'pending'
+                CHECK (outcome IN ('pending', 'correct', 'incorrect', 'unknown')),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX idx_verify_log_entity ON brain_verify_log(entity_name);
+        CREATE INDEX idx_verify_log_outcome ON brain_verify_log(outcome);
+    END IF;
+END $$;
+"#;
+
 /// BCM θ_M EMA migration — adds bcm_theta column for persistent sliding threshold.
 /// V3: Deep Research 2026-03-14.
 const BCM_THETA_MIGRATION: &str = r#"
@@ -150,12 +201,27 @@ async fn init_schema(pool: &PgPool) -> Result<()> {
 
     tracing::info!("BCM theta column verified");
 
+    // Triggers table (cuba_centinela) — idempotent
+    sqlx::raw_sql(TRIGGERS_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply triggers migration")?;
+
+    tracing::info!("brain_triggers table verified");
+
+    // Verify log table (cuba_calibrar) — idempotent
+    sqlx::raw_sql(VERIFY_LOG_MIGRATION)
+        .execute(pool)
+        .await
+        .context("failed to apply verify_log migration")?;
+
+    tracing::info!("brain_verify_log table verified");
+
     // Check pgvector extension
-    let pgvector_check: Option<(String,)> = sqlx::query_as(
-        "SELECT extname::text FROM pg_extension WHERE extname = 'vector'"
-    )
-    .fetch_optional(pool)
-    .await?;
+    let pgvector_check: Option<(String,)> =
+        sqlx::query_as("SELECT extname::text FROM pg_extension WHERE extname = 'vector'")
+            .fetch_optional(pool)
+            .await?;
 
     if pgvector_check.is_some() {
         tracing::info!("pgvector extension detected");

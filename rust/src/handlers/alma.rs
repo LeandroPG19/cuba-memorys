@@ -4,8 +4,8 @@
 //! V10: Upsert detection — AI knows if entity was created or re-found.
 //! Hebbian: get/update auto-boost entity + neighbor importance.
 
-use crate::constants::VALID_ENTITY_TYPES;
 use crate::cognitive::{dual_strength, hebbian};
+use crate::constants::VALID_ENTITY_TYPES;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -69,7 +69,7 @@ async fn create(pool: &PgPool, name: &str, args: &Value) -> Result<Value> {
 
     // Actually create
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_entities (name, entity_type) VALUES ($1, $2) RETURNING id"
+        "INSERT INTO brain_entities (name, entity_type) VALUES ($1, $2) RETURNING id",
     )
     .bind(name)
     .bind(entity_type)
@@ -93,22 +93,18 @@ async fn create(pool: &PgPool, name: &str, args: &Value) -> Result<Value> {
 
 /// Update entity name.
 async fn update(pool: &PgPool, name: &str, args: &Value) -> Result<Value> {
-    let new_name = args
-        .get("new_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let new_name = args.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
 
     if new_name.is_empty() || new_name.len() > 200 {
         anyhow::bail!("new_name must be 1-200 characters");
     }
 
-    let result = sqlx::query(
-        "UPDATE brain_entities SET name = $1, updated_at = NOW() WHERE name = $2"
-    )
-    .bind(new_name)
-    .bind(name)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("UPDATE brain_entities SET name = $1, updated_at = NOW() WHERE name = $2")
+            .bind(new_name)
+            .bind(name)
+            .execute(pool)
+            .await?;
 
     if result.rows_affected() == 0 {
         anyhow::bail!("Entity '{name}' not found");
@@ -148,7 +144,7 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
     // Get entity (with FOR UPDATE to prevent stale reads — FIX B1 partial)
     let entity: Option<(uuid::Uuid, String, String, f64, i32)> = sqlx::query_as(
         "SELECT id, name, entity_type, importance, access_count
-         FROM brain_entities WHERE name = $1"
+         FROM brain_entities WHERE name = $1",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -170,7 +166,7 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
         "SELECT id, content, observation_type, importance, source
          FROM brain_observations
          WHERE entity_id = $1 AND observation_type != 'superseded'
-         ORDER BY importance DESC, created_at DESC"
+         ORDER BY importance DESC, created_at DESC",
     )
     .bind(entity_id)
     .fetch_all(pool)
@@ -198,7 +194,7 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
          JOIN brain_entities e ON (
             CASE WHEN r.from_entity = $1 THEN r.to_entity ELSE r.from_entity END = e.id
          )
-         WHERE r.from_entity = $1 OR r.to_entity = $1"
+         WHERE r.from_entity = $1 OR r.to_entity = $1",
     )
     .bind(entity_id)
     .fetch_all(pool)
@@ -216,7 +212,7 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
         })
         .collect();
 
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "action": "get",
         "entity": {
             "name": entity_name,
@@ -227,7 +223,17 @@ async fn get(pool: &PgPool, name: &str) -> Result<Value> {
         "observations": obs_json,
         "observation_count": obs_json.len(),
         "relations": rel_json
-    }))
+    });
+
+    // Centinela: check on_access triggers
+    let triggered = crate::handlers::centinela::check_triggers(pool, name, "on_access")
+        .await
+        .unwrap_or_default();
+    if !triggered.is_empty() {
+        response["triggered_reminders"] = serde_json::json!(triggered);
+    }
+
+    Ok(response)
 }
 
 /// Boost entity importance via Hebbian learning with BCM throttling.
