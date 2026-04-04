@@ -25,10 +25,15 @@ serde_json = "1"
 
 # Embeddings (ONNX Runtime) — pinned RC (ADR audit 2026-03-14)
 # IMPORTANT: =exact pin until ort 2.0.0 stable releases. Do NOT change.
-# tls-native-vendored: statically compiles OpenSSL from source — eliminates
-# system OpenSSL dependency that breaks ARM64 cross-compilation in CI.
-ort = { version = "=2.0.0-rc.12", features = ["load-dynamic", "tls-native-vendored"] }
-tokenizers = "0.21"
+# load-dynamic: ONNX Runtime loaded at runtime from libonnxruntime.so — not bundled.
+# No TLS feature: all model loading is from local files (commit_from_file).
+# tls-native-vendored was removed because it caused OpenSSL cross-compilation
+# failures in manylinux CI. The binary never downloads models over HTTP.
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
+# default-features = false: removes the `http` feature which pulls reqwest →
+# native-tls → openssl. We always load tokenizers from a local JSON file
+# (Tokenizer::from_file), never from HuggingFace Hub (from_pretrained).
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # Logging (structured, to stderr)
 tracing = "0.1"

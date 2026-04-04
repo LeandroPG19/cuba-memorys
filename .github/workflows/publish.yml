@@ -118,13 +118,13 @@ jobs:
 
 # ── 3. PyPI — maturin wheels ──────────────────────────────────────────────────
 #
-# FIX: manylinux2014 (CentOS 7) has Perl 5.16 which cannot configure OpenSSL 3.x
-# from source, and an outdated ARM cross-compiler that breaks ring's assembly.
-# manylinux_2_28 (AlmaLinux 8) ships Perl 5.26+ and GCC 10+ — both issues resolved.
-# Minimum glibc requirement rises from 2.17 to 2.28 (Ubuntu 20.04+, RHEL 8+).
+# manylinux_2_28 (AlmaLinux 8): minimum glibc 2.28 (Ubuntu 20.04+, RHEL 8+).
+# Upgrading from manylinux2014 (CentOS 7) fixes the aarch64 ring assembly issue
+# in the old cross-compiler. OpenSSL is no longer a build dependency — ort and
+# tokenizers now load everything from local files, no TLS/HTTP needed.
 #
-# Publish is split into build + twine upload so --skip-existing makes re-runs
-# idempotent (safe if the tag is re-pushed or the workflow is manually retried).
+# Publish is split into build + maturin upload --skip-existing so re-runs
+# are idempotent (safe if the tag is re-pushed or the workflow is retried).
   publish-pypi:
     name: PyPI (${{ matrix.target }})
     needs: release
@@ -136,29 +136,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: "2_28"
-            # System OpenSSL in quay.io/pypa/manylinux_2_28_x86_64 (/usr/include +
-            # /usr/lib64). Use it instead of openssl-src (Perl Configure fails even
-            # with modern Perl in that image). OPENSSL_STATIC=1 avoids libssl.so dep.
-            openssl_before_script: |
-              export OPENSSL_NO_VENDOR=1
-              export OPENSSL_STATIC=1
-              export OPENSSL_DIR=/usr
           - os: ubuntu-latest
             target: aarch64
             manylinux: "2_28"
-            # For aarch64 cross-compilation (manylinux_2_28-cross:aarch64 image),
-            # tls-native-vendored compiles OpenSSL from source successfully —
-            # the cross container has working Perl and target toolchain.
-            # Do NOT set OPENSSL_NO_VENDOR here, leave vendored as-is.
-            openssl_before_script: ""
           - os: macos-latest
             target: universal2-apple-darwin
             manylinux: ""
-            openssl_before_script: ""
           - os: windows-latest
             target: x86_64
             manylinux: ""
-            openssl_before_script: ""
     environment:
       name: pypi
       url: https://pypi.org/project/cuba-memorys/
@@ -172,7 +158,12 @@ jobs:
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          before-script-linux: ${{ matrix.openssl_before_script }}
+          # ort-sys has ureq as a build-dependency (host-only, not in final binary).
+          # ureq → native-tls → openssl-sys needs openssl headers to compile.
+          # The manylinux_2_28 image ships runtime libssl but not openssl-devel.
+          # Installing it here covers both x86_64 and aarch64 (both run on x86_64 host).
+          before-script-linux: |
+            yum install -y openssl-devel 2>&1 | tail -3
 
       - name: Upload to PyPI
         uses: PyO3/maturin-action@v1
