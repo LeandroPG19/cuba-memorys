@@ -51,19 +51,24 @@ pub async fn boost_on_access(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()>
 }
 
 /// Boost neighbors via 1-hop diffusion (Collins & Loftus 1975).
+///
+/// V0.7 (Mejora 6): Weighted by MAX(relation strength) per neighbor.
+/// Previously all neighbors received uniform boost regardless of edge weight.
+/// Collins & Loftus explicitly specify activation proportional to link strength.
 pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usize> {
     let result = sqlx::query(
         "UPDATE brain_entities SET
-            importance = LEAST(importance + $1 * 0.5, 1.0),
+            importance = LEAST(importance + $1 * 0.5 * sub.max_strength, 1.0),
             updated_at = NOW()
-         WHERE id IN (
-             SELECT CASE
-                 WHEN from_entity = $2 THEN to_entity
-                 ELSE from_entity
-             END
+         FROM (
+             SELECT
+                 CASE WHEN from_entity = $2 THEN to_entity ELSE from_entity END AS neighbor_id,
+                 MAX(strength) AS max_strength
              FROM brain_relations
              WHERE from_entity = $2 OR to_entity = $2
-         )",
+             GROUP BY neighbor_id
+         ) sub
+         WHERE brain_entities.id = sub.neighbor_id",
     )
     .bind(HEBBIAN_ACCESS_BOOST)
     .bind(entity_id)

@@ -104,25 +104,41 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
         }
     }
 
-    // P1 FIX: Batch UPDATE with unnest() — 1 query instead of N
+    // P1 FIX: Batch UPDATE with unnest() — 1 query instead of N.
+    //
+    // V0.7: BLEND PageRank with existing importance instead of overwriting.
+    // Previous version used `SET importance = v.rank` which unconditionally
+    // destroyed Hebbian/RLHF/decay accumulated importance every REM cycle.
+    //
+    // Fix: convex combination (Bayesian posterior update):
+    //   importance_new = α * rank_normalized + (1 - α) * importance_current
+    //
+    // α = 0.3 — PageRank contributes structural signal but does not dominate.
+    // Min-max normalization maps raw ranks (which sum to 1.0) to [0, 1] so
+    // they are commensurate with the importance scale.
     let ids: Vec<uuid::Uuid> = node_list.clone();
-    let scores: Vec<f64> = ranks;
+
+    // Min-max normalize ranks to [0, 1]
+    let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = (max_r - min_r).max(1e-12);
+    let normalized: Vec<f64> = ranks.iter().map(|r| (r - min_r) / range).collect();
 
     sqlx::query(
         r#"
         UPDATE brain_entities AS e
-        SET importance = v.rank,
+        SET importance = LEAST(0.3 * v.rank_norm + 0.7 * e.importance, 1.0),
             updated_at = NOW()
-        FROM (SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::float8[]) AS rank) AS v
+        FROM (SELECT UNNEST($1::uuid[]) AS id, UNNEST($2::float8[]) AS rank_norm) AS v
         WHERE e.id = v.id
         "#,
     )
     .bind(&ids)
-    .bind(&scores)
+    .bind(&normalized)
     .execute(pool)
     .await?;
 
-    tracing::info!(entities = n, "PageRank updated (batch P1)");
+    tracing::info!(entities = n, "PageRank blended (α=0.3, P1 batch)");
     Ok(n)
 }
 
@@ -135,5 +151,33 @@ mod tests {
         assert!(DAMPING > 0.0 && DAMPING < 1.0);
         assert!(ITERATIONS > 0);
         assert!(CONVERGENCE_THRESHOLD > 0.0);
+    }
+
+    #[test]
+    fn test_minmax_normalization() {
+        let ranks = vec![0.001, 0.005, 0.002, 0.010];
+        let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = (max_r - min_r).max(1e-12);
+        let normalized: Vec<f64> = ranks.iter().map(|r| (r - min_r) / range).collect();
+
+        assert!((normalized[0] - 0.0).abs() < 1e-6, "min should map to 0.0");
+        assert!((normalized[3] - 1.0).abs() < 1e-6, "max should map to 1.0");
+        // All values in [0, 1]
+        for v in &normalized {
+            assert!(*v >= 0.0 && *v <= 1.0, "normalized value out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn test_blend_preserves_existing_importance() {
+        // Simulate blend: importance_new = 0.3 * rank_norm + 0.7 * existing
+        let existing = 0.8; // High importance from Hebbian/RLHF
+        let rank_norm = 0.2; // Low PageRank
+        let blended = 0.3 * rank_norm + 0.7 * existing;
+        // With overwrite: importance = rank_norm = 0.2 (destroyed)
+        // With blend: importance = 0.06 + 0.56 = 0.62 (preserved most of prior)
+        assert!(blended > 0.5, "blend should preserve existing importance: got {blended}");
+        assert!(blended < existing, "blend should incorporate PageRank signal");
     }
 }

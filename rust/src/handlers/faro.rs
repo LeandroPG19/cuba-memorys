@@ -242,15 +242,33 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         tracing::warn!(error = %e, "failed to apply Testing Effect boost");
     }
 
-    // Session awareness: check active session and boost matching results
+    // Session awareness: check active session and boost matching results.
+    //
+    // V0.7 (Mejora 5): Word-level overlap instead of substring match.
+    // Previous `.contains()` caused false positives: goal "rust" matched
+    // "frustrated", "entrusted", "robust". Now uses tokenized word sets
+    // with proportional boost (bag-of-words model, Salton 1971).
     let session_boost = get_session_goals(pool).await.unwrap_or_default();
     if !session_boost.is_empty() {
         for (_, fr) in &mut results {
             if let Some(content) = fr.data.get("content").and_then(|v| v.as_str()) {
-                let content_lower = content.to_lowercase();
+                let content_words: std::collections::HashSet<String> = content
+                    .to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() > 1)
+                    .map(String::from)
+                    .collect();
                 for goal in &session_boost {
-                    if content_lower.contains(&goal.to_lowercase()) {
-                        fr.total *= 1.3; // 30% boost for session-relevant results
+                    let goal_words: std::collections::HashSet<String> = goal
+                        .to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .filter(|w| w.len() > 1)
+                        .map(String::from)
+                        .collect();
+                    let overlap = content_words.intersection(&goal_words).count();
+                    if overlap > 0 {
+                        let match_ratio = overlap as f64 / goal_words.len().max(1) as f64;
+                        fr.total *= 1.0 + 0.3 * match_ratio; // Up to 1.3x at full overlap
                         fr.session_boosted = true;
                         break;
                     }
@@ -352,12 +370,22 @@ fn compact_result(r: &Value) -> Value {
 }
 
 /// Verify a claim against stored knowledge with source diversity scoring.
+///
+/// V0.7: Hybrid verification — combines trigram + embedding search (Mejora 2).
+///       Previously only used pg_trgm, missing all paraphrase matches.
+///       Also eliminates double trigram scan (Mejora 9): entity_name is now
+///       returned from the first query instead of running a second scan.
 async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
-    let evidence: Vec<(String, f64, String)> = sqlx::query_as(
-        "SELECT content, similarity(content, $1)::float8 AS sim, observation_type
-         FROM brain_observations
-         WHERE similarity(content, $1) > 0.3
-           AND observation_type != 'superseded'
+    use std::collections::HashMap;
+
+    // 1. Trigram evidence (with entity_name — Mejora 9: eliminates second scan)
+    let trigram_evidence: Vec<(uuid::Uuid, String, f64, String, String)> = sqlx::query_as(
+        "SELECT o.id, o.content, similarity(o.content, $1)::float8 AS sim,
+                o.observation_type, e.name AS entity_name
+         FROM brain_observations o
+         JOIN brain_entities e ON o.entity_id = e.id
+         WHERE similarity(o.content, $1) > 0.3
+           AND o.observation_type != 'superseded'
          ORDER BY sim DESC
          LIMIT 10",
     )
@@ -365,29 +393,81 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
-    let similarities: Vec<f64> = evidence.iter().map(|(_, s, _)| *s).collect();
-    let sources: Vec<&str> = evidence.iter().map(|(_, _, t)| t.as_str()).collect();
+    // 2. Semantic evidence via embeddings (Mejora 2: catches paraphrase matches)
+    let semantic_evidence: Vec<(uuid::Uuid, String, f64, String, String)> =
+        match crate::embeddings::onnx::embed(claim).await {
+            Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
+                sqlx::query_as(
+                    "SELECT o.id, o.content,
+                            (1.0 - (o.embedding <=> $1::vector))::float8 AS sim,
+                            o.observation_type, e.name AS entity_name
+                     FROM brain_observations o
+                     JOIN brain_entities e ON o.entity_id = e.id
+                     WHERE o.embedding IS NOT NULL
+                       AND o.observation_type != 'superseded'
+                     ORDER BY o.embedding <=> $1::vector
+                     LIMIT 10",
+                )
+                .bind(pgvector::Vector::from(emb))
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default()
+            }
+            _ => vec![], // V8: graceful degradation if no ONNX model
+        };
 
-    let (confidence, level) = grounding::compute_grounding(&similarities, &sources);
+    // 3. Merge by ID, take max similarity per observation (Robertson 1977 fusion)
+    let mut merged: HashMap<uuid::Uuid, (String, f64, String, String)> = HashMap::new();
+    for (id, content, sim, obs_type, entity_name) in
+        trigram_evidence.iter().chain(semantic_evidence.iter())
+    {
+        merged
+            .entry(*id)
+            .and_modify(|(_, existing_sim, _, _)| *existing_sim = existing_sim.max(*sim))
+            .or_insert((
+                content.clone(),
+                *sim,
+                obs_type.clone(),
+                entity_name.clone(),
+            ));
+    }
 
-    // Log verify prediction to brain_verify_log (Feature: cuba_calibrar integration)
-    let top_entity: Option<String> = if !evidence.is_empty() {
-        sqlx::query_as::<_, (String,)>(
-            "SELECT e.name FROM brain_observations o
+    // Sort by similarity descending
+    let mut evidence_list: Vec<(uuid::Uuid, String, f64, String, String)> = merged
+        .into_iter()
+        .map(|(id, (content, sim, obs_type, entity_name))| {
+            (id, content, sim, obs_type, entity_name)
+        })
+        .collect();
+    evidence_list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    evidence_list.truncate(10);
+
+    let similarities: Vec<f64> = evidence_list.iter().map(|(_, _, s, _, _)| *s).collect();
+    let sources: Vec<&str> = evidence_list.iter().map(|(_, _, _, t, _)| t.as_str()).collect();
+
+    // Mejora 9: top_entity from merged results (no second query)
+    let top_entity: Option<String> = evidence_list.first().map(|(_, _, _, _, e)| e.clone());
+
+    // Count total observations for entity-relative coverage (Mejora 7 integration)
+    let total_obs: Option<usize> = if let Some(ref entity_name) = top_entity {
+        sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM brain_observations o
              JOIN brain_entities e ON o.entity_id = e.id
-             WHERE similarity(o.content, $1) > 0.3
-             ORDER BY similarity(o.content, $1) DESC LIMIT 1",
+             WHERE e.name = $1 AND o.observation_type != 'superseded'",
         )
-        .bind(claim)
+        .bind(entity_name)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten()
-        .map(|(n,)| n)
+        .map(|(c,)| c as usize)
     } else {
         None
     };
 
+    let (confidence, level) = grounding::compute_grounding(&similarities, &sources, total_obs);
+
+    // Log verify prediction to brain_verify_log
     sqlx::query(
         "INSERT INTO brain_verify_log (claim, entity_name, confidence, grounding_level)
          VALUES ($1, $2, $3, $4)",
@@ -413,13 +493,14 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     .ok()
     .flatten();
 
-    let evidence_json: Vec<Value> = evidence
+    let evidence_json: Vec<Value> = evidence_list
         .iter()
-        .map(|(content, sim, obs_type)| {
+        .map(|(_, content, sim, obs_type, entity_name)| {
             serde_json::json!({
                 "content": content,
                 "similarity": sim,
-                "type": obs_type
+                "type": obs_type,
+                "entity": entity_name
             })
         })
         .collect();
@@ -684,21 +765,24 @@ async fn vector_search(
 
 // ── Utility Functions ───────────────────────────────────────────
 
-/// §A V2: 3-range entropy routing (Elastic Search Labs, 2025).
+/// §A V3: Smooth sigmoid entropy routing (Mejora 4 — Jaynes 1957).
 ///
-/// | Entropy | Query Type | text | vector |
-/// |---------|------------|------|--------|
-/// | < 2.0   | Keyword    | 0.7  | 0.3    |
-/// | 2.0-3.5 | Mixed      | 0.5  | 0.5    |
-/// | > 3.5   | Semantic   | 0.3  | 0.7    |
+/// Replaces V2 step function which had 40% relative jumps at thresholds 2.0/3.5.
+/// The logistic sigmoid is the maximum-entropy smooth monotone transition
+/// between two asymptotes (text-heavy → vector-heavy).
+///
+/// | Entropy | text_w | vector_w |
+/// |---------|--------|----------|
+/// | 0.0     | ~0.70  | ~0.30    |
+/// | 2.75    | 0.50   | 0.50     | (midpoint)
+/// | 5.0+    | ~0.30  | ~0.70    |
 fn entropy_weights(entropy: f64) -> (f64, f64) {
-    if entropy < 2.0 {
-        (0.7, 0.3) // Keyword-heavy: prefer text match
-    } else if entropy <= 3.5 {
-        (0.5, 0.5) // Balanced: equal weight
-    } else {
-        (0.3, 0.7) // Semantic-heavy: prefer vector search
-    }
+    let midpoint = 2.75; // Center of original [2.0, 3.5] range
+    let k = 2.0; // Steepness: 10%-90% transition spans ~2.2 units
+    let t = 1.0 / (1.0 + (-k * (entropy - midpoint)).exp()); // sigmoid ∈ [0, 1]
+    let text_w = 0.7 - 0.4 * t; // 0.7 → 0.3
+    let vector_w = 0.3 + 0.4 * t; // 0.3 → 0.7
+    (text_w, vector_w)
 }
 
 // V3 adaptive_rrf_k REMOVED — k=60 constant per Gemini Deep Research audit 2026-03-14.

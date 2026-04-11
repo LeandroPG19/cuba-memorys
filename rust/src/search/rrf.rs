@@ -23,19 +23,23 @@ pub struct RankedResult {
 }
 
 /// §A: Compute Shannon entropy of query for dynamic weight routing.
+///
+/// V0.7 (Mejora 8a): Uses HashMap for O(n) frequency counting instead of
+/// O(n*k) nested filter per unique word.
 pub fn query_entropy(query: &str) -> f64 {
     let words: Vec<&str> = query.split_whitespace().collect();
     let total = words.len();
     if total == 0 {
         return 0.0;
     }
-    let unique: HashSet<&str> = words.iter().copied().collect();
+    let mut freq: HashMap<&str, usize> = HashMap::new();
+    for w in &words {
+        *freq.entry(w).or_default() += 1;
+    }
     let mut entropy = 0.0;
-    for word in &unique {
-        let freq = words.iter().filter(|w| *w == word).count() as f64 / total as f64;
-        if freq > 0.0 {
-            entropy -= freq * freq.log2();
-        }
+    for &count in freq.values() {
+        let p = count as f64 / total as f64;
+        entropy -= p * p.log2();
     }
     entropy
 }
@@ -89,11 +93,20 @@ pub fn fuse(
 }
 
 /// V2: Word-overlap ratio (Jaccard-like with min denominator).
+///
+/// V0.7 (Mejora 8b): Tokenizes by non-alphanumeric characters instead of
+/// whitespace only. Fixes: "configuracion." != "configuracion" which caused
+/// false negatives in multilingual dedup detection.
 fn text_overlap(a: &str, b: &str) -> f64 {
-    let lower_a = a.to_lowercase();
-    let lower_b = b.to_lowercase();
-    let words_a: HashSet<&str> = lower_a.split_whitespace().collect();
-    let words_b: HashSet<&str> = lower_b.split_whitespace().collect();
+    let tokenize = |s: &str| -> HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let words_a = tokenize(a);
+    let words_b = tokenize(b);
     if words_a.is_empty() || words_b.is_empty() {
         return 0.0;
     }
