@@ -116,7 +116,7 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
     // α = 0.3 — PageRank contributes structural signal but does not dominate.
     // Min-max normalization maps raw ranks (which sum to 1.0) to [0, 1] so
     // they are commensurate with the importance scale.
-    let ids: Vec<uuid::Uuid> = node_list.clone();
+    let ids = node_list; // move — node_list not needed after this point
 
     // Min-max normalize ranks to [0, 1]
     let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);

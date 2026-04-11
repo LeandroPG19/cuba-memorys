@@ -393,27 +393,42 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
-    // 2. Semantic evidence via embeddings (Mejora 2: catches paraphrase matches)
+    // 2. Semantic evidence via embeddings (Mejora 2: catches paraphrase matches).
+    //
+    // Guard: only run when a real ONNX model is loaded. Hash-based fallback embeddings
+    // stored in the DB are not semantically meaningful, so skipping avoids false evidence.
+    //
+    // Threshold: cosine distance < 0.8 (sim > 0.2). Without a threshold, top-10 nearest
+    // regardless of distance pulls in unrelated observations that lower avg_sim and degrade
+    // the confidence score. Distance 0.8 corresponds to sim ≈ 0.2 — a weak but real signal.
     let semantic_evidence: Vec<(uuid::Uuid, String, f64, String, String)> =
-        match crate::embeddings::onnx::embed(claim).await {
-            Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
-                sqlx::query_as(
-                    "SELECT o.id, o.content,
-                            (1.0 - (o.embedding <=> $1::vector))::float8 AS sim,
-                            o.observation_type, e.name AS entity_name
-                     FROM brain_observations o
-                     JOIN brain_entities e ON o.entity_id = e.id
-                     WHERE o.embedding IS NOT NULL
-                       AND o.observation_type != 'superseded'
-                     ORDER BY o.embedding <=> $1::vector
-                     LIMIT 10",
-                )
-                .bind(pgvector::Vector::from(emb))
-                .fetch_all(pool)
-                .await
-                .unwrap_or_default()
+        if crate::embeddings::onnx::is_model_loaded() {
+            match crate::embeddings::onnx::embed(claim).await {
+                Ok(emb) => {
+                    sqlx::query_as(
+                        "SELECT o.id, o.content,
+                                (1.0 - (o.embedding <=> $1::vector))::float8 AS sim,
+                                o.observation_type, e.name AS entity_name
+                         FROM brain_observations o
+                         JOIN brain_entities e ON o.entity_id = e.id
+                         WHERE o.embedding IS NOT NULL
+                           AND o.observation_type != 'superseded'
+                           AND (o.embedding <=> $1::vector) < 0.8
+                         ORDER BY o.embedding <=> $1::vector
+                         LIMIT 10",
+                    )
+                    .bind(pgvector::Vector::from(emb))
+                    .fetch_all(pool)
+                    .await
+                    .unwrap_or_default()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "embedding failed during verify — skipping semantic evidence");
+                    vec![]
+                }
             }
-            _ => vec![], // V8: graceful degradation if no ONNX model
+        } else {
+            vec![] // V8: graceful degradation if no ONNX model
         };
 
     // 3. Merge by ID, take max similarity per observation (Robertson 1977 fusion)
@@ -861,4 +876,77 @@ async fn enrich_graphrag(
     }
 
     serde_json::json!(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// entropy_weights must always sum to 1.0 regardless of input.
+    #[test]
+    fn test_entropy_weights_sum_to_one() {
+        for &e in &[0.0f64, 1.0, 2.0, 2.75, 3.5, 5.0, 10.0] {
+            let (tw, vw) = entropy_weights(e);
+            assert!(
+                (tw + vw - 1.0).abs() < 1e-12,
+                "weights must sum to 1.0 at entropy={e}: got {tw}+{vw}={:.15}",
+                tw + vw
+            );
+        }
+    }
+
+    /// text_w must be strictly decreasing and vector_w strictly increasing
+    /// — smooth sigmoid replaces the V2 step function with monotone output.
+    #[test]
+    fn test_entropy_weights_monotone() {
+        let entropies = [0.0f64, 0.5, 1.0, 1.5, 2.0, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0];
+        let weights: Vec<(f64, f64)> = entropies.iter().map(|&e| entropy_weights(e)).collect();
+        for i in 1..weights.len() {
+            let (tw_prev, vw_prev) = weights[i - 1];
+            let (tw_curr, vw_curr) = weights[i];
+            assert!(
+                tw_curr < tw_prev,
+                "text_w must decrease: at e={} got {tw_curr} >= prev {tw_prev}",
+                entropies[i]
+            );
+            assert!(
+                vw_curr > vw_prev,
+                "vector_w must increase: at e={} got {vw_curr} <= prev {vw_prev}",
+                entropies[i]
+            );
+        }
+    }
+
+    /// Verify asymptotes: low entropy → text-heavy, high entropy → vector-heavy.
+    #[test]
+    fn test_entropy_weights_asymptotes() {
+        let (tw_low, vw_low) = entropy_weights(0.0);
+        assert!(tw_low > 0.68, "low entropy should be text-heavy: got text_w={tw_low}");
+        assert!(vw_low < 0.32, "low entropy should minimize vector_w: got {vw_low}");
+
+        let (tw_high, vw_high) = entropy_weights(10.0);
+        assert!(tw_high < 0.32, "high entropy should minimize text_w: got {tw_high}");
+        assert!(vw_high > 0.68, "high entropy should be vector-heavy: got {vw_high}");
+
+        // Midpoint (entropy = 2.75): exact 50/50 split
+        let (tw_mid, vw_mid) = entropy_weights(2.75);
+        assert!((tw_mid - 0.5).abs() < 1e-10, "midpoint should give text_w=0.5: got {tw_mid}");
+        assert!((vw_mid - 0.5).abs() < 1e-10, "midpoint should give vector_w=0.5: got {vw_mid}");
+    }
+
+    /// V2 step function had a 40% jump at entropy=2.0. Verify V3 sigmoid
+    /// transition is smooth: Δweight < 0.05 per 0.1 entropy unit around threshold.
+    #[test]
+    fn test_entropy_weights_no_discontinuity() {
+        // Check around the old V2 thresholds (2.0 and 3.5)
+        for &threshold in &[2.0f64, 3.5] {
+            let (tw_before, _) = entropy_weights(threshold - 0.1);
+            let (tw_after, _) = entropy_weights(threshold + 0.1);
+            let jump = (tw_before - tw_after).abs();
+            assert!(
+                jump < 0.05,
+                "sigmoid should be smooth: jump of {jump:.4} at threshold {threshold} (V2 had ~0.20)"
+            );
+        }
+    }
 }

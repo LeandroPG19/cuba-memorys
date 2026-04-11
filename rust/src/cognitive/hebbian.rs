@@ -55,6 +55,10 @@ pub async fn boost_on_access(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()>
 /// V0.7 (Mejora 6): Weighted by MAX(relation strength) per neighbor.
 /// Previously all neighbors received uniform boost regardless of edge weight.
 /// Collins & Loftus explicitly specify activation proportional to link strength.
+///
+/// Note: GROUP BY repeats the full CASE expression (not the alias `neighbor_id`)
+/// because PostgreSQL processes GROUP BY before SELECT, so SELECT aliases are
+/// not yet visible at GROUP BY evaluation time (SQL standard §7.9).
 pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usize> {
     let result = sqlx::query(
         "UPDATE brain_entities SET
@@ -66,7 +70,7 @@ pub async fn boost_neighbors(pool: &PgPool, entity_id: uuid::Uuid) -> Result<usi
                  MAX(strength) AS max_strength
              FROM brain_relations
              WHERE from_entity = $2 OR to_entity = $2
-             GROUP BY neighbor_id
+             GROUP BY CASE WHEN from_entity = $2 THEN to_entity ELSE from_entity END
          ) sub
          WHERE brain_entities.id = sub.neighbor_id",
     )

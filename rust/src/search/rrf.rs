@@ -26,8 +26,16 @@ pub struct RankedResult {
 ///
 /// V0.7 (Mejora 8a): Uses HashMap for O(n) frequency counting instead of
 /// O(n*k) nested filter per unique word.
+///
+/// V0.7+: Tokenizes by non-alphanumeric characters (consistent with
+/// `information_density` and `text_overlap`) so that "rust!" and "rust"
+/// are the same token. Avoids inflated entropy from punctuation variants
+/// in multilingual queries.
 pub fn query_entropy(query: &str) -> f64 {
-    let words: Vec<&str> = query.split_whitespace().collect();
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     let total = words.len();
     if total == 0 {
         return 0.0;
@@ -131,6 +139,29 @@ mod tests {
         assert!(
             e < 0.01,
             "repetitive query should have near-zero entropy: got {e}"
+        );
+    }
+
+    #[test]
+    fn test_query_entropy_punctuation_invariant() {
+        // "rust!" and "rust" should be the same token after non-alphanumeric split.
+        // Previously split_whitespace() treated them as distinct, inflating entropy.
+        let e_clean = query_entropy("rust is fast");
+        let e_punct = query_entropy("rust! is fast.");
+        assert!(
+            (e_clean - e_punct).abs() < 1e-9,
+            "punctuation should not affect entropy: clean={e_clean}, punct={e_punct}"
+        );
+    }
+
+    #[test]
+    fn test_query_entropy_multilingual_punctuation() {
+        // Spanish query with punctuation — consistent tokenization
+        let e1 = query_entropy("configuracion sistema");
+        let e2 = query_entropy("configuracion. sistema,");
+        assert!(
+            (e1 - e2).abs() < 1e-9,
+            "trailing punctuation should not change entropy: {e1} vs {e2}"
         );
     }
 
