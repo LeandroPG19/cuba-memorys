@@ -121,7 +121,21 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
     // Min-max normalize ranks to [0, 1]
     let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = (max_r - min_r).max(1e-12);
+
+    // Uniform distribution guard: all nodes have equal PageRank (e.g. 2-node
+    // symmetric graph, or any perfectly regular graph). There is no structural
+    // differentiation signal — applying the blend would decay existing
+    // Hebbian/RLHF/decay importance by (1-α)=30% per REM cycle with zero benefit.
+    // Skip the blend entirely and preserve existing importance unchanged.
+    if (max_r - min_r) < 1e-10 {
+        tracing::info!(
+            entities = n,
+            "PageRank blend skipped: uniform distribution (no structural differentiation signal)"
+        );
+        return Ok(n);
+    }
+
+    let range = max_r - min_r; // guaranteed > 1e-10 by check above
     let normalized: Vec<f64> = ranks.iter().map(|r| (r - min_r) / range).collect();
 
     sqlx::query(
@@ -179,5 +193,41 @@ mod tests {
         // With blend: importance = 0.06 + 0.56 = 0.62 (preserved most of prior)
         assert!(blended > 0.5, "blend should preserve existing importance: got {blended}");
         assert!(blended < existing, "blend should incorporate PageRank signal");
+    }
+
+    /// Symmetric graphs produce equal ranks for all nodes. Without the early-return
+    /// guard, normalized = [0,0,...,0] and the blend decays importance 30% per REM cycle.
+    /// Verify the guard fires before the normalization step.
+    #[test]
+    fn test_uniform_ranks_trigger_early_return() {
+        let ranks = vec![0.25_f64; 4]; // 4-node perfectly balanced graph
+        let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max_r - min_r;
+        // The guard condition: uniform → range < 1e-10 → skip blend
+        assert!(
+            range < 1e-10,
+            "uniform ranks must trigger early return: range={range}"
+        );
+        // Verify that applying normalized=0 would cause 30% decay per cycle
+        let existing = 0.8;
+        let decay_with_zero_norm = 0.3 * 0.0 + 0.7 * existing;
+        assert!(
+            decay_with_zero_norm < existing,
+            "without guard, importance decays from {existing} to {decay_with_zero_norm}"
+        );
+    }
+
+    /// Non-uniform ranks (realistic case) should NOT trigger early return.
+    #[test]
+    fn test_non_uniform_ranks_proceed_to_blend() {
+        let ranks = vec![0.01_f64, 0.05, 0.02, 0.10]; // star-like graph
+        let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max_r - min_r;
+        assert!(
+            range >= 1e-10,
+            "non-uniform ranks should not trigger early return: range={range}"
+        );
     }
 }

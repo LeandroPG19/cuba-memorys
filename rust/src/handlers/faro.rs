@@ -167,7 +167,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         vector_search(pool, query, opts.scope, opts.limit * 2, &opts.time_bounds).await;
 
     // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
-    let rrf_k: f64 = 60.0;
+    // Use the canonical constant from rrf.rs to avoid drift if the value ever changes.
+    let rrf_k = crate::search::rrf::RRF_K;
 
     let mut fused_scores: HashMap<String, FusedResult> = HashMap::new();
 
@@ -703,16 +704,20 @@ async fn vector_search(
     limit: i64,
     tb: &TimeBounds,
 ) -> Result<Vec<Value>> {
-    // Compute embedding via ONNX (or hash fallback).
-    let embedding = match crate::embeddings::onnx::embed(query).await {
-        Ok(emb) => emb,
-        Err(_) => return Ok(vec![]), // V8: graceful degradation
-    };
-
-    // Skip if embedding is all zeros (no model loaded)
-    if embedding.iter().all(|&v| v == 0.0) {
+    // Gate on real ONNX model — hash fallback embeddings are not semantically
+    // meaningful and querying DB with them against NULL embeddings returns empty
+    // anyway. Early return avoids the semaphore acquisition and embed call.
+    if !crate::embeddings::onnx::is_model_loaded() {
         return Ok(vec![]); // V8: graceful degradation
     }
+
+    let embedding = match crate::embeddings::onnx::embed(query).await {
+        Ok(emb) => emb,
+        Err(e) => {
+            tracing::warn!(error = %e, "ONNX embed failed in vector_search — degrading");
+            return Ok(vec![]);
+        }
+    };
 
     // Vector search with temporal filtering on observations
     let observations: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(

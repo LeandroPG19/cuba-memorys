@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 /// Adaptive k (V3) was removed per Gemini Deep Research audit 2026-03-14:
 /// dynamic sqrt-based k introduced non-monotonic ranking instabilities and
 /// violated determinism requirements for the MCP server.
-const RRF_K: f64 = 60.0;
+///
+/// Exported so callers (faro.rs inline fusion) use the same value without
+/// duplicating the literal.
+pub const RRF_K: f64 = 60.0;
 
 /// A ranked search result.
 #[derive(Clone, Debug)]
@@ -223,13 +226,25 @@ mod tests {
         }];
 
         let fused = fuse(&[(signal, 1.0)], 0.75);
-        // Score should be exactly 1.0 / (60.0 + 0 + 1.0) = 1/61
-        let expected = 1.0 / 61.0;
+        // Score should be exactly 1.0 / (RRF_K + 0 + 1.0) = 1/61
+        let expected = 1.0 / (RRF_K + 1.0);
         assert!(
             (fused[0].score - expected).abs() < 1e-10,
             "k=60 fixed: expected {} got {}",
             expected,
             fused[0].score
+        );
+    }
+
+    /// RRF_K is pub so faro.rs can reference it without duplicating the literal.
+    #[test]
+    fn test_rrf_k_is_pub_and_canonical() {
+        assert_eq!(RRF_K, 60.0, "canonical k=60 (Cormack 2009)");
+        // faro.rs inline fusion uses the same value — if changed here it propagates
+        let score_rank0 = 1.0 / (RRF_K + 1.0);
+        assert!(
+            (score_rank0 - 1.0 / 61.0).abs() < 1e-15,
+            "rank-0 score must equal 1/61: {score_rank0}"
         );
     }
 }

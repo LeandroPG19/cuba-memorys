@@ -159,28 +159,37 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         .flatten()
         .unwrap_or_else(|| "concept".to_string());
 
-        match crate::embeddings::onnx::embed_passage_contextual(
-            &content_for_embed,
-            &entity_type,
-            &entity_name_for_embed,
-        )
-        .await
-        {
-            Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
-                let model = crate::embeddings::onnx::CURRENT_MODEL;
-                let result = sqlx::query(
-                    "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
-                )
-                .bind(pgvector::Vector::from(emb))
-                .bind(obs_id_for_embed)
-                .bind(model)
-                .execute(&embed_pool)
-                .await;
-                if let Err(e) = result {
-                    tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "failed to store embedding");
+        // Guard: only store embeddings when the real ONNX model is loaded.
+        // Hash-based fallback embeddings are not semantically valid — storing
+        // them marked as 'multilingual-e5-small' would silently corrupt vector
+        // search: future queries with the real model would compare ONNX vectors
+        // against hash vectors, returning garbage similarity scores.
+        if crate::embeddings::onnx::is_model_loaded() {
+            match crate::embeddings::onnx::embed_passage_contextual(
+                &content_for_embed,
+                &entity_type,
+                &entity_name_for_embed,
+            )
+            .await
+            {
+                Ok(emb) => {
+                    let model = crate::embeddings::onnx::CURRENT_MODEL;
+                    let result = sqlx::query(
+                        "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
+                    )
+                    .bind(pgvector::Vector::from(emb))
+                    .bind(obs_id_for_embed)
+                    .bind(model)
+                    .execute(&embed_pool)
+                    .await;
+                    if let Err(e) = result {
+                        tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "failed to store embedding");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "ONNX embed failed — skipping");
                 }
             }
-            _ => {} // no ONNX model loaded — skip silently
         }
     });
 
@@ -467,13 +476,15 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         let embed_pool = pool.clone();
         tokio::spawn(async move {
             for (obs_id, content, entity_name, entity_type) in inserted_for_embed {
-                if let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
-                    &content,
-                    &entity_type,
-                    &entity_name,
-                )
-                .await
-                    && !emb.iter().all(|&v| v == 0.0)
+                // Same guard as single-add: skip if no real ONNX model to avoid
+                // storing hash embeddings that corrupt vector search.
+                if crate::embeddings::onnx::is_model_loaded()
+                    && let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
+                        &content,
+                        &entity_type,
+                        &entity_name,
+                    )
+                    .await
                 {
                     let _ = sqlx::query(
                         "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
@@ -620,8 +631,11 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
     if dupes.is_empty() {
         // V0.6: Even if no trigram match, check semantic dedup via embedding
         // This catches paraphrases that differ lexically but mean the same thing
-        if let Ok(emb) = crate::embeddings::onnx::embed_passage(content).await
-            && !emb.iter().all(|&v| v == 0.0)
+        // Semantic dedup only makes sense with real ONNX embeddings. Hash fallback
+        // vectors are not semantically comparable — querying them against stored
+        // embeddings would give garbage similarity and produce false Reinforce results.
+        if crate::embeddings::onnx::is_model_loaded()
+            && let Ok(emb) = crate::embeddings::onnx::embed_passage(content).await
         {
             let semantic_match: Option<(uuid::Uuid, f64)> = sqlx::query_as(
                 "SELECT id, (1.0 - (embedding <=> $1::vector))::float8 AS sim
@@ -800,13 +814,15 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
         .flatten()
         .unwrap_or_else(|| "concept".to_string());
 
-        if let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
-            &content_owned,
-            &entity_type,
-            &entity_name_owned,
-        )
-        .await
-            && !emb.iter().all(|&v| v == 0.0)
+        // Same guard as observation storage: skip hash embeddings to avoid
+        // corrupting the episode vector index.
+        if crate::embeddings::onnx::is_model_loaded()
+            && let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
+                &content_owned,
+                &entity_type,
+                &entity_name_owned,
+            )
+            .await
         {
             let model = crate::embeddings::onnx::CURRENT_MODEL;
             let _ = sqlx::query(
