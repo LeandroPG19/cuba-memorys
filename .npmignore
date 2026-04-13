@@ -12,6 +12,8 @@ src/
 tests/
 
 # Build artifacts
+dist/
+target/
 mcp-publisher
 *.cast
 *.gif
