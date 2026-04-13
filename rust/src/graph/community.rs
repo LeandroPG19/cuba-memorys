@@ -194,8 +194,6 @@ fn leiden_phase(
 /// If a community has disconnected components, split them into
 /// separate communities. This is the key Leiden guarantee over Louvain.
 fn refine_communities(neighbors: &[Vec<(usize, f64)>], labels: &mut [usize]) {
-    let _n = labels.len();
-
     // Group nodes by community
     let mut community_members: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &label) in labels.iter().enumerate() {

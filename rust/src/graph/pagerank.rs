@@ -74,18 +74,23 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
         // Teleportation base
         new_ranks.fill((1.0 - DAMPING) / n as f64);
 
-        // Distribute rank through edges
+        // Accumulate dangling rank in one pass, then distribute uniformly.
+        // Previous approach was O(dangling_count × n) — now O(n) total.
+        let mut dangling_sum = 0.0;
         for i in 0..n {
             if out_weight_sum[i] > 0.0 {
                 for &(j, weight) in &outgoing[i] {
                     new_ranks[j] += DAMPING * ranks[i] * weight / out_weight_sum[i];
                 }
             } else {
-                // Dangling node: distribute equally
-                let share = DAMPING * ranks[i] / n as f64;
-                for r in new_ranks.iter_mut() {
-                    *r += share;
-                }
+                dangling_sum += DAMPING * ranks[i];
+            }
+        }
+        // Distribute accumulated dangling rank equally to all nodes
+        if dangling_sum > 0.0 {
+            let share = dangling_sum / n as f64;
+            for r in new_ranks.iter_mut() {
+                *r += share;
             }
         }
 

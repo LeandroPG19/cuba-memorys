@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 /// Verify all 19 tools are defined in constants.
 #[test]
 fn test_all_tools_defined() {
-    let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
+    let tools = cuba_memorys::constants::tool_definitions();
     assert_eq!(
         tools.len(),
         19,
@@ -51,9 +51,9 @@ fn test_all_tools_defined() {
 /// Verify tool definitions have correct MCP schema structure.
 #[test]
 fn test_tool_schema_structure() {
-    let tools: Vec<Value> = cuba_memorys::constants::tool_definitions();
+    let tools = cuba_memorys::constants::tool_definitions();
 
-    for tool in &tools {
+    for tool in tools.iter() {
         let name = tool
             .get("name")
             .and_then(|n: &Value| n.as_str())

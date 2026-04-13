@@ -62,21 +62,20 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Find the active session id before closing
+            // Atomic UPDATE RETURNING — eliminates TOCTOU race between SELECT and UPDATE.
+            // A concurrent `end` call on the same session cannot both succeed.
             let active_session: Option<(uuid::Uuid,)> = sqlx::query_as(
-                "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-            )
-            .fetch_optional(pool)
-            .await?;
+                "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2
+                 WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
+                 RETURNING id"
+            ).bind(outcome).bind(summary).fetch_optional(pool).await?;
 
-            let result = sqlx::query(
-                "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2 WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1)"
-            ).bind(outcome).bind(summary).execute(pool).await?;
+            let updated = active_session.is_some();
 
             let mut response = serde_json::json!({
                 "action": "ended",
                 "outcome": outcome,
-                "updated": result.rows_affected() > 0
+                "updated": updated
             });
 
             // V0.6: Session diff — summarize what was created during this session

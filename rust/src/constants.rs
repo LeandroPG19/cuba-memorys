@@ -3,6 +3,7 @@
 //! Mirrors Python constants.py — tool definitions for MCP tools/list.
 
 use serde_json::Value;
+use std::sync::OnceLock;
 
 // ── Thresholds ───────────────────────────────────────────────────
 
@@ -83,9 +84,12 @@ pub fn importance_prior(obs_type: &str, density: f64) -> f64 {
 
 // ── Tool Definitions ─────────────────────────────────────────────
 
+/// MCP tool definitions — built once, reused on every tools/list call.
+static TOOL_DEFS: OnceLock<Vec<Value>> = OnceLock::new();
+
 /// Generate MCP tool definitions for tools/list response.
-pub fn tool_definitions() -> Vec<Value> {
-    vec![
+pub fn tool_definitions() -> &'static Vec<Value> {
+    TOOL_DEFS.get_or_init(|| vec![
         tool_def(
             "cuba_alma",
             "CRUD knowledge graph entities (concepts, projects, technologies, patterns, people). Auto-boosts neighbors on access. For transient info use cuba_cronica instead.",
@@ -109,12 +113,14 @@ pub fn tool_definitions() -> Vec<Value> {
                     "action": {"type": "string", "enum": ["add", "delete", "list", "batch_add", "episode_add", "episode_list", "timeline"], "description": "Operation to perform. episode_add stores a temporal event; episode_list retrieves events. timeline shows chronological observations+episodes."},
                     "entity_name": {"type": "string", "description": "Entity to attach observation/episode to"},
                     "content": {"type": "string", "description": "Observation or episode text"},
-                    "observation_type": {"type": "string", "enum": ["fact", "decision", "lesson", "preference", "context", "tool_usage"], "description": "Type of observation (for add action)"},
-                    "source": {"type": "string", "enum": ["agent", "user", "error_detection"], "description": "Who/what created this observation"},
+                    "observation_type": {"type": "string", "enum": ["fact", "decision", "lesson", "preference", "context", "tool_usage", "error", "solution"], "description": "Type of observation"},
+                    "source": {"type": "string", "enum": ["agent", "user", "error_detection", "consolidation", "inference"], "description": "Who/what created this observation"},
+                    "observation_id": {"type": "string", "description": "Observation UUID (for delete action)"},
+                    "observations": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?, source?} objects (for batch_add, max 100)"},
                     "actors": {"type": "array", "items": {"type": "string"}, "description": "People/agents involved in episode (for episode_add)"},
                     "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Files/resources affected in episode (for episode_add)"}
                 },
-                "required": ["action", "entity_name"]
+                "required": ["action"]
             }),
         ),
         tool_def(
@@ -130,7 +136,8 @@ pub fn tool_definitions() -> Vec<Value> {
                     "before": {"type": "string", "description": "ISO8601 datetime — return results created before this time"},
                     "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"},
                     "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format: verbose (default, full data) or compact (abbreviated keys, ~35% fewer tokens)"},
-                    "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"}
+                    "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"},
+                    "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Results are truncated to fit."}
                 },
                 "required": ["query"]
             }),
@@ -363,7 +370,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["action"]
             }),
         ),
-    ]
+    ])
 }
 
 /// Helper to build a tool definition.
