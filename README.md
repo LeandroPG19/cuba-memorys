@@ -16,7 +16,7 @@
 19 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v0.6.0** — Contextual Retrieval, importance priors, score breakdown, session provenance, compact format, semantic dedup, auto-tagging, Adamic-Adar link prediction, contradiction detection, prospective memory triggers, Bayesian calibration, bulk ingest, episodic memory with power-law decay, temporal search filters, and gap detection. 56 tests, 0 clippy warnings.
+> **v0.7.0** — 10 algorithmic improvements + 19 bug fixes + comprehensive audit. PageRank blend (preserves Hebbian/BCM learned importance), hybrid verify (trigram + embedding fusion), ONNX concurrency semaphore (Little's Law), sigmoid entropy routing (replaces step function), word-level session boost, weighted Hebbian neighbor diffusion, exponential coverage saturation, O(n) entropy counting. Fixed: hash embeddings corrupting DB, centrality normalization, cache LRU, jornada race condition, 6 MCP schemas. Removed blake3 dependency. 68 tests, 0 clippy warnings, 0 tech debt.
 
 ## Demo
 
@@ -202,7 +202,7 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_faro` | **Faro** — lighthouse | RRF fusion (k=60) with entropy routing, pgvector, temporal filters (`before`/`after`), tag filters, **score breakdown** (text/vector/importance/session), **compact format** (~35% fewer tokens), Bayesian **calibrated accuracy**. |
+| `cuba_faro` | **Faro** — lighthouse | RRF fusion (k=60) with **sigmoid entropy routing**, pgvector, temporal filters (`before`/`after`), tag filters, **score breakdown** (text/vector/importance/session), **compact format** (~35% fewer tokens), **hybrid verify** (trigram + embedding fusion), Bayesian **calibrated accuracy**, token-budget truncation, `max_tokens` control. |
 
 ### Error Memory
 
@@ -248,7 +248,7 @@ cuba-memorys/
 ├── server.json                  # MCP Registry manifest
 ├── pyproject.toml               # Maturin (bindings = "bin") — PyPI wheel
 ├── package.json                 # npm wrapper
-└── rust/                        # v0.6.0
+└── rust/                        # v0.7.0
     ├── src/
     │   ├── main.rs              # mimalloc + graceful shutdown (SIGTERM/SIGINT)
     │   ├── lib.rs               # Shared types and utilities
@@ -269,12 +269,12 @@ cuba-memorys/
     │                            # spawn_blocking, hash fallback)
     ├── scripts/
     │   └── download_model.sh    # Download multilingual-e5-small ONNX (~113MB)
-    └── tests/                   # 56 unit + smoke tests
+    └── tests/                   # 55 unit + 13 smoke tests
 ```
 
 ### Performance: Rust vs Python
 
-| Metric | Python v1.6.0 | Rust v0.6.0 |
+| Metric | Python v1.6.0 | Rust v0.7.0 |
 | ------ | :-----------: | :---------: |
 | Binary size | ~50MB (venv) | **7.6MB** |
 | Entity create | ~2ms | **498us** |
@@ -290,7 +290,7 @@ cuba-memorys/
 |-------|---------|-------------|
 | `brain_entities` | KG nodes | tsvector + pg_trgm + GIN indexes, importance, bcm_theta |
 | `brain_observations` | Facts with provenance | 9 types, versioning, `vector(384)`, importance priors, auto-tags TEXT[], session_id FK, embedding_model tracking |
-| `brain_relations` | Typed edges | 5 types, bidirectional, Hebbian strength, blake3 dedup |
+| `brain_relations` | Typed edges | 5 types, bidirectional, Hebbian strength, ON CONFLICT dedup |
 | `brain_errors` | Error memory | JSONB context, synapse weight, pattern detection |
 | `brain_sessions` | Working sessions | Goals (JSONB), outcome tracking, session diff |
 | `brain_episodes` | Episodic memory | Tulving 1972, actors/artifacts TEXT[], power-law decay (Wixted 2004) |
@@ -336,15 +336,27 @@ V3: theta_M persisted in `bcm_theta` column for true temporal smoothing.
 ```
 RRF(d) = sum( w_i / (k + rank_i(d)) )   where k = 60
 ```
-Entropy-routed weighting: keyword-dominant vs mixed vs semantic queries get different signal weights.
+Entropy-routed weighting via smooth sigmoid (Jaynes 1957 MaxEnt):
+```
+t = sigmoid(2.0 * (entropy - 2.75))
+text_w  = 0.7 - 0.4*t    (keyword-heavy → balanced → semantic-heavy)
+vector_w = 0.3 + 0.4*t   (always sums to 1.0)
+```
+Replaces V2 step function which had 40% relative jumps at thresholds.
+
+### PageRank Blend — Brin & Page (1998)
+```
+importance_new = 0.3 * rank_normalized + 0.7 * importance_existing
+```
+Min-max normalized ranks blended via convex combination (α=0.3). Preserves Hebbian/BCM/RLHF accumulated importance instead of overwriting. Uniform distribution guard: skips blend when all ranks are equal (no structural signal).
 
 ### Other Algorithms
 
 | Algorithm | Reference | Used in |
 |-----------|-----------|---------|
 | **Leiden communities** | Traag et al. (Nature 2019) | `community.rs` -> `vigia.rs` |
-| **Personalized PageRank** | Brin & Page (1998) | `pagerank.rs` -> `zafra.rs` |
-| **Brandes centrality** | Brandes (2001) | `centrality.rs` -> `vigia.rs` |
+| **PageRank + blend** | Brin & Page (1998) | `pagerank.rs` -> convex combination (α=0.3) |
+| **Brandes centrality** | Brandes (2001) | `centrality.rs` -> undirected normalization |
 | **Adaptive PE gating** | Friston (Nature 2023) | `prediction_error.rs` -> `cronica.rs` |
 | **Shannon entropy** | Shannon (1948) | `density.rs` -> information gating |
 | **Chi-squared drift** | Pearson (1900) | Error distribution change detection |
@@ -439,7 +451,7 @@ Active access resets the clock — frequently used memories stay strong.
 | Division by zero | Protected with `.max(1e-9)` |
 | Error handling | All `?` propagated with `anyhow::Context` |
 | Clippy | 0 warnings |
-| Tests | 56 passing (43 unit + 13 smoke) + 49 E2E |
+| Tests | 68 passing (55 unit + 13 smoke) + 49 E2E |
 | Licenses | All MIT/Apache-2.0 (0 GPL/AGPL) |
 
 ---
@@ -454,7 +466,6 @@ Active access resets the clock — frequently used memories stay strong.
 | `pgvector` | Vector similarity | MIT |
 | `ort` | ONNX Runtime (optional) | MIT/Apache-2.0 |
 | `tokenizers` | HuggingFace tokenizers | Apache-2.0 |
-| `blake3` | Cryptographic hashing | Apache-2.0/CC0 |
 | `mimalloc` | Global allocator | MIT |
 | `tracing` | Structured JSON logging | MIT |
 | `lru` | O(1) LRU cache | MIT |
@@ -466,6 +477,7 @@ Active access resets the clock — frequently used memories stay strong.
 
 | Version | Key Changes |
 |---------|-------------|
+| **0.7.0** | 10 algorithmic improvements: PageRank blend (α=0.3, preserves Hebbian/BCM), hybrid verify (trigram+embedding fusion), ONNX semaphore (Little's Law), sigmoid entropy routing (Jaynes MaxEnt), word-level session boost, weighted Hebbian neighbors (Collins & Loftus), exponential coverage saturation, O(n) entropy. 19 bug fixes: hash embeddings corrupting DB (×5), centrality /2, cache LRU, jornada TOCTOU, alarma self-match, 6 schema mismatches. Removed blake3 dependency. MCP Registry publish fixed. npm postinstall version sync. 68 tests, 0 clippy, 0 tech debt. |
 | **0.6.0** | Contextual Retrieval (+20% recall), importance priors, score breakdown, compact format (~35% fewer tokens), session provenance/diff, semantic dedup, auto-tagging (TF-IDF), Adamic-Adar link prediction, bulk ingest (cuba_ingesta), enhanced health metrics, partial indexes, embedding model versioning. Auto Docker PostgreSQL setup. 19 tools, 56 tests. |
 | **0.5.0** | Temporal reasoning (before/after/timeline), contradiction detection (cosine + negation heuristics), prospective memory triggers (centinela), Bayesian calibration (calibrar), abductive inference (hipotesis), gap detection (reflexion). 18 tools. |
 | **0.4.0** | Multilingual embeddings (e5-small, 94 languages), episodic memory (Tulving 1972, power-law Wixted 2004), stratified decay (30d/14d/7d by type), E2E tests in CI with PostgreSQL. 15 tools. |
@@ -490,4 +502,4 @@ Active access resets the clock — frequently used memories stay strong.
 
 ## Credits
 
-Mathematical foundations: Oja (1982), Bienenstock, Cooper & Munro (1982, BCM), Cormack (2009, RRF), Brin & Page (1998, PageRank), Traag et al. (2019, Leiden), Brandes (2001), Shannon (1948), Pearson (1900, chi-squared), Friston (2023, PE gating), Tulving (1972, episodic memory), Wixted (2004, power-law forgetting), Adamic & Adar (2003, link prediction), Anthropic (2024, Contextual Retrieval), Wang et al. (2022, E5 embeddings), Malkov & Yashunin (2018, HNSW), O'Connor et al. (2020, blake3).
+Mathematical foundations: Oja (1982), Bienenstock, Cooper & Munro (1982, BCM), Cormack (2009, RRF), Brin & Page (1998, PageRank), Traag et al. (2019, Leiden), Brandes (2001), Shannon (1948), Pearson (1900, chi-squared), Friston (2023, PE gating), Tulving (1972, episodic memory), Wixted (2004, power-law forgetting), Adamic & Adar (2003, link prediction), Anthropic (2024, Contextual Retrieval), Wang et al. (2022, E5 embeddings), Malkov & Yashunin (2018, HNSW), Jaynes (1957, MaxEnt sigmoid routing), Robertson (1977, score fusion), Collins & Loftus (1975, spreading activation).
