@@ -8,7 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
 
-const VERSION = "0.3.0";
+const VERSION = require("../package.json").version;
 const REPO = "LeandroPG19/cuba-memorys";
 const BIN_DIR = path.join(__dirname, ".bin");
 
