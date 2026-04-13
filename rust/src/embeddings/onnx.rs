@@ -31,6 +31,15 @@ pub const CURRENT_MODEL: &str = "multilingual-e5-small";
 /// Global embedding cache (LRU with TTL — FIX B6, V7).
 static CACHE: OnceLock<std::sync::Mutex<TtlLruCache<Vec<f32>>>> = OnceLock::new();
 
+/// V0.7: Semaphore limiting concurrent ONNX inference (Little's Law — Mejora 3).
+/// Permits = 2 matching `with_intra_threads(2)` in session config.
+/// Prevents spawn_blocking threadpool exhaustion under concurrent load.
+static ONNX_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn get_semaphore() -> &'static tokio::sync::Semaphore {
+    ONNX_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(2))
+}
+
 /// Whether ONNX model is loaded (checked once at startup).
 static MODEL_STATUS: OnceLock<ModelStatus> = OnceLock::new();
 
@@ -191,6 +200,14 @@ async fn embed_with_prefix(text: &str, prefix: &str) -> Result<Vec<f32>> {
     {
         return Ok(cached);
     }
+
+    // V0.7 (Mejora 3): Acquire semaphore BEFORE spawn_blocking to limit
+    // concurrent ONNX calls (Little's Law). Converts blocking contention
+    // into async waiting — zero OS thread cost while queued.
+    let _permit = get_semaphore()
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("ONNX semaphore closed"))?;
 
     // FIX B2: spawn_blocking for CPU-bound work
     let prefixed = format!("{}{}", prefix, text);

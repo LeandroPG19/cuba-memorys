@@ -40,23 +40,26 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to insert error")?;
 
-    // Pattern detection: check for similar errors (≥3 = warning)
+    // Pattern detection: check for similar errors (≥3 = warning).
+    // Exclude the just-inserted error (id != $3) to avoid self-match.
     let similar_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_errors WHERE similarity(error_message, $1) > 0.5 AND project = $2"
+        "SELECT COUNT(*) FROM brain_errors WHERE similarity(error_message, $1) > 0.5 AND project = $2 AND id != $3"
     )
     .bind(error_message)
     .bind(project)
+    .bind(row.0)
     .fetch_one(pool)
     .await?;
 
-    // Hebbian: boost synapse_weight on similar errors
+    // Hebbian: boost synapse_weight on similar errors (excluding self)
     if similar_count.0 >= 3 {
         sqlx::query(
             "UPDATE brain_errors SET synapse_weight = LEAST(synapse_weight + 0.1, 5.0)
-             WHERE similarity(error_message, $1) > 0.5 AND project = $2",
+             WHERE similarity(error_message, $1) > 0.5 AND project = $2 AND id != $3",
         )
         .bind(error_message)
         .bind(project)
+        .bind(row.0)
         .execute(pool)
         .await?;
     }

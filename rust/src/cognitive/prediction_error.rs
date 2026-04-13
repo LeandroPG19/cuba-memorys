@@ -95,20 +95,6 @@ pub fn adaptive_thresholds_zscore(recent_similarities: &[f64]) -> (f64, f64) {
     (reinforce, update)
 }
 
-/// Legacy V5.1 adaptive thresholds (kept for backward compatibility).
-pub fn adaptive_thresholds(recent_similarities: &[f64]) -> (f64, f64) {
-    adaptive_thresholds_zscore(recent_similarities)
-}
-
-/// Check if a new observation is novel enough to store.
-pub fn assess_novelty(similarity_scores: &[f64]) -> (bool, f64, GatingAction) {
-    let max_sim = similarity_scores.iter().cloned().fold(0.0f64, f64::max);
-    let action = gate(max_sim);
-
-    let should_store = !matches!(action, GatingAction::Reinforce);
-    (should_store, max_sim, action)
-}
-
 /// V5.2: Adaptive novelty assessment using z-score distribution.
 pub fn assess_novelty_adaptive(
     similarity_scores: &[f64],
@@ -142,23 +128,6 @@ mod tests {
         assert_eq!(gate(0.74), GatingAction::Create);
         assert_eq!(gate(0.5), GatingAction::Create);
         assert_eq!(gate(0.0), GatingAction::Create);
-    }
-
-    #[test]
-    fn test_novelty_assessment() {
-        let (store, max_sim, action) = assess_novelty(&[0.95, 0.80, 0.60]);
-        assert!(!store);
-        assert!((max_sim - 0.95).abs() < 0.001);
-        assert_eq!(action, GatingAction::Reinforce);
-
-        let (store, max_sim, action) = assess_novelty(&[0.3, 0.2, 0.1]);
-        assert!(store);
-        assert!((max_sim - 0.3).abs() < 0.001);
-        assert_eq!(action, GatingAction::Create);
-
-        let (store, _, action) = assess_novelty(&[]);
-        assert!(store);
-        assert_eq!(action, GatingAction::Create);
     }
 
     // ── V5.2: Z-score Tests ─────────────────────────────────────

@@ -3,8 +3,6 @@
 //! FIX B5: H_max uses log2(n_unique) (vocabulary size), not log2(n_words).
 //! This gives correct normalized entropy.
 
-use std::collections::HashSet;
-
 /// Compute normalized Shannon information density of text.
 ///
 /// Returns value in [0, 1]:
@@ -12,15 +10,25 @@ use std::collections::HashSet;
 /// - 1.0 = maximum diversity (all words unique)
 ///
 /// FIX B5: Denominator uses unique word count, not total word count.
+/// V0.7 (Mejora 10): Tokenizes by non-alphanumeric characters to prevent
+/// punctuation from inflating vocabulary ("hello," != "hello" bug).
+/// Also uses HashMap for O(n) frequency counting.
 pub fn information_density(text: &str) -> f64 {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     let total = words.len();
     if total <= 1 {
         return 0.0;
     }
 
-    let unique: HashSet<&str> = words.iter().copied().collect();
-    let vocab_size = unique.len();
+    // O(n) frequency counting via HashMap
+    let mut freq_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in &words {
+        *freq_map.entry(w).or_default() += 1;
+    }
+    let vocab_size = freq_map.len();
 
     if vocab_size <= 1 {
         return 0.0; // All same word
@@ -28,10 +36,10 @@ pub fn information_density(text: &str) -> f64 {
 
     // Shannon entropy H = -Σ p(w) * log2(p(w))
     let mut entropy = 0.0;
-    for word in &unique {
-        let freq = words.iter().filter(|w| *w == word).count() as f64 / total as f64;
-        if freq > 0.0 {
-            entropy -= freq * freq.log2();
+    for &count in freq_map.values() {
+        let p = count as f64 / total as f64;
+        if p > 0.0 {
+            entropy -= p * p.log2();
         }
     }
 

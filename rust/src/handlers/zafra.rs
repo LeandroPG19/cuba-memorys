@@ -228,6 +228,17 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "reembed" => {
             // Re-encode all observations using the current ONNX model (embed_passage prefix).
             // Run this after switching embedding models to ensure consistency.
+
+            // Require a real ONNX model — reembed with hash fallback embeddings
+            // would replace valid ONNX vectors with semantically meaningless hashes.
+            if !crate::embeddings::onnx::is_model_loaded() {
+                return Ok(serde_json::json!({
+                    "action": "reembed",
+                    "updated": 0,
+                    "error": "ONNX model not loaded — set ONNX_MODEL_PATH to enable reembed"
+                }));
+            }
+
             let batch_size = args
                 .get("batch_size")
                 .and_then(|v| v.as_i64())
@@ -251,13 +262,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
             for (obs_id, content) in obs {
                 match crate::embeddings::onnx::embed_passage(&content).await {
-                    Ok(emb) if !emb.iter().all(|&v| v == 0.0) => {
+                    Ok(emb) => {
                         if sqlx::query(
-                            "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
+                            "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                         )
                         .bind(pgvector::Vector::from(emb))
-                        .bind(obs_id)
                         .bind(current_model)
+                        .bind(obs_id)
                         .execute(pool)
                         .await
                         .is_ok()
@@ -265,7 +276,9 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                             updated += 1;
                         }
                     }
-                    _ => {} // no ONNX model or hash fallback — skip
+                    Err(e) => {
+                        tracing::warn!(obs_id = %obs_id, error = %e, "reembed: ONNX failed for observation");
+                    }
                 }
             }
 

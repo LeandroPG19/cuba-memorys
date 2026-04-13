@@ -43,12 +43,22 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
     // Brandes algorithm for betweenness centrality
     let mut betweenness: Vec<f64> = vec![0.0; n];
 
+    // Pre-allocate per-source vectors ONCE (reused across all sources)
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+    let mut pred: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+    let mut sigma: Vec<f64> = vec![0.0; n];
+    let mut dist: Vec<i64> = vec![-1; n];
+    let mut delta: Vec<f64> = vec![0.0; n];
+
     for s in 0..n {
-        let mut stack: Vec<usize> = Vec::new();
-        let mut pred: Vec<Vec<usize>> = vec![vec![]; n];
-        let mut sigma: Vec<f64> = vec![0.0; n];
-        let mut dist: Vec<i64> = vec![-1; n];
-        let mut delta: Vec<f64> = vec![0.0; n];
+        // Reset for this source (O(n) fill instead of O(n) alloc)
+        stack.clear();
+        for p in pred.iter_mut() {
+            p.clear();
+        }
+        sigma.fill(0.0);
+        dist.fill(-1);
+        delta.fill(0.0);
 
         sigma[s] = 1.0;
         dist[s] = 0;
@@ -81,13 +91,13 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
             }
         }
 
-        // Reset delta for next source
-        delta.fill(0.0);
     }
 
-    // Normalize (undirected: divide by 2)
+    // Normalize (undirected Brandes: divide by (n-1)(n-2)/2)
+    // Each shortest path s→t is counted once from s and once from t,
+    // so raw betweenness is doubled for undirected graphs.
     let norm = if n > 2 {
-        ((n - 1) * (n - 2)) as f64
+        ((n - 1) * (n - 2)) as f64 / 2.0
     } else {
         1.0
     };

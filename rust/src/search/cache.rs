@@ -43,16 +43,21 @@ impl<V: Clone> TtlLruCache<V> {
         }
     }
 
-    /// Get value from cache (LRU: promotes on access).
+    /// Get value from cache if present and not expired.
+    ///
+    /// Uses `peek()` first to check TTL without promoting to MRU.
+    /// Only promotes (via `get()`) if the entry is still live — prevents
+    /// expired entries from evicting valid ones during the LRU check.
     pub fn get(&mut self, key: &str) -> Option<V> {
-        if let Some(entry) = self.inner.get(key) {
-            if entry.inserted_at.elapsed() < self.ttl {
-                return Some(entry.value.clone());
-            }
-            // TTL expired — remove
+        let dominated = self
+            .inner
+            .peek(key)
+            .is_some_and(|entry| entry.inserted_at.elapsed() >= self.ttl);
+        if dominated {
             self.inner.pop(key);
+            return None;
         }
-        None
+        self.inner.get(key).map(|entry| entry.value.clone())
     }
 
     /// Insert value into cache.

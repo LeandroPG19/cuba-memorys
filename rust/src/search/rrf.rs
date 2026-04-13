@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 /// Adaptive k (V3) was removed per Gemini Deep Research audit 2026-03-14:
 /// dynamic sqrt-based k introduced non-monotonic ranking instabilities and
 /// violated determinism requirements for the MCP server.
-const RRF_K: f64 = 60.0;
+///
+/// Exported so callers (faro.rs inline fusion) use the same value without
+/// duplicating the literal.
+pub const RRF_K: f64 = 60.0;
 
 /// A ranked search result.
 #[derive(Clone, Debug)]
@@ -23,19 +26,31 @@ pub struct RankedResult {
 }
 
 /// §A: Compute Shannon entropy of query for dynamic weight routing.
+///
+/// V0.7 (Mejora 8a): Uses HashMap for O(n) frequency counting instead of
+/// O(n*k) nested filter per unique word.
+///
+/// V0.7+: Tokenizes by non-alphanumeric characters (consistent with
+/// `information_density` and `text_overlap`) so that "rust!" and "rust"
+/// are the same token. Avoids inflated entropy from punctuation variants
+/// in multilingual queries.
 pub fn query_entropy(query: &str) -> f64 {
-    let words: Vec<&str> = query.split_whitespace().collect();
+    let words: Vec<&str> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     let total = words.len();
     if total == 0 {
         return 0.0;
     }
-    let unique: HashSet<&str> = words.iter().copied().collect();
+    let mut freq: HashMap<&str, usize> = HashMap::new();
+    for w in &words {
+        *freq.entry(w).or_default() += 1;
+    }
     let mut entropy = 0.0;
-    for word in &unique {
-        let freq = words.iter().filter(|w| *w == word).count() as f64 / total as f64;
-        if freq > 0.0 {
-            entropy -= freq * freq.log2();
-        }
+    for &count in freq.values() {
+        let p = count as f64 / total as f64;
+        entropy -= p * p.log2();
     }
     entropy
 }
@@ -89,11 +104,20 @@ pub fn fuse(
 }
 
 /// V2: Word-overlap ratio (Jaccard-like with min denominator).
+///
+/// V0.7 (Mejora 8b): Tokenizes by non-alphanumeric characters instead of
+/// whitespace only. Fixes: "configuracion." != "configuracion" which caused
+/// false negatives in multilingual dedup detection.
 fn text_overlap(a: &str, b: &str) -> f64 {
-    let lower_a = a.to_lowercase();
-    let lower_b = b.to_lowercase();
-    let words_a: HashSet<&str> = lower_a.split_whitespace().collect();
-    let words_b: HashSet<&str> = lower_b.split_whitespace().collect();
+    let tokenize = |s: &str| -> HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let words_a = tokenize(a);
+    let words_b = tokenize(b);
     if words_a.is_empty() || words_b.is_empty() {
         return 0.0;
     }
@@ -118,6 +142,29 @@ mod tests {
         assert!(
             e < 0.01,
             "repetitive query should have near-zero entropy: got {e}"
+        );
+    }
+
+    #[test]
+    fn test_query_entropy_punctuation_invariant() {
+        // "rust!" and "rust" should be the same token after non-alphanumeric split.
+        // Previously split_whitespace() treated them as distinct, inflating entropy.
+        let e_clean = query_entropy("rust is fast");
+        let e_punct = query_entropy("rust! is fast.");
+        assert!(
+            (e_clean - e_punct).abs() < 1e-9,
+            "punctuation should not affect entropy: clean={e_clean}, punct={e_punct}"
+        );
+    }
+
+    #[test]
+    fn test_query_entropy_multilingual_punctuation() {
+        // Spanish query with punctuation — consistent tokenization
+        let e1 = query_entropy("configuracion sistema");
+        let e2 = query_entropy("configuracion. sistema,");
+        assert!(
+            (e1 - e2).abs() < 1e-9,
+            "trailing punctuation should not change entropy: {e1} vs {e2}"
         );
     }
 
@@ -179,13 +226,25 @@ mod tests {
         }];
 
         let fused = fuse(&[(signal, 1.0)], 0.75);
-        // Score should be exactly 1.0 / (60.0 + 0 + 1.0) = 1/61
-        let expected = 1.0 / 61.0;
+        // Score should be exactly 1.0 / (RRF_K + 0 + 1.0) = 1/61
+        let expected = 1.0 / (RRF_K + 1.0);
         assert!(
             (fused[0].score - expected).abs() < 1e-10,
             "k=60 fixed: expected {} got {}",
             expected,
             fused[0].score
+        );
+    }
+
+    /// RRF_K is pub so faro.rs can reference it without duplicating the literal.
+    #[test]
+    fn test_rrf_k_is_pub_and_canonical() {
+        assert_eq!(RRF_K, 60.0, "canonical k=60 (Cormack 2009)");
+        // faro.rs inline fusion uses the same value — if changed here it propagates
+        let score_rank0 = 1.0 / (RRF_K + 1.0);
+        assert!(
+            (score_rank0 - 1.0 / 61.0).abs() < 1e-15,
+            "rank-0 score must equal 1/61: {score_rank0}"
         );
     }
 }
