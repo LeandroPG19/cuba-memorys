@@ -1,6 +1,6 @@
 {
   "name": "cuba-memorys",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "mcpName": "io.github.LeandroPG19/cuba-memorys",
   "description": "Persistent memory for AI agents — knowledge graph MCP server with 19 tools: Hebbian learning, RRF fusion, episodic memory, contradiction detection, prospective triggers, Bayesian calibration, link prediction. PostgreSQL, sub-millisecond.",
   "license": "CC-BY-NC-4.0",
