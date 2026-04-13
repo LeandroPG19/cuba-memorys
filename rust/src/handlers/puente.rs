@@ -2,7 +2,6 @@
 //!
 //! CTE-based traversal and inference for graph navigation.
 //! Hebbian: relations strengthen with use (traversal).
-//! V2.1: blake3 triple hash for deterministic relation dedup.
 
 use crate::constants::VALID_RELATION_TYPES;
 use anyhow::{Context, Result};
@@ -51,14 +50,6 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let from_id = get_entity_id(pool, from).await?;
     let to_id = get_entity_id(pool, to).await?;
 
-    // blake3 triple hash for logging/diagnostics (E-WL inspired)
-    let triple_hash = compute_relation_hash(from, rel_type, to);
-    tracing::debug!(
-        from = from, to = to, rel = rel_type,
-        hash = %triple_hash,
-        "relation triple hash"
-    );
-
     // Upsert relation (strengthen if exists, create if not)
     let result = sqlx::query(
         "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional)
@@ -78,7 +69,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let is_new: bool = result.get::<bool, _>("is_insert");
     if !is_new {
         tracing::info!(
-            hash = %triple_hash,
+            from = from, to = to, rel = rel_type,
             "relation already exists — strengthened (Hebbian)"
         );
     }
@@ -158,7 +149,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
     let start_id = get_entity_id(pool, start).await?;
 
     // CTE-based depth-first traversal
-    let paths: Vec<(String, String, String, f64, i32)> = sqlx::query_as(
+    let paths: Vec<(String, String, f64, i32)> = sqlx::query_as(
         r#"
         WITH RECURSIVE graph_walk AS (
             SELECT
@@ -184,7 +175,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
             JOIN graph_walk gw ON r.from_entity = gw.current_node
             WHERE gw.depth < $2
         )
-        SELECT node_name, relation_type, node_name, strength, depth
+        SELECT node_name, relation_type, strength, depth
         FROM graph_walk
         ORDER BY depth, strength DESC
         LIMIT 50
@@ -208,7 +199,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let nodes: Vec<Value> = paths
         .iter()
-        .map(|(name, rel_type, _, strength, depth)| {
+        .map(|(name, rel_type, strength, depth)| {
             serde_json::json!({
                 "name": name,
                 "relation": rel_type,
@@ -412,13 +403,4 @@ async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
 
     row.map(|(id,)| id)
         .context(format!("Entity '{name}' not found"))
-}
-
-/// Compute blake3 hash of a relation triple for deterministic dedup.
-///
-/// E-WL inspired (simplified): instead of full Weisfeiler-Leman on subgraphs,
-/// hash the triple (from, type, to) for O(1) collision detection.
-fn compute_relation_hash(from: &str, relation_type: &str, to: &str) -> String {
-    let input = format!("{from}|{relation_type}|{to}");
-    blake3::hash(input.as_bytes()).to_hex().to_string()
 }

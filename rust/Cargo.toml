@@ -52,9 +52,6 @@ lru = "0.12"
 # Global allocator
 mimalloc = "0.1"
 
-# Hashing (relation dedup — E-WL inspired triple hash)
-blake3 = "1"
-
 [profile.release]
 opt-level = 3
 lto = "fat"
