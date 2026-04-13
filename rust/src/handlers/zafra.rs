@@ -264,11 +264,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 match crate::embeddings::onnx::embed_passage(&content).await {
                     Ok(emb) => {
                         if sqlx::query(
-                            "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $3 WHERE id = $2",
+                            "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                         )
                         .bind(pgvector::Vector::from(emb))
-                        .bind(obs_id)
                         .bind(current_model)
+                        .bind(obs_id)
                         .execute(pool)
                         .await
                         .is_ok()
