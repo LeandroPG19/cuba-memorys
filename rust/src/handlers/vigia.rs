@@ -16,34 +16,80 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "drift" => drift(pool).await,
         "communities" => communities(pool).await,
         "bridges" => bridges(pool).await,
+        "structural" => structural(pool).await,
         _ => anyhow::bail!("Invalid metric: {metric}"),
     }
 }
 
+/// V0.9: Structural centrality ranking — combines harmonic (Boldi-Vigna 2014),
+/// closeness (Bavelas 1950) and k-core (Seidman 1983 / Batagelj-Zaversnik 2003).
+/// Useful for identifying the "backbone" of the project graph that
+/// `cuba_forget` should refuse to delete.
+async fn structural(pool: &PgPool) -> Result<Value> {
+    let centrality = crate::graph::closeness::compute_top(pool, 20).await?;
+    let kcore = crate::graph::kcore::compute_top(pool, 20).await?;
+    Ok(serde_json::json!({
+        "metric": "structural",
+        "closeness_harmonic": centrality.iter().map(|(name, h, c)| {
+            serde_json::json!({"entity": name, "harmonic": h, "closeness": c})
+        }).collect::<Vec<_>>(),
+        "kcore": kcore.iter().map(|(name, k)| {
+            serde_json::json!({"entity": name, "kcore": k})
+        }).collect::<Vec<_>>(),
+        "interpretation": "harmonic robust for disconnected graphs (Boldi-Vigna 2014); closeness uses Bavelas 1950; kcore identifies structural backbone (Seidman 1983)"
+    }))
+}
+
 async fn summary(pool: &PgPool) -> Result<Value> {
-    let entities: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_entities")
-        .fetch_one(pool)
-        .await?;
-    let observations: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_observations WHERE observation_type != 'superseded'",
+    // V0.8: scope counts to active project (None = no filter)
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    let entities: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_entities
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
     )
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
-    let relations: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_relations")
-        .fetch_one(pool)
-        .await?;
-    let errors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_errors")
-        .fetch_one(pool)
-        .await?;
-    let sessions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_sessions")
-        .fetch_one(pool)
-        .await?;
+    let observations: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_observations
+         WHERE observation_type != 'superseded'
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let relations: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_relations
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let errors: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_errors
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let sessions: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_sessions
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
     // Episodes — non-fatal if table doesn't exist on older DBs
-    let episodes: i64 = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM brain_episodes")
-        .fetch_one(pool)
-        .await
-        .map(|(c,)| c)
-        .unwrap_or(0);
+    let episodes: i64 = sqlx::query_as::<_, (i64,)>(
+        "SELECT COUNT(*) FROM brain_episodes
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .map(|(c,)| c)
+    .unwrap_or(0);
     let token_estimate = (observations.0 + episodes) * 50;
 
     Ok(serde_json::json!({
@@ -54,37 +100,55 @@ async fn summary(pool: &PgPool) -> Result<Value> {
         "relations": relations.0,
         "errors": errors.0,
         "sessions": sessions.0,
-        "estimated_tokens": token_estimate
+        "estimated_tokens": token_estimate,
+        "project_scoped": project_id.is_some()
     }))
 }
 
 async fn health(pool: &PgPool) -> Result<Value> {
-    let avg_importance: (Option<f64>,) =
-        sqlx::query_as("SELECT AVG(importance)::float8 FROM brain_entities")
-            .fetch_one(pool)
-            .await?;
+    // V0.8: scope per-project where meaningful (DB size and resolution-rate stay global).
+    let project_id = crate::project::current_project_id(pool).await?;
 
-    let stale_count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_observations WHERE last_accessed < NOW() - INTERVAL '30 days'",
+    let avg_importance: (Option<f64>,) = sqlx::query_as(
+        "SELECT AVG(importance)::float8 FROM brain_entities
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
     )
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
-    let unused_entities: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM brain_entities WHERE access_count = 0")
-            .fetch_one(pool)
-            .await?;
+    let stale_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_observations
+         WHERE last_accessed < NOW() - INTERVAL '30 days'
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+
+    let unused_entities: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM brain_entities
+         WHERE access_count = 0
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
 
     let db_size: (String,) =
         sqlx::query_as("SELECT pg_size_pretty(pg_database_size(current_database()))")
             .fetch_one(pool)
             .await?;
 
-    // Entropy diversity — Shannon entropy of entity types
-    let type_counts: Vec<(String, i64)> =
-        sqlx::query_as("SELECT entity_type, COUNT(*) FROM brain_entities GROUP BY entity_type")
-            .fetch_all(pool)
-            .await?;
+    // Entropy diversity — Shannon entropy of entity types (project-scoped)
+    let type_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT entity_type, COUNT(*) FROM brain_entities
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         GROUP BY entity_type",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
 
     let entity_entropy = compute_entropy(&type_counts);
     let max_entity_entropy = if type_counts.is_empty() {
@@ -93,10 +157,13 @@ async fn health(pool: &PgPool) -> Result<Value> {
         (type_counts.len() as f64).log2().max(0.001)
     };
 
-    // Observation type entropy
+    // Observation type entropy (project-scoped)
     let obs_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT observation_type, COUNT(*) FROM brain_observations GROUP BY observation_type",
+        "SELECT observation_type, COUNT(*) FROM brain_observations
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         GROUP BY observation_type",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     let obs_entropy = compute_entropy(&obs_counts);
@@ -109,14 +176,18 @@ async fn health(pool: &PgPool) -> Result<Value> {
     let diversity_score =
         ((entity_entropy / max_entity_entropy) + (obs_entropy / max_obs_entropy)) / 2.0;
 
-    // Error metrics — resolution rate and MTTR
+    // Error metrics — resolution rate and MTTR (project-scoped)
     let err_stats: (i64, i64, Option<f64>) = sqlx::query_as(
         "SELECT \
-            (SELECT COUNT(*) FROM brain_errors WHERE resolved), \
-            (SELECT COUNT(*) FROM brain_errors), \
+            (SELECT COUNT(*) FROM brain_errors WHERE resolved \
+              AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)), \
+            (SELECT COUNT(*) FROM brain_errors \
+              WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)), \
             (SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)))::float8 \
-             FROM brain_errors WHERE resolved AND resolved_at IS NOT NULL)",
+             FROM brain_errors WHERE resolved AND resolved_at IS NOT NULL \
+               AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL))",
     )
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
@@ -128,8 +199,11 @@ async fn health(pool: &PgPool) -> Result<Value> {
 
     // V0.6: Enhanced health metrics — null embeddings, active triggers, table sizes
     let null_embeddings: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_observations WHERE embedding IS NULL AND observation_type != 'superseded'",
+        "SELECT COUNT(*) FROM brain_observations
+         WHERE embedding IS NULL AND observation_type != 'superseded'
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
     )
+    .bind(project_id)
     .fetch_one(pool)
     .await
     .unwrap_or((0,));
@@ -182,20 +256,27 @@ async fn health(pool: &PgPool) -> Result<Value> {
 }
 
 async fn drift(pool: &PgPool) -> Result<Value> {
+    // V0.8: scope drift detection per project
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Recent (7 days) vs historical (7-37 days) error distribution
     let recent: Vec<(String, i64)> = sqlx::query_as(
         "SELECT error_type, COUNT(*) FROM brain_errors \
          WHERE created_at > NOW() - INTERVAL '7 days' \
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL) \
          GROUP BY error_type",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
     let historical: Vec<(String, f64)> = sqlx::query_as(
         "SELECT error_type, COUNT(*)::float8 / 4.0 FROM brain_errors \
          WHERE created_at BETWEEN NOW() - INTERVAL '37 days' AND NOW() - INTERVAL '7 days' \
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL) \
          GROUP BY error_type",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -255,10 +336,13 @@ async fn communities(pool: &PgPool) -> Result<Value> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Leiden community detection failed, using fallback");
+            let project_id = crate::project::current_project_id(pool).await?;
             let components: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT e.entity_type, COUNT(*) FROM brain_entities e \
+                 WHERE ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL) \
                  GROUP BY e.entity_type ORDER BY COUNT(*) DESC",
             )
+            .bind(project_id)
             .fetch_all(pool)
             .await?;
             let communities: Vec<Value> = components
@@ -296,12 +380,16 @@ async fn bridges(pool: &PgPool) -> Result<Value> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Brandes centrality failed, using SQL fallback");
+            // V0.8: filter SQL fallback by current project
+            let project_id = crate::project::current_project_id(pool).await?;
             let bridges: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT e.name, COUNT(r.id) as connection_count FROM brain_entities e
                  LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
+                 WHERE ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL)
                  GROUP BY e.name HAVING COUNT(r.id) > 2
                  ORDER BY connection_count DESC LIMIT 10",
             )
+            .bind(project_id)
             .fetch_all(pool)
             .await?;
             let bridge_list: Vec<Value> = bridges

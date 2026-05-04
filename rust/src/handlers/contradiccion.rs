@@ -52,6 +52,9 @@ async fn scan(pool: &PgPool, entity_name: &str) -> Result<Value> {
 
 /// Scan a single entity for contradicting observation pairs.
 async fn scan_entity(pool: &PgPool, entity_name: &str) -> Result<Value> {
+    // V0.8: scope contradictions to current project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
     type PairRow = (uuid::Uuid, String, uuid::Uuid, String, f64);
     let pairs: Vec<PairRow> = sqlx::query_as(
         "SELECT a.id, a.content, b.id, b.content,
@@ -63,10 +66,13 @@ async fn scan_entity(pool: &PgPool, entity_name: &str) -> Result<Value> {
            AND b.observation_type NOT IN ('superseded', 'tool_usage')
            AND (1.0 - (a.embedding <=> b.embedding)) BETWEEN 0.3 AND 0.85
            AND a.entity_id = (SELECT id FROM brain_entities WHERE name = $1)
+           AND ($2::uuid IS NULL OR a.project_id = $2 OR a.project_id IS NULL)
+           AND ($2::uuid IS NULL OR b.project_id = $2 OR b.project_id IS NULL)
          ORDER BY cosine_sim DESC
          LIMIT 20",
     )
     .bind(entity_name)
+    .bind(project_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -84,17 +90,22 @@ async fn scan_entity(pool: &PgPool, entity_name: &str) -> Result<Value> {
 
 /// Scan top-20 entities by observation count.
 async fn scan_top_entities(pool: &PgPool) -> Result<Value> {
+    // V0.8: scope to current project
+    let project_id = crate::project::current_project_id(pool).await?;
+
     let entities: Vec<(String,)> = sqlx::query_as(
         "SELECT e.name
          FROM brain_entities e
          JOIN brain_observations o ON o.entity_id = e.id
          WHERE o.observation_type NOT IN ('superseded', 'tool_usage')
            AND o.embedding IS NOT NULL
+           AND ($1::uuid IS NULL OR o.project_id = $1 OR o.project_id IS NULL)
          GROUP BY e.name
          HAVING COUNT(*) >= 2
          ORDER BY COUNT(*) DESC
          LIMIT 20",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -112,10 +123,13 @@ async fn scan_top_entities(pool: &PgPool) -> Result<Value> {
                AND b.observation_type NOT IN ('superseded', 'tool_usage')
                AND (1.0 - (a.embedding <=> b.embedding)) BETWEEN 0.3 AND 0.85
                AND a.entity_id = (SELECT id FROM brain_entities WHERE name = $1)
+               AND ($2::uuid IS NULL OR a.project_id = $2 OR a.project_id IS NULL)
+               AND ($2::uuid IS NULL OR b.project_id = $2 OR b.project_id IS NULL)
              ORDER BY cosine_sim DESC
              LIMIT 5",
         )
         .bind(name)
+        .bind(project_id)
         .fetch_all(pool)
         .await
         .unwrap_or_default();
@@ -164,6 +178,13 @@ fn has_negation_conflict(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+/// V0.8: Public re-export so cognitive::judge::HeuristicJudge (the fallback
+/// backend for cuba_juez) can reuse the bilingual negation heuristic without
+/// pulling SQL/embedding dependencies.
+pub fn heuristic_conflict(a: &str, b: &str) -> bool {
+    has_negation_conflict(a, b)
 }
 
 /// Score observation pairs and return contradiction items.

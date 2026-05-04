@@ -5,14 +5,16 @@
 
 use serde_json::{json, Value};
 
-/// Verify all 19 tools are defined in constants.
+/// Verify all 25 tools are defined in constants
+/// (v0.8 added cuba_proyecto, cuba_pre_compact, cuba_sync, cuba_juez;
+///  v0.9 added cuba_pizarra working memory + cuba_archivo audit log).
 #[test]
 fn test_all_tools_defined() {
     let tools = cuba_memorys::constants::tool_definitions();
     assert_eq!(
         tools.len(),
-        19,
-        "Expected 19 MCP tools, got {}",
+        25,
+        "Expected 25 MCP tools, got {}",
         tools.len()
     );
 
@@ -41,6 +43,12 @@ fn test_all_tools_defined() {
         "cuba_centinela",
         "cuba_calibrar",
         "cuba_ingesta",
+        "cuba_proyecto",
+        "cuba_pre_compact",
+        "cuba_sync",
+        "cuba_juez",
+        "cuba_pizarra",
+        "cuba_archivo",
     ];
 
     for name in &expected {
@@ -147,18 +155,12 @@ fn test_threshold_invariants() {
     use cuba_memorys::constants::*;
 
     // Hierarchy: REINFORCE (0.92) > DEDUP (0.85) > UPDATE (0.75)
-    assert!(
-        PRED_ERROR_REINFORCE > DEDUP_THRESHOLD,
-        "REINFORCE ({PRED_ERROR_REINFORCE}) must > DEDUP ({DEDUP_THRESHOLD})"
-    );
-    assert!(
-        DEDUP_THRESHOLD > PRED_ERROR_UPDATE,
-        "DEDUP ({DEDUP_THRESHOLD}) must > UPDATE ({PRED_ERROR_UPDATE})"
-    );
-    assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
+    const _: () = assert!(PRED_ERROR_REINFORCE > DEDUP_THRESHOLD);
+    const _: () = assert!(DEDUP_THRESHOLD > PRED_ERROR_UPDATE);
+    const _: () = assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Verify handler dispatch maps all 19 tools.
+/// Verify handler dispatch maps all 24 tools (v0.7 + v0.8 + v0.9).
 #[test]
 fn test_handler_dispatch_coverage() {
     let tool_names = [
@@ -181,6 +183,14 @@ fn test_handler_dispatch_coverage() {
         "cuba_centinela",
         "cuba_calibrar",
         "cuba_ingesta",
+        // v0.8
+        "cuba_proyecto",
+        "cuba_pre_compact",
+        "cuba_sync",
+        "cuba_juez",
+        // v0.9
+        "cuba_pizarra",
+        "cuba_archivo",
     ];
 
     for name in &tool_names {
@@ -236,16 +246,16 @@ fn test_schema_sql_content() {
 fn test_cognitive_constants_valid() {
     use cuba_memorys::constants::*;
 
-    assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 1.0);
-    assert!(BCM_THROTTLE_SCALE > 0.0 && BCM_THROTTLE_SCALE <= 1.0);
+    const _: () = assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 1.0);
+    const _: () = assert!(BCM_THROTTLE_SCALE > 0.0 && BCM_THROTTLE_SCALE <= 1.0);
 }
 
 /// Verify cache constants.
 #[test]
 fn test_cache_constants_valid() {
     use cuba_memorys::constants::*;
-    assert!(CACHE_MAX_ENTRIES > 0);
-    assert!(CACHE_TTL_SECS > 0);
+    const _: () = assert!(CACHE_MAX_ENTRIES > 0);
+    const _: () = assert!(CACHE_TTL_SECS > 0);
 }
 
 /// Verify all valid types lists are populated.

@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "cuba-memorys"
-version = "1.9.0"
-description = "Persistent memory for AI agents — knowledge graph MCP server with 19 tools: Hebbian learning, RRF fusion, episodic memory, contradiction detection, prospective triggers, Bayesian calibration, link prediction. PostgreSQL, sub-millisecond."
+version = "1.11.3"
+description = "Persistent memory for AI agents — knowledge graph MCP server with 23 tools: sqlx-migrate, BM25 hybrid + MMR + OOD abstention + tiktoken budget, conformal prediction, testing-effect decay (Karpicke-Roediger 2008), Hebbian Δt-aware, Robbins-Monro Oja, source credibility tracking. Plus v0.8 features (project scoping, compaction snapshots, git-friendly sync, LLM-judge), Hebbian learning, RRF fusion, episodic memory, prospective triggers, Bayesian calibration, link prediction. PostgreSQL + pgvector, sub-millisecond."
 readme = "README.md"
 license = { text = "CC-BY-NC-4.0" }
 requires-python = ">=3.9"

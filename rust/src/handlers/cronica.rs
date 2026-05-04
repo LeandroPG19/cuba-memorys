@@ -64,8 +64,11 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         anyhow::bail!("Invalid source: {source}");
     }
 
+    // V0.8: Resolve current project (None = global, no scoping)
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Auto-create entity if needed (FIX B1: always get fresh entity_id)
-    let entity_id = ensure_entity(pool, entity_name).await?;
+    let entity_id = ensure_entity(pool, entity_name, project_id).await?;
 
     // Dedup check (FIX B5: information_density with unique words)
     let density = information_density(content);
@@ -117,8 +120,8 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .flatten();
 
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
@@ -127,6 +130,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .bind(importance)
     .bind(active_session_id)
     .bind(&tags)
+    .bind(project_id)
     .fetch_one(pool)
     .await
     .context("failed to insert observation")?;
@@ -280,20 +284,24 @@ async fn delete_obs(pool: &PgPool, args: &Value) -> Result<Value> {
 }
 
 /// List observations for an entity.
+/// V0.8: filter observations by current project scope.
 async fn list(pool: &PgPool, entity_name: &str) -> Result<Value> {
     if entity_name.is_empty() {
         anyhow::bail!("entity_name is required");
     }
 
     let entity_id = get_entity_id(pool, entity_name).await?;
+    let project_id = crate::project::current_project_id(pool).await?;
 
     let observations: Vec<(uuid::Uuid, String, String, f64, String, i32)> = sqlx::query_as(
         "SELECT id, content, observation_type, importance, source, access_count
          FROM brain_observations
          WHERE entity_id = $1 AND observation_type != 'superseded'
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)
          ORDER BY importance DESC, created_at DESC",
     )
     .bind(entity_id)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -355,6 +363,9 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut actions: Vec<BatchAction> = Vec::new();
     let mut deduplicated = 0u32;
 
+    // V0.8: Resolve current project once for the batch
+    let project_id = crate::project::current_project_id(pool).await?;
+
     for obs in observations {
         let entity_name = obs
             .get("entity_name")
@@ -374,7 +385,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
             continue;
         }
 
-        let entity_id = ensure_entity(pool, entity_name).await?;
+        let entity_id = ensure_entity(pool, entity_name, project_id).await?;
         // Fetch entity_type for contextual embedding
         let entity_type: String = sqlx::query_scalar(
             "SELECT entity_type FROM brain_entities WHERE id = $1",
@@ -431,8 +442,8 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         match action {
             BatchAction::Insert(pending) => {
                 let row: (uuid::Uuid,) = sqlx::query_as(
-                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
                 )
                 .bind(pending.entity_id)
                 .bind(&pending.content)
@@ -441,6 +452,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                 .bind(pending.importance)
                 .bind(active_session_id)
                 .bind(&pending.tags)
+                .bind(project_id)
                 .fetch_one(&mut *tx)
                 .await?;
                 inserted_for_embed.push((
@@ -515,6 +527,9 @@ async fn timeline(pool: &PgPool, entity_name: &str) -> Result<Value> {
         anyhow::bail!("entity_name is required for timeline");
     }
 
+    // V0.8: scope timeline items by project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
     type ObsRow = (
         uuid::Uuid,
         String,
@@ -530,10 +545,12 @@ async fn timeline(pool: &PgPool, entity_name: &str) -> Result<Value> {
          FROM brain_observations o
          JOIN brain_entities e ON o.entity_id = e.id
          WHERE e.name = $1 AND o.observation_type != 'superseded'
+           AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
          ORDER BY o.created_at ASC
          LIMIT 100",
     )
     .bind(entity_name)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -551,10 +568,12 @@ async fn timeline(pool: &PgPool, entity_name: &str) -> Result<Value> {
          FROM brain_episodes ep
          JOIN brain_entities e ON ep.entity_id = e.id
          WHERE e.name = $1
+           AND ($2::uuid IS NULL OR ep.project_id = $2 OR ep.project_id IS NULL)
          ORDER BY ep.started_at ASC
          LIMIT 50",
     )
     .bind(entity_name)
+    .bind(project_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -695,7 +714,15 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
 }
 
 /// Ensure entity exists, creating if necessary. Returns entity_id.
-async fn ensure_entity(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
+///
+/// V0.8: New entities inherit the caller's `project_id`. Existing entities
+/// keep their project (we don't reassign on access — that would let later
+/// callers steal entities across projects).
+async fn ensure_entity(
+    pool: &PgPool,
+    name: &str,
+    project_id: Option<uuid::Uuid>,
+) -> Result<uuid::Uuid> {
     // Try to find existing
     let existing: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
@@ -707,14 +734,15 @@ async fn ensure_entity(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
         return Ok(id);
     }
 
-    // Create new entity
+    // Create new entity (with project scoping)
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_entities (name, entity_type)
-         VALUES ($1, 'concept')
+        "INSERT INTO brain_entities (name, entity_type, project_id)
+         VALUES ($1, 'concept', $2)
          ON CONFLICT (name) DO UPDATE SET updated_at = NOW()
          RETURNING id",
     )
     .bind(name)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
@@ -770,8 +798,11 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
         })
         .unwrap_or_default();
 
+    // V0.8: Resolve current project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Auto-create entity if needed (same pattern as add)
-    let entity_id = ensure_entity(pool, entity_name).await?;
+    let entity_id = ensure_entity(pool, entity_name, project_id).await?;
     let density = information_density(content);
 
     // V0.6: Session provenance for episodes
@@ -784,8 +815,8 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     .flatten();
 
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance, session_id)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance, session_id, project_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
@@ -793,6 +824,7 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     .bind(&artifacts)
     .bind(density.min(1.0))
     .bind(active_session_id)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
@@ -860,6 +892,9 @@ async fn episode_list(pool: &PgPool, entity_name: &str) -> Result<Value> {
         anyhow::bail!("entity_name is required for episode_list");
     }
 
+    // V0.8: scope episodes by project
+    let project_id = crate::project::current_project_id(pool).await?;
+
     type EpisodeRow = (
         uuid::Uuid,
         String,
@@ -874,10 +909,12 @@ async fn episode_list(pool: &PgPool, entity_name: &str) -> Result<Value> {
              FROM brain_episodes ep
              JOIN brain_entities e ON ep.entity_id = e.id
              WHERE e.name = $1
+               AND ($2::uuid IS NULL OR ep.project_id = $2 OR ep.project_id IS NULL)
              ORDER BY ep.started_at DESC
              LIMIT 50",
     )
     .bind(entity_name)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 

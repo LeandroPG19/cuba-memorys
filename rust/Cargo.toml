@@ -1,8 +1,8 @@
 [package]
 name = "cuba-memorys"
-version = "0.7.0"
+version = "0.9.3"
 edition = "2024"
-description = "Knowledge Graph MCP Server — 19 tools, Hebbian learning, RRF fusion, contradiction detection, prospective memory, Bayesian calibration"
+description = "Knowledge Graph MCP Server — 25 tools, sqlx-migrate, BM25/MMR/OOD search, conformal prediction, testing-effect/Δt-Hebbian/Robbins-Monro cognitive, source credibility, closeness/harmonic/k-core graph, working-memory + Allen interval + ADWIN drift + MI tagging, audit hash-chain (CFR-21) + RLS, MCP Resources URI scheme, optional Prometheus /metrics + MCPSamplingJudge, plus v0.8 features (project scoping, snapshots, sync, LLM-judge)"
 license = "CC-BY-NC-4.0"
 
 [dependencies]
@@ -10,12 +10,15 @@ license = "CC-BY-NC-4.0"
 tokio = { version = "1", features = ["full"] }
 
 # PostgreSQL (compile-time checked, async, built-in pool retry)
+# V0.9: feature `migrate` enables sqlx::migrate! macro that bakes
+# rust/migrations/ into the binary at compile time.
 sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "postgres",
     "uuid",
     "chrono",
     "json",
+    "migrate",
 ] }
 pgvector = { version = "0.4", features = ["sqlx"] }
 
@@ -36,6 +39,22 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 # Error handling
 anyhow = "1"
+
+# V0.8: trait objects for cuba_juez ContradictionJudge backends
+async-trait = "0.1"
+
+# V0.9: exact token counting for cuba_faro budget enforcement (replaces 4 chars/tok heuristic).
+# Maneja español (~2.7 chars/tok), código y multilingüe correctamente.
+tiktoken-rs = "0.7"
+
+# V0.9: linear algebra for OOD Mahalanobis distance (faro abstention).
+# Pure Rust, no LAPACK dependency required.
+nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+
+# V0.9: SHA-256 for audit hash chain (CFR-21 Part 11 tamper-evidence).
+# Chosen over blake3 for FIPS-140 / regulatory familiarity.
+sha2 = "0.10"
+hex = "0.4"
 # NOTE: thiserror removed — zero callers found across all 37 source files (dead dep).
 # NOTE: petgraph removed — zero imports found (dead dep; graph algos use own impl).
 # NOTE: rand removed — zero imports found (dead dep).
@@ -49,8 +68,27 @@ chrono = { version = "0.4", features = ["serde"] }
 # Update to 0.12.6+ once released, or replace with quick_cache if vuln is critical.
 lru = "0.12"
 
+# V0.8: zstd compression for cuba_sync embeddings blob.
+# Pure Rust binding wraps the zstd C library; multi-platform release builds OK.
+zstd = "0.13"
+
+# V0.8: optional Anthropic API client for cuba_juez (feature flag `anthropic-api`).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+# V0.9: optional Prometheus metrics (feature flag `observability`).
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
+
 # Global allocator
 mimalloc = "0.1"
+
+[features]
+default = []
+# Enables AnthropicApiJudge in cuba_juez. Adds reqwest + rustls (~150KB to binary).
+anthropic-api = ["dep:reqwest"]
+# V0.9: Prometheus /metrics endpoint with RED metrics per handler.
+# Adds metrics + metrics-exporter-prometheus + hyper for the HTTP server.
+observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [profile.release]
 opt-level = 3

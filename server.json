@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.LeandroPG19/cuba-memorys",
-  "description": "Persistent memory for AI agents. 19 tools, Hebbian learning, RRF search, knowledge graph.",
+  "description": "Persistent memory for AI agents. 23 tools, sqlx-migrate, BM25 hybrid + MMR + OOD abstention, conformal prediction, testing-effect decay, Hebbian Δt-aware, Robbins-Monro Oja, source credibility tracking, project scoping, compaction-survival snapshots, git-friendly sync, LLM-judge, Hebbian learning, RRF search, knowledge graph.",
   "repository": {
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.9.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.7.0",
+      "version": "0.9.3",
       "transport": {
         "type": "stdio"
       },
@@ -22,13 +22,55 @@
           "isRequired": true,
           "isSecret": false,
           "format": "string"
+        },
+        {
+          "name": "CUBA_PROJECT_FILTER",
+          "description": "Set to 'off' to disable v0.8 project scoping filters (admin/debug only).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CUBA_SYNC_DIR",
+          "description": "Directory used by cuba_sync export/import (default ./.cuba-memorys/).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CUBA_JUDGE",
+          "description": "cuba_juez backend selector: claude_cli | anthropic_api | heuristic | auto (default auto).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CUBA_JUEZ_CLI",
+          "description": "Subprocess CLI used by ClaudeCodeJudge (default 'claude').",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CUBA_JUEZ_MODEL",
+          "description": "Model name passed to the judge backend (default 'claude-haiku-4-5').",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "API key for AnthropicApiJudge (only used when feature 'anthropic-api' is built in).",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
         }
       ]
     },
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "1.9.0",
+      "version": "1.11.3",
       "transport": {
         "type": "stdio"
       },

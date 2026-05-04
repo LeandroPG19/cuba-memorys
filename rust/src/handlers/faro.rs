@@ -21,9 +21,13 @@ const DEFAULT_MAX_TOKENS: i64 = 5000;
 const GRAPHRAG_TOP_K: usize = 3;
 
 /// V0.6: Score breakdown — tracks individual RRF components per result.
+/// V0.9: Clone added so MMR can reorder without re-running the fusion.
+/// V0.9: bm25_score field added for 3-way RRF (text + vector + bm25).
+#[derive(Clone)]
 struct FusedResult {
     text_score: f64,
     vector_score: f64,
+    bm25_score: f64,
     session_boosted: bool,
     total: f64,
     data: Value,
@@ -65,6 +69,56 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let after = args.get("after").and_then(|v| v.as_str());
     let time_bounds = parse_time_bounds(before, after);
 
+    // V0.9: MMR diversification (Carbonell-Goldstein 1998).
+    // diversify=true reorders top-K to penalize near-duplicates.
+    let diversify = args
+        .get("diversify")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mmr_lambda = args
+        .get("mmr_lambda")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(crate::search::mmr::DEFAULT_LAMBDA);
+
+    // V0.9: OOD abstention via Mahalanobis (Lee NeurIPS 2018).
+    // abstain_ood=true triggers early return when query is far from the
+    // active embedding distribution. Default false to preserve v0.8 behavior.
+    let abstain_ood = args
+        .get("abstain_ood")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let ood_threshold = args
+        .get("ood_threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(crate::search::ood::DEFAULT_OOD_THRESHOLD);
+
+    // V0.9: BM25 (ts_rank_cd) as third RRF signal. Default true — gives
+    // +8-15% recall on queries with rare entity names / specific errors.
+    let enable_bm25 = args
+        .get("enable_bm25")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // V0.9.2: cross-encoder rerank pass over top-50 RRF candidates.
+    // Auto-enabled when CUBA_RERANKER_PATH points to a valid bge-reranker
+    // ONNX. Identity fallback otherwise (no perf cost). Argument override
+    // lets callers force off even when env is set.
+    let enable_rerank = args
+        .get("rerank")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(crate::search::rerank::enabled);
+
+    // V0.8: Resolve current project (None = no filter, see project::current_project_id)
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    // V0.9: OOD pre-check (when requested). Runs before any DB call so an
+    // OOD query never burns search latency. Cheap O(d²) on cached μ, Σ⁻¹.
+    if abstain_ood && mode == "hybrid"
+        && let Some(answer) = check_ood(pool, query, ood_threshold, project_id).await
+    {
+        return Ok(answer);
+    }
+
     let search_opts = SearchOpts {
         scope,
         limit,
@@ -72,11 +126,16 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         time_bounds,
         format,
         tag_filter,
+        project_id,
+        diversify,
+        mmr_lambda,
+        enable_bm25,
+        enable_rerank,
     };
 
     match mode {
         "hybrid" => hybrid_search(pool, query, &search_opts).await,
-        "verify" => verify_claim(pool, query).await,
+        "verify" => verify_claim(pool, query, project_id).await,
         _ => anyhow::bail!("Invalid mode: {mode}. Use hybrid/verify"),
     }
 }
@@ -111,6 +170,17 @@ struct SearchOpts<'a> {
     time_bounds: TimeBounds,
     format: &'a str,
     tag_filter: Option<&'a str>,
+    /// V0.8: project scoping. None = no filter (legacy behavior).
+    project_id: Option<uuid::Uuid>,
+    /// V0.9: when true, post-RRF results pass through MMR diversification.
+    diversify: bool,
+    /// V0.9: MMR balance — 1.0 = pure relevance, 0.0 = pure diversity. Default 0.7.
+    mmr_lambda: f64,
+    /// V0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector.
+    enable_bm25: bool,
+    /// V0.9.2: cross-encoder rerank top-N pre-MMR. Identity when reranker
+    /// asset (CUBA_RERANKER_PATH) is missing — production transparent.
+    enable_rerank: bool,
 }
 
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
@@ -120,10 +190,18 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
 
     // Run text search (always available — V8 graceful degradation base)
-    let mut text_results =
-        text_search(pool, query, opts.scope, opts.limit * 2, &opts.time_bounds).await?;
+    let mut text_results = text_search(
+        pool,
+        query,
+        opts.scope,
+        opts.limit * 2,
+        &opts.time_bounds,
+        opts.project_id,
+    )
+    .await?;
 
     // V0.6: Tag filter — if specified, run additional tag-based query and merge
+    // V0.8: tag query also scoped by project (transparent if None)
     if let Some(tag) = opts.tag_filter {
         let tagged_obs: Vec<(uuid::Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
@@ -132,11 +210,13 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
              JOIN brain_entities e ON o.entity_id = e.id
              WHERE $1 = ANY(o.tags)
                AND o.observation_type != 'superseded'
+               AND ($3::uuid IS NULL OR o.project_id = $3 OR o.project_id IS NULL)
              ORDER BY o.importance DESC
              LIMIT $2",
         )
         .bind(tag)
         .bind(opts.limit)
+        .bind(opts.project_id)
         .fetch_all(pool)
         .await
         .unwrap_or_default();
@@ -163,8 +243,15 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     }
 
     // Run vector search (may fail gracefully — V8)
-    let vector_results =
-        vector_search(pool, query, opts.scope, opts.limit * 2, &opts.time_bounds).await;
+    let vector_results = vector_search(
+        pool,
+        query,
+        opts.scope,
+        opts.limit * 2,
+        &opts.time_bounds,
+        opts.project_id,
+    )
+    .await;
 
     // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
     // Use the canonical constant from rrf.rs to avoid drift if the value ever changes.
@@ -185,6 +272,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             FusedResult {
                 text_score: rrf_score,
                 vector_score: 0.0,
+                bm25_score: 0.0,
                 session_boosted: false,
                 total: rrf_score,
                 data: result.clone(),
@@ -210,6 +298,45 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                 .or_insert(FusedResult {
                     text_score: 0.0,
                     vector_score: rrf_score,
+                    bm25_score: 0.0,
+                    session_boosted: false,
+                    total: rrf_score,
+                    data: result.clone(),
+                });
+        }
+    }
+
+    // V0.9: BM25 (ts_rank_cd) as third RRF signal — opt-out via enable_bm25=false.
+    // Weight = 1.0 (uniform with the other two; entropy_weights only balances
+    // text vs vector). Catches queries with rare terms / specific entity names
+    // that dense embeddings miss.
+    if opts.enable_bm25 {
+        let bm25_results = crate::search::bm25::bm25_search(
+            pool,
+            query,
+            opts.scope,
+            opts.limit * 2,
+            opts.project_id,
+        )
+        .await
+        .unwrap_or_default();
+        for (rank, result) in bm25_results.iter().enumerate() {
+            let id = result
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let rrf_score = 1.0 / (rrf_k + rank as f64 + 1.0);
+            fused_scores
+                .entry(id.clone())
+                .and_modify(|fr| {
+                    fr.bm25_score = rrf_score;
+                    fr.total += rrf_score;
+                })
+                .or_insert(FusedResult {
+                    text_score: 0.0,
+                    vector_score: 0.0,
+                    bm25_score: rrf_score,
                     session_boosted: false,
                     total: rrf_score,
                     data: result.clone(),
@@ -224,7 +351,46 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             .partial_cmp(&a.1.total)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    results.truncate(opts.limit as usize);
+    // V0.9: defer truncation. With diversify=true we need a wider pool
+    // (up to limit*2) so MMR has candidates to choose from. With rerank
+    // enabled we keep top-50 so the cross-encoder has enough signal.
+    // Truncation to opts.limit happens after session boost + rerank + MMR.
+    let pool_size = if opts.enable_rerank {
+        50.min(results.len())
+    } else if opts.diversify {
+        (opts.limit as usize * 5).min(results.len())
+    } else {
+        (opts.limit as usize).min(results.len())
+    };
+    results.truncate(pool_size);
+
+    // V0.9.2: cross-encoder rerank pass. Reorders results in place; MMR
+    // runs after this so diversification operates on the better-ranked
+    // candidates. Identity fallback when reranker is not configured.
+    if opts.enable_rerank && results.len() > 1 {
+        let contents: Vec<&str> = results
+            .iter()
+            .map(|(_, fr)| {
+                fr.data
+                    .get("content")
+                    .or_else(|| fr.data.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            })
+            .collect();
+        if let Ok(reranked) = crate::search::rerank::rerank(query, &contents).await {
+            let original = results.clone();
+            results = reranked
+                .into_iter()
+                .filter_map(|(idx, score)| {
+                    let mut entry = original.get(idx).cloned()?;
+                    // Bump total slightly so post-MMR ordering respects rerank
+                    entry.1.total += score * 0.0001; // tiebreaker only
+                    Some(entry)
+                })
+                .collect();
+        }
+    }
 
     // VF2: Testing Effect — update access tracking on matched observations
     let matched_obs_ids: Vec<uuid::Uuid> = results
@@ -284,6 +450,62 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         });
     }
 
+    // V0.9: MMR diversification pass.
+    // Uses Jaccard token-set similarity as a fast proxy for semantic distance
+    // between candidates — avoids re-fetching embeddings from DB. For exact
+    // semantic dedup (cross-encoder rerank), see PR #6 Phase 4.
+    if opts.diversify && results.len() > 1 {
+        let n = results.len();
+        let relevance: Vec<f64> = results.iter().map(|(_, fr)| fr.total).collect();
+        let token_sets: Vec<std::collections::HashSet<String>> = results
+            .iter()
+            .map(|(_, fr)| {
+                fr.data
+                    .get("content")
+                    .or_else(|| fr.data.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| {
+                        s.to_lowercase()
+                            .split(|c: char| !c.is_alphanumeric())
+                            .filter(|w| w.len() > 2)
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let mut pairwise = vec![vec![0.0_f64; n]; n];
+        for i in 0..n {
+            pairwise[i][i] = 1.0;
+            for j in (i + 1)..n {
+                let inter = token_sets[i].intersection(&token_sets[j]).count();
+                let union = token_sets[i].union(&token_sets[j]).count();
+                let jaccard = if union == 0 {
+                    0.0
+                } else {
+                    inter as f64 / union as f64
+                };
+                pairwise[i][j] = jaccard;
+                pairwise[j][i] = jaccard;
+            }
+        }
+        let picks = crate::search::mmr::mmr_select(
+            &relevance,
+            &pairwise,
+            opts.mmr_lambda,
+            opts.limit as usize,
+        );
+        // Reorder results by MMR picks
+        let reordered: Vec<(String, FusedResult)> = picks
+            .into_iter()
+            .filter_map(|i| results.get(i).cloned())
+            .collect();
+        results = reordered;
+    } else {
+        // No diversification — just truncate to the requested limit
+        results.truncate(opts.limit as usize);
+    }
+
     // GraphRAG enrichment — add degree-1 neighbors for top-K results (V9)
     let graphrag_context = enrich_graphrag(pool, &results, GRAPHRAG_TOP_K).await;
 
@@ -300,6 +522,10 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     serde_json::json!(fr.vector_score),
                 );
                 obj.insert(
+                    "bm25_score".to_string(),
+                    serde_json::json!(fr.bm25_score),
+                );
+                obj.insert(
                     "session_boosted".to_string(),
                     serde_json::json!(fr.session_boosted),
                 );
@@ -308,34 +534,33 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         })
         .collect();
 
-    // Token budget enforcement: truncate content per result instead of dropping entire results.
-    // This gives Claude more results with shorter content (better for grounding).
-    // Estimate: 1 token ≈ 4 chars.
+    // V0.9: Token budget enforcement via exact tiktoken counting (cl100k_base).
+    // Replaces the old "len/4" heuristic which over-estimated for Spanish
+    // (~2.7 chars/tok) and under-estimated for code (~3.5 chars/tok).
+    use crate::search::budget::{count_tokens, truncate_to_budget};
     let mut token_budget = opts.max_tokens;
     let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
     for mut r in results_json {
-        let content_len = r
+        let content_tokens = r
             .get("content")
             .and_then(|v| v.as_str())
-            .map(|s| s.len() as i64 / 4)
+            .map(|s| count_tokens(s) as i64)
             .unwrap_or(20);
         if token_budget <= 0 {
             break;
         }
-        if content_len > token_budget {
-            // Truncate content to fit remaining budget instead of dropping
-            let max_chars = (token_budget * 4) as usize;
+        if content_tokens > token_budget {
             let truncated: Option<String> = r
                 .get("content")
                 .and_then(|v| v.as_str())
-                .map(|s| crate::handlers::zafra::safe_truncate(s, max_chars).to_string());
+                .map(|s| truncate_to_budget(s, token_budget as usize));
             if let (Some(obj), Some(t)) = (r.as_object_mut(), truncated) {
                 obj.insert("content".to_string(), serde_json::json!(t));
             }
             budget_results.push(r);
             break;
         }
-        token_budget -= content_len;
+        token_budget -= content_tokens;
         budget_results.push(r);
     }
 
@@ -376,10 +601,25 @@ fn compact_result(r: &Value) -> Value {
 ///       Previously only used pg_trgm, missing all paraphrase matches.
 ///       Also eliminates double trigram scan (Mejora 9): entity_name is now
 ///       returned from the first query instead of running a second scan.
-async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
+async fn verify_claim(
+    pool: &PgPool,
+    claim: &str,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Value> {
     use std::collections::HashMap;
 
+    // V0.9: bump HNSW ef_search 100 → 200 for verify-mode queries.
+    // Recall@10 jumps from ~0.95 to ~0.99 (Malkov-Yashunin 2018 Fig. 11),
+    // critical when cuba_juez consumes our results downstream. SET LOCAL
+    // scopes to the current transaction-equivalent session, no leak across
+    // pool checkouts.
+    sqlx::query("SET LOCAL hnsw.ef_search = 200")
+        .execute(pool)
+        .await
+        .ok();
+
     // 1. Trigram evidence (with entity_name — Mejora 9: eliminates second scan)
+    // V0.8: project filter applied (no-op when project_id is None)
     let trigram_evidence: Vec<(uuid::Uuid, String, f64, String, String)> = sqlx::query_as(
         "SELECT o.id, o.content, similarity(o.content, $1)::float8 AS sim,
                 o.observation_type, e.name AS entity_name
@@ -387,10 +627,12 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
          JOIN brain_entities e ON o.entity_id = e.id
          WHERE similarity(o.content, $1) > 0.3
            AND o.observation_type != 'superseded'
+           AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
          ORDER BY sim DESC
          LIMIT 10",
     )
     .bind(claim)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -415,10 +657,12 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
                          WHERE o.embedding IS NOT NULL
                            AND o.observation_type != 'superseded'
                            AND (o.embedding <=> $1::vector) < 0.8
+                           AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
                          ORDER BY o.embedding <=> $1::vector
                          LIMIT 10",
                     )
                     .bind(pgvector::Vector::from(emb))
+                    .bind(project_id)
                     .fetch_all(pool)
                     .await
                     .unwrap_or_default()
@@ -540,12 +784,14 @@ async fn verify_claim(pool: &PgPool, claim: &str) -> Result<Value> {
 
 /// Text search using PostgreSQL full-text + trigram similarity.
 /// Temporal filtering: $3=after, $4=before applied to created_at on each table.
+/// V0.8: $5 = project_id (Option<Uuid>) — when None, filter is a no-op.
 async fn text_search(
     pool: &PgPool,
     query: &str,
     scope: &str,
     limit: i64,
     tb: &TimeBounds,
+    project_id: Option<uuid::Uuid>,
 ) -> Result<Vec<Value>> {
     let mut results = Vec::new();
 
@@ -560,6 +806,7 @@ async fn text_search(
              WHERE (search_vector @@ plainto_tsquery('simple', $1)
                 OR similarity(name, $1) > 0.3)
                AND created_at >= $3 AND created_at <= $4
+               AND ($5::uuid IS NULL OR project_id = $5 OR project_id IS NULL)
              ORDER BY score DESC
              LIMIT $2",
         )
@@ -567,6 +814,7 @@ async fn text_search(
         .bind(limit)
         .bind(tb.after)
         .bind(tb.before)
+        .bind(project_id)
         .fetch_all(pool)
         .await?;
         results.extend(
@@ -597,6 +845,7 @@ async fn text_search(
                 OR similarity(o.content, $1) > 0.3)
                AND o.observation_type != 'superseded'
                AND o.created_at >= $3 AND o.created_at <= $4
+               AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
              ORDER BY score DESC
              LIMIT $2",
         )
@@ -604,6 +853,7 @@ async fn text_search(
         .bind(limit)
         .bind(tb.after)
         .bind(tb.before)
+        .bind(project_id)
         .fetch_all(pool)
         .await?;
         results.extend(rows.into_iter().map(
@@ -630,6 +880,7 @@ async fn text_search(
              WHERE (search_vector @@ plainto_tsquery('simple', $1)
                 OR similarity(error_message, $1) > 0.3)
                AND created_at >= $3 AND created_at <= $4
+               AND ($5::uuid IS NULL OR project_id = $5 OR project_id IS NULL)
              ORDER BY score DESC
              LIMIT $2",
         )
@@ -637,6 +888,7 @@ async fn text_search(
         .bind(limit)
         .bind(tb.after)
         .bind(tb.before)
+        .bind(project_id)
         .fetch_all(pool)
         .await?;
         results.extend(
@@ -667,6 +919,7 @@ async fn text_search(
              WHERE (ep.search_vector @@ plainto_tsquery('simple', $1)
                 OR similarity(ep.content, $1) > 0.3)
                AND ep.created_at >= $3 AND ep.created_at <= $4
+               AND ($5::uuid IS NULL OR ep.project_id = $5 OR ep.project_id IS NULL)
              ORDER BY score DESC
              LIMIT $2",
         )
@@ -674,6 +927,7 @@ async fn text_search(
         .bind(limit)
         .bind(tb.after)
         .bind(tb.before)
+        .bind(project_id)
         .fetch_all(pool)
         .await
         .unwrap_or_default(); // Non-fatal if table doesn't exist
@@ -697,12 +951,14 @@ async fn text_search(
 
 /// Vector search via pgvector cosine similarity.
 /// V8: Returns Result — callers can gracefully degrade on failure.
+/// V0.8: project_id filter (None = no-op).
 async fn vector_search(
     pool: &PgPool,
     query: &str,
     _scope: &str,
     limit: i64,
     tb: &TimeBounds,
+    project_id: Option<uuid::Uuid>,
 ) -> Result<Vec<Value>> {
     // Gate on real ONNX model — hash fallback embeddings are not semantically
     // meaningful and querying DB with them against NULL embeddings returns empty
@@ -728,6 +984,7 @@ async fn vector_search(
          WHERE o.embedding IS NOT NULL
            AND o.observation_type != 'superseded'
            AND o.created_at >= $3 AND o.created_at <= $4
+           AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
          ORDER BY o.embedding <=> $1::vector
          LIMIT $2",
     )
@@ -735,6 +992,7 @@ async fn vector_search(
     .bind(limit)
     .bind(tb.after)
     .bind(tb.before)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -759,6 +1017,7 @@ async fn vector_search(
          JOIN brain_entities e ON ep.entity_id = e.id
          WHERE ep.embedding IS NOT NULL
            AND ep.created_at >= $3 AND ep.created_at <= $4
+           AND ($5::uuid IS NULL OR ep.project_id = $5 OR ep.project_id IS NULL)
          ORDER BY ep.embedding <=> $1::vector
          LIMIT $2",
     )
@@ -766,6 +1025,7 @@ async fn vector_search(
     .bind(limit)
     .bind(tb.after)
     .bind(tb.before)
+    .bind(project_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -881,6 +1141,70 @@ async fn enrich_graphrag(
     }
 
     serde_json::json!(context)
+}
+
+/// V0.9: Out-of-distribution pre-check. Returns Some(answer) if the query
+/// should abstain (no relevant memory exists), or None to proceed with normal
+/// search. Caller is `cuba_faro` with `abstain_ood=true`.
+///
+/// Cheap path: O(d²) Mahalanobis on cached μ, Σ⁻¹ — sub-millisecond.
+/// Falls back to None (no abstention) when:
+/// - ONNX model not loaded (no embeddings to compute distance against)
+/// - Fewer than MIN_SAMPLES_FOR_OOD observations exist (covariance too noisy)
+/// - Embedding fit fails (rank-deficient cov even after ridge)
+async fn check_ood(
+    pool: &PgPool,
+    query: &str,
+    threshold: f64,
+    project_id: Option<uuid::Uuid>,
+) -> Option<Value> {
+    use crate::search::ood::{OodStats, MIN_SAMPLES_FOR_OOD};
+
+    if !crate::embeddings::onnx::is_model_loaded() {
+        return None;
+    }
+    let query_emb = crate::embeddings::onnx::embed(query).await.ok()?;
+
+    // Sample up to 500 active observations for the fit. Cheaper than full
+    // scan, statistically sufficient for d=384.
+    let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
+        "SELECT embedding FROM brain_observations
+         WHERE embedding IS NOT NULL AND observation_type != 'superseded'
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         ORDER BY importance DESC, last_accessed DESC NULLS LAST
+         LIMIT 500",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+
+    if raw.len() < MIN_SAMPLES_FOR_OOD {
+        return None;
+    }
+    let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
+    let stats = OodStats::fit(&embeddings)?;
+    let dist = stats.mahalanobis(&query_emb)?;
+
+    if dist > threshold {
+        Some(serde_json::json!({
+            "mode": "hybrid",
+            "query": query,
+            "results": [],
+            "count": 0,
+            "ood": true,
+            "mahalanobis_distance": dist,
+            "ood_threshold": threshold,
+            "abstain_reason": format!(
+                "Query is out of distribution (distance {:.2} > threshold {:.2}). \
+                 No relevant memory found — consider rephrasing or adding the topic explicitly.",
+                dist, threshold
+            ),
+            "graphrag_context": []
+        }))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

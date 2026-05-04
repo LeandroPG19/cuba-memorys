@@ -28,14 +28,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("error_message is required");
     }
 
+    // V0.8: Resolve current project_id (FK). Coexists with project TEXT column
+    // (legacy filter); FK is the new canonical scoping primitive.
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Insert error (FIX A-003: safe_truncate prevents UTF-8 panic)
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_errors (error_type, error_message, context, project) VALUES ($1, $2, $3, $4) RETURNING id"
+        "INSERT INTO brain_errors (error_type, error_message, context, project, project_id) VALUES ($1, $2, $3, $4, $5) RETURNING id"
     )
     .bind(error_type)
     .bind(safe_truncate(error_message, 5000))
     .bind(&context)
     .bind(project)
+    .bind(project_id)
     .fetch_one(pool)
     .await
     .context("failed to insert error")?;

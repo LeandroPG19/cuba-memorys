@@ -14,16 +14,36 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unnamed");
             let goals = args.get("goals").cloned().unwrap_or(Value::Array(vec![]));
+
+            // V0.8: Optional project scoping. When provided, the session is bound
+            // to the project (upsert) so subsequent handlers can resolve it.
+            let project_arg = args.get("project").and_then(|v| v.as_str());
+            let project_id = match project_arg {
+                Some(p) if !p.is_empty() => Some(crate::project::upsert_project(pool, p).await?),
+                _ => None,
+            };
+
             let row: (uuid::Uuid,) = sqlx::query_as(
-                "INSERT INTO brain_sessions (session_name, goals) VALUES ($1, $2) RETURNING id",
+                "INSERT INTO brain_sessions (session_name, goals, project_id)
+                 VALUES ($1, $2, $3) RETURNING id",
             )
             .bind(name)
             .bind(&goals)
+            .bind(project_id)
             .fetch_one(pool)
             .await
             .context("failed to start session")?;
 
-            let mut response = serde_json::json!({"action": "started", "session": {"id": row.0.to_string(), "session_name": name, "started_at": chrono::Utc::now().to_rfc3339()}});
+            let mut response = serde_json::json!({
+                "action": "started",
+                "session": {
+                    "id": row.0.to_string(),
+                    "session_name": name,
+                    "started_at": chrono::Utc::now().to_rfc3339(),
+                    "project_id": project_id.map(|p| p.to_string()),
+                    "project_name": project_arg,
+                }
+            });
 
             // V0.6: Fetch previous session summary for context continuity
             let prev_session: Option<(Option<String>, Option<String>, Option<String>)> =
@@ -108,14 +128,74 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(response)
         }
         "current" => {
-            let session: Option<(uuid::Uuid, Option<String>, Value)> = sqlx::query_as(
-                "SELECT id, session_name, goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-            ).fetch_optional(pool).await?;
+            // V0.8: include started_at + compaction_hint + last_snapshot id so
+            // agents can decide whether to run cuba_pre_compact snapshot.
+            type SessionRow = (
+                uuid::Uuid,
+                Option<String>,
+                Value,
+                chrono::DateTime<chrono::Utc>,
+            );
+            let session: Option<SessionRow> = sqlx::query_as(
+                "SELECT id, session_name, goals, started_at FROM brain_sessions
+                 WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await?;
             match session {
-                Some((id, name, goals)) => Ok(
-                    serde_json::json!({"action": "current", "session": {"id": id.to_string(), "name": name, "goals": goals}}),
-                ),
-                None => Ok(serde_json::json!({"action": "current", "session": null})),
+                Some((id, name, goals, started_at)) => {
+                    // Count observations created in this session
+                    let obs_count: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM brain_observations WHERE session_id = $1",
+                    )
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or(0);
+
+                    let elapsed = chrono::Utc::now() - started_at;
+                    let compaction_hint = elapsed
+                        > chrono::Duration::seconds(
+                            crate::constants::COMPACTION_HINT_HOURS * 3600,
+                        )
+                        || obs_count >= crate::constants::COMPACTION_HINT_OBS_COUNT;
+
+                    let last_snapshot: Option<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> =
+                        sqlx::query_as(
+                            "SELECT id, created_at FROM brain_compaction_snapshots
+                             WHERE session_id = $1
+                             ORDER BY created_at DESC LIMIT 1",
+                        )
+                        .bind(id)
+                        .fetch_optional(pool)
+                        .await
+                        .ok()
+                        .flatten();
+
+                    Ok(serde_json::json!({
+                        "action": "current",
+                        "session": {
+                            "id": id.to_string(),
+                            "name": name,
+                            "goals": goals,
+                            "started_at": started_at.to_rfc3339(),
+                            "obs_count_in_session": obs_count,
+                        },
+                        "compaction_hint": compaction_hint,
+                        "last_snapshot": last_snapshot.map(|(sid, ts)| {
+                            serde_json::json!({
+                                "id": sid.to_string(),
+                                "created_at": ts.to_rfc3339(),
+                            })
+                        }),
+                    }))
+                }
+                None => Ok(serde_json::json!({
+                    "action": "current",
+                    "session": null,
+                    "compaction_hint": false,
+                    "last_snapshot": null,
+                })),
             }
         }
         "list" => {
@@ -130,4 +210,16 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         }
         _ => anyhow::bail!("Invalid action: {action}"),
     }
+}
+
+/// V0.8: helper for handlers that need the active session id (e.g. pre_compact).
+/// Returns None if no session is open.
+pub async fn current_session_id(pool: &sqlx::PgPool) -> Result<Option<uuid::Uuid>> {
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM brain_sessions WHERE ended_at IS NULL
+         ORDER BY started_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
 }

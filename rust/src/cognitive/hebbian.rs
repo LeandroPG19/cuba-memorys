@@ -23,16 +23,29 @@ const BCM_THETA_MIN: f64 = 10.0;
 /// Lower = smoother (more memory), higher = more reactive.
 const BCM_EMA_ALPHA: f64 = 0.15;
 
+/// V0.9: Δt time-constant (seconds) for the burst-suppression factor.
+/// τ=600 means a re-access after 10 min recovers ~63% of the boost; after
+/// 1 hour, ~99.8%. Inspired by STDP triplet rules (Pfister-Gerstner 2006)
+/// without requiring spike-train modeling.
+const HEBBIAN_TAU_SECS: f64 = 600.0;
+
 /// Boost entity importance on access with V3 EMA BCM throttling.
 ///
 /// FIX R-003: Single atomic UPDATE — no read-modify-write race.
 /// V3: θ_M = max(10, EMA(θ_prev, access_count)) persisted in bcm_theta.
+/// V0.9: Δt-aware burst suppression — `boost *= (1 - exp(-Δt/τ))`.
+///   Re-access in same second → factor 0 (anti-saturation, prevents
+///   amplification of burst access patterns). Δt > 1h → factor ≈ 1
+///   (normal access fully boosts). Implements asymmetric pre-post timing
+///   (cf. STDP triplet rules, Pfister-Gerstner 2006) at lookup time.
 pub async fn boost_on_access(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()> {
     sqlx::query(
         "UPDATE brain_entities SET
             bcm_theta = GREATEST($5, (1.0 - $6) * COALESCE(bcm_theta, $5) + $6 * access_count::float8),
             importance = LEAST(
-                importance + $1 * GREATEST(0.1, 1.0 - (access_count::float8 / GREATEST(COALESCE(bcm_theta, $2), access_count::float8)) * $3),
+                importance + $1
+                  * GREATEST(0.1, 1.0 - (access_count::float8 / GREATEST(COALESCE(bcm_theta, $2), access_count::float8)) * $3)
+                  * (1.0 - EXP(-LEAST(EXTRACT(EPOCH FROM (NOW() - updated_at)), 86400.0) / $7)),
                 1.0
             ),
             access_count = access_count + 1,
@@ -45,6 +58,7 @@ pub async fn boost_on_access(pool: &PgPool, entity_id: uuid::Uuid) -> Result<()>
     .bind(entity_id)             // $4
     .bind(BCM_THETA_MIN)         // $5 (floor)
     .bind(BCM_EMA_ALPHA)         // $6
+    .bind(HEBBIAN_TAU_SECS)      // $7
     .execute(pool)
     .await?;
     Ok(())
