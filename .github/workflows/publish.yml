@@ -102,9 +102,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist/
-
-      - name: Flatten artifacts
-        run: find dist/ -maxdepth 2 -type f -exec mv {} dist/ \;
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
