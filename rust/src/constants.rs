@@ -28,6 +28,23 @@ pub const HEBBIAN_ACCESS_BOOST: f64 = 0.01;
 /// Throttle scale: how aggressively to reduce boost (0.0=off, 1.0=max throttle).
 pub const BCM_THROTTLE_SCALE: f64 = 0.8;
 
+/// V0.8: Project scoping kill-switch env var.
+/// When set to "off" (case-insensitive), the project filter is fully disabled
+/// and all queries see every project + global rows. Useful for admin/debug.
+pub const KILL_SWITCH_ENV: &str = "CUBA_PROJECT_FILTER";
+
+/// V0.8: `cuba_jornada current` flips `compaction_hint=true` past these
+/// thresholds so the agent knows to call `cuba_pre_compact snapshot`.
+pub const COMPACTION_HINT_HOURS: i64 = 2;
+pub const COMPACTION_HINT_OBS_COUNT: i64 = 100;
+
+/// V0.8: LLM-judge ambiguous similarity band — pairs with cosine_sim inside
+/// this window are escalated to the judge from `cuba_contradiccion scan_with_judge`.
+pub const JUEZ_AMBIGUOUS_LO: f64 = 0.6;
+pub const JUEZ_AMBIGUOUS_HI: f64 = 0.8;
+pub const JUEZ_DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub const JUEZ_DEFAULT_MAX_PAIRS: usize = 5;
+
 /// Relation types.
 pub const VALID_RELATION_TYPES: &[&str] =
     &["uses", "causes", "implements", "depends_on", "related_to"];
@@ -125,7 +142,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_faro",
-            "Search memory BEFORE answering to ground responses. Returns grounding scores. Mode 'verify' checks claims against evidence (confidence: verified/partial/weak/unknown). Session-aware: boosts results matching active session goals. Supports temporal filtering.",
+            "Search memory BEFORE answering to ground responses. Returns grounding scores. Mode 'verify' checks claims against evidence (confidence: verified/partial/weak/unknown). Session-aware: boosts results matching active session goals. Supports temporal filtering. v0.9: optional MMR diversification + OOD abstention + exact tiktoken-based budget.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -137,7 +154,13 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"},
                     "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format: verbose (default, full data) or compact (abbreviated keys, ~35% fewer tokens)"},
                     "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"},
-                    "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Results are truncated to fit."}
+                    "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Counted exactly via tiktoken cl100k_base."},
+                    "diversify": {"type": "boolean", "description": "v0.9: post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},
+                    "mmr_lambda": {"type": "number", "description": "v0.9: MMR balance — 1.0 pure relevance, 0.0 pure diversity. Default 0.7."},
+                    "abstain_ood": {"type": "boolean", "description": "v0.9: abstain (return empty results with abstain_reason) when query is out-of-distribution via Mahalanobis distance. Default false."},
+                    "ood_threshold": {"type": "number", "description": "v0.9: Mahalanobis distance threshold for abstention (default 5.0)."},
+                    "enable_bm25": {"type": "boolean", "description": "v0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector. Catches queries with rare terms that dense embeddings miss. Default true."},
+                    "rerank": {"type": "boolean", "description": "v0.9.2: cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3 (Xiao 2023). Auto-enabled when CUBA_RERANKER_PATH points to a valid ONNX. Identity fallback otherwise."}
                 },
                 "required": ["query"]
             }),
@@ -216,13 +239,14 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_jornada",
-            "Track working sessions with goals and outcomes.",
+            "Track working sessions with goals and outcomes. v0.8: optional 'project' arg binds the session to a named project (upserts in brain_projects); subsequent handlers will scope reads/writes to that project.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["start", "end", "list", "current"], "description": "Session action"},
                     "name": {"type": "string", "description": "Session name (for start)"},
                     "goals": {"type": "array", "items": {"type": "string"}, "description": "Session goals (for start)"},
+                    "project": {"type": "string", "description": "v0.8: project name to bind this session to (created on first use). Omit to keep session global."},
                     "outcome": {"type": "string", "enum": ["success", "partial", "failed", "abandoned"], "description": "Session outcome (for end)"},
                     "summary": {"type": "string", "description": "What was accomplished (for end)"}
                 },
@@ -248,11 +272,11 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_vigia",
-            "Knowledge graph analytics: summary (counts + token estimate), health (staleness, entropy, DB size), drift (chi-squared on errors), communities (Leiden), bridges (betweenness centrality).",
+            "Knowledge graph analytics: summary (counts + token estimate), health (staleness, entropy, DB size), drift (chi-squared on errors), communities (Leiden), bridges (betweenness centrality). v0.9: 'structural' returns harmonic + closeness + k-core ranking for backbone identification.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "metric": {"type": "string", "enum": ["summary", "health", "drift", "communities", "bridges"], "description": "Metric to compute"}
+                    "metric": {"type": "string", "enum": ["summary", "health", "drift", "communities", "bridges", "structural"], "description": "Metric to compute. v0.9: 'structural' adds harmonic + closeness centrality (Boldi-Vigna 2014, Bavelas 1950) + k-core decomposition (Seidman 1983)."}
                 },
                 "required": ["metric"]
             }),
@@ -344,11 +368,11 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_calibrar",
-            "Bayesian confidence calibration: track verify predictions, mark outcomes, compute P(correct|level). Closes the feedback loop between faro verify and eco correct.",
+            "Bayesian confidence calibration: track verify predictions, mark outcomes, compute P(correct|level). Closes the feedback loop between faro verify and eco correct. v0.9: action 'trust' returns per-source credibility (Beta posterior updated by resolve outcomes; Yin-Han-Yu IEEE TKDE 2008).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["stats", "history", "resolve"], "description": "Calibration action"},
+                    "action": {"type": "string", "enum": ["stats", "history", "resolve", "trust", "metrics"], "description": "Calibration action. v0.9: 'trust' returns per-source Beta(α, β) credibility; 'metrics' returns Brier score (1950) + Expected Calibration Error (Naeini AAAI 2015) + reliability diagram."},
                     "verify_id": {"type": "string", "description": "Verify log UUID (for resolve)"},
                     "outcome": {"type": "string", "enum": ["correct", "incorrect"], "description": "Whether the verify prediction was right (for resolve)"},
                     "limit": {"type": "integer", "description": "Max results for history (default 20)"}
@@ -366,6 +390,88 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "items": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?} objects (for ingest action, max 200)"},
                     "entity_name": {"type": "string", "description": "Entity to attach parsed observations to (for parse action)"},
                     "text": {"type": "string", "description": "Long text to split into observations (for parse action)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_proyecto",
+            "Project scoping (v0.8): isolate memories per project so multiple projects sharing one DB don't bleed into each other. Active project is bound to the current session (cuba_jornada start --project NAME). Legacy rows with NULL project_id remain visible from every scope.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "current", "switch", "stats", "rename", "merge"], "description": "Project action"},
+                    "name": {"type": "string", "description": "Project name (for switch/stats/rename source)"},
+                    "to": {"type": "string", "description": "Destination name (for rename/merge)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_pre_compact",
+            "Compaction-survival protocol (v0.8). Before the agent runs /compact, call action='snapshot' to persist a dense markdown summary of the active session (recent observations, decisions, unresolved errors, pending embeddings, goals). After compaction, call action='restore' to retrieve the latest snapshot for the active session and re-inject it into context.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["snapshot", "restore"], "description": "snapshot persists a session summary; restore returns the latest"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_sync",
+            "Git-friendly export/import of the knowledge graph (v0.8). action='export' writes one JSON file per entity (with embedded observations) plus episodes/decisions/errors/relations under CUBA_SYNC_DIR (default ./.cuba-memorys/). 'import' merges files back via INSERT...ON CONFLICT DO NOTHING (idempotent). 'diff' compares disk vs DB. 'status' lists not-yet-imported manifests. Embeddings are omitted by default (set with_embeddings=true to include the binary blob).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["export", "import", "diff", "status"], "description": "Sync mode"},
+                    "dir": {"type": "string", "description": "Directory override (default $CUBA_SYNC_DIR or ./.cuba-memorys/)"},
+                    "scope": {"type": "string", "enum": ["project", "all"], "description": "Export scope: only the active project (default) or all data"},
+                    "with_embeddings": {"type": "boolean", "description": "Include the embeddings.bin.zst blob on export (default false)"},
+                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "Import conflict policy (default merge)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_archivo",
+            "Tamper-evident audit log (v0.9, CFR-21 Part 11 inspired). Append-only with SHA-256 hash chain — every row's current_hash commits to the previous row's, the action and the canonical payload. UPDATE/DELETE blocked at the PostgreSQL trigger level (only `cuba_admin` role can bypass). Use 'verify' to walk the chain and detect tampering, 'tail' to read recent events, 'append' to add a new event.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["append", "verify", "tail"], "description": "Audit operation"},
+                    "event_action": {"type": "string", "description": "Event type (for append)"},
+                    "payload": {"type": "object", "description": "Arbitrary JSON payload (for append)"},
+                    "limit": {"type": "integer", "description": "Limit for verify/tail (default 10000 / 20)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_pizarra",
+            "Working memory buffer (v0.9, Baddeley 1992): a TTL-bounded scratchpad orthogonal to episodic and semantic memory. Use for inter-step plan state during long-horizon agent tasks, tentative observations, cross-tool-call reminders inside one session. Auto-expire by ttl_seconds; bulk-purged by cuba_zafra REM cycle.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["write", "read", "clear"], "description": "Working-memory operation"},
+                    "content": {"type": "string", "description": "Content to store (for write)"},
+                    "tag": {"type": "string", "description": "Optional tag for filtering on read/clear"},
+                    "ttl_seconds": {"type": "integer", "description": "Time-to-live in seconds (default 3600)"}
+                },
+                "required": ["action"]
+            }),
+        ),
+        tool_def(
+            "cuba_juez",
+            "LLM-judge for semantically-conflicting observations (v0.8). When cosine similarity sits in the ambiguous band (0.6-0.8), heuristic detectors miss vocabulary-different conflicts (e.g. 'Postgres' vs 'MongoDB'). cuba_juez escalates a pair to a real LLM via subprocess (Claude Code CLI, $0 if you have a subscription) or — when feature 'anthropic-api' is built in — the Anthropic API directly. Verdicts are persisted in brain_judgments (UNIQUE per pair = permanent cache).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["judge_pair", "scan_entity"], "description": "judge_pair = decide on two given obs ids; scan_entity = pull ambiguous pairs and judge each"},
+                    "observation_a": {"type": "string", "description": "UUID of first observation (for judge_pair)"},
+                    "observation_b": {"type": "string", "description": "UUID of second observation (for judge_pair)"},
+                    "entity_name": {"type": "string", "description": "Entity to scan (for scan_entity)"},
+                    "max_pairs": {"type": "integer", "description": "Max pairs to escalate per call (default 5; controls LLM cost)"}
                 },
                 "required": ["action"]
             }),

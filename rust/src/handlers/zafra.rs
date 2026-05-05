@@ -17,13 +17,21 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             // V4: Stratified exponential decay — different halflife per observation_type.
             // fact/preference: 30d  |  error/solution: 14d  |  context/tool_usage: 7d
             // decision/lesson: ∞ (never decay — protected by WHERE clause).
+            //
+            // V0.9: Testing effect (Karpicke-Roediger Science 2008) — frequently
+            // accessed observations decay slower:
+            //   effective_halflife = base_halflife · (1 + ln(1 + access_count))
+            // An observation accessed 50× has ≈4× longer effective halflife than
+            // one accessed 0×. Implements retrieval-induced consolidation.
+            //
             // Override with halflife_days to apply a global halflife (backward compat).
             let global_override = args.get("halflife_days").and_then(|v| v.as_f64());
             let result = if let Some(halflife) = global_override {
                 sqlx::query(
                     "UPDATE brain_observations SET
                         importance = GREATEST(
-                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 / $1),
+                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0
+                                / ($1 * (1.0 + LN(1.0 + access_count::float8)))),
                             0.01
                         ),
                         updated_at = NOW()
@@ -38,7 +46,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                     "UPDATE brain_observations SET
                         importance = GREATEST(
                             importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 /
-                                CASE observation_type
+                                ((CASE observation_type
                                     WHEN 'fact'       THEN 30.0
                                     WHEN 'preference' THEN 30.0
                                     WHEN 'error'      THEN 14.0
@@ -46,7 +54,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                                     WHEN 'context'    THEN  7.0
                                     WHEN 'tool_usage' THEN  7.0
                                     ELSE 30.0
-                                END
+                                END) * (1.0 + LN(1.0 + access_count::float8)))
                             ),
                             0.01
                         ),
@@ -61,12 +69,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 "action": "decay",
                 "decayed": result.rows_affected(),
                 "stratification": {
-                    "fact/preference": "30d halflife",
-                    "error/solution": "14d halflife",
-                    "context/tool_usage": "7d halflife",
+                    "fact/preference": "30d base halflife",
+                    "error/solution": "14d base halflife",
+                    "context/tool_usage": "7d base halflife",
                     "decision/lesson": "never decay"
                 },
-                "formula": "importance * EXP(-0.693 * days / halflife)"
+                "formula": "importance * EXP(-0.693 * days / (base_halflife * (1 + ln(1 + access_count))))",
+                "testing_effect": "Karpicke-Roediger 2008 — high-access obs decay slower"
             }))
         }
         "prune" => {
@@ -260,7 +269,17 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             let total = obs.len();
             let mut updated = 0u32;
 
-            for (obs_id, content) in obs {
+            // V0.9.2: progress notifications. Token derived from action +
+            // batch size — clients use it to correlate intermediate progress
+            // with the final tools/call response.
+            let progress_token = args
+                .get("_meta")
+                .and_then(|m| m.get("progressToken"))
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| format!("zafra_reembed_{}", batch_size));
+            let progress_step = (total / 20).max(1); // ~5% increments
+
+            for (i, (obs_id, content)) in obs.into_iter().enumerate() {
                 match crate::embeddings::onnx::embed_passage(&content).await {
                     Ok(emb) => {
                         if sqlx::query(
@@ -279,6 +298,14 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                     Err(e) => {
                         tracing::warn!(obs_id = %obs_id, error = %e, "reembed: ONNX failed for observation");
                     }
+                }
+                if total > 50 && (i + 1) % progress_step == 0 {
+                    crate::protocol::notify_progress(
+                        &progress_token,
+                        (i + 1) as f64,
+                        Some(total as f64),
+                        Some(&format!("re-embedded {}/{}", i + 1, total)),
+                    );
                 }
             }
 

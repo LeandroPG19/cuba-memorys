@@ -13,10 +13,17 @@
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, neuroscience-inspired algorithms, and anti-hallucination grounding.
 
-19 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
+23 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v0.7.0** — 10 algorithmic improvements + 19 bug fixes + comprehensive audit. PageRank blend (preserves Hebbian/BCM learned importance), hybrid verify (trigram + embedding fusion), ONNX concurrency semaphore (Little's Law), sigmoid entropy routing (replaces step function), word-level session boost, weighted Hebbian neighbor diffusion, exponential coverage saturation, O(n) entropy counting. Fixed: hash embeddings corrupting DB, centrality normalization, cache LRU, jornada race condition, 6 MCP schemas. Removed blake3 dependency. 68 tests, 0 clippy warnings, 0 tech debt.
+> **v0.9.0** — Search & Retrieval upgrades + Cognitive layer refinements + sqlx-migrate foundation. Zero breaking changes.
+> **`cuba_faro`** ahora hace fusión RRF 3-way (text + vector + **BM25 ts_rank_cd**, Robertson-Walker 1994), con **MMR diversification** opcional (Carbonell-Goldstein 1998, λ=0.7), **OOD abstention** vía Mahalanobis con ridge-regularized Σ⁻¹ (Lee NeurIPS 2018), `hnsw.ef_search=200` dinámico en `verify` (recall@10≈0.99), y conteo exacto de tokens vía **tiktoken-rs cl100k_base** (reemplaza la heurística "len/4" que mis-contaba español 30%).
+> **Cognitive**: `cuba_zafra decay` con **testing effect** (Karpicke-Roediger Science 2008) — halflife escalado por `(1 + ln(1+access_count))`. **Hebbian Δt-aware** (anti-saturación de bursts, τ=600s, inspirado en STDP triplet). **Robbins-Monro stochastic LR** en Oja positive/negative (`η = 0.05/√(1+access/100)`). **Conformal prediction** empírica reemplaza z-score gaussiano en PE gating (Vovk 2005, Angelopoulos-Bates 2023) — distribution-free, captura anisotropía documentada por Ethayarajh EMNLP 2019. **Source credibility tracking** Beta(α,β) Bayesian update por outcome (Yin-Han-Yu IEEE TKDE 2008), nueva action `cuba_calibrar trust`.
+> **Foundation**: migraciones SQL versionadas via `sqlx-migrate` (14 archivos, idempotente, bootstrap transparente). 23 tools, 97 tests, 0 clippy warnings, 0 tech debt.
+
+> [!IMPORTANT]
+> **v0.8.0** — 4 new tools inspired by Engram Cloud + zero-regression refactor.
+> **`cuba_proyecto`** isolates memories per project (column `project_id` on 6 tables, NULL = global = backward compat). **`cuba_pre_compact`** persists a markdown summary of the active session before `/compact` and restores it post-compact. **`cuba_sync`** writes a git-friendly export (1 JSON per entity, monthly-partitioned episodes, optional zstd embeddings blob) and re-imports it idempotently. **`cuba_juez`** escalates ambiguous-similarity (0.6-0.8) observation pairs to an LLM judge — defaults to a subprocess call against the user's installed `claude` CLI ($0 with a Pro/Max subscription); also supports the Anthropic API behind the `anthropic-api` Cargo feature, with a heuristic fallback when neither is available. Verdicts cached permanently in `brain_judgments`. All 19 v0.7 tools were audited for project scoping (≈30 SQL queries patched). 75 tests passing, 0 clippy warnings, 0 tech debt.
 
 ## Demo
 
@@ -37,11 +44,24 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 - **Anti-hallucination grounding** — Verify claims with graduated confidence + Bayesian calibration over time
 - **Episodic memory** — Separate temporal events (Tulving 1972) with power-law decay I(t) = I₀/(1+ct)^β (Wixted 2004)
 - **Contradiction detection** — Scan for semantic conflicts via embedding cosine + bilingual negation heuristics
+- **LLM-judge for ambiguous contradictions** *(v0.8)* — Escalate cosine 0.6-0.8 pairs to Claude Code CLI subprocess (`$0` with subscription) or Anthropic API (feature flag). Verdicts cached permanently
 - **Prospective memory** — Triggers that fire on entity access, session start, or error match ("remind me when X")
 - **Contextual Retrieval** — Entity context prepended before embedding (Anthropic technique, +20% recall)
 - **REM Sleep consolidation** — Autonomous stratified decay + PageRank + auto-prune + auto-merge + episode decay
 - **Graph intelligence** — PageRank, Leiden communities, Brandes centrality, Shannon entropy, gap detection
 - **Session awareness** — Provenance tracking, session diff, importance priors per observation type
+- **Project scoping** *(v0.8)* — Isolate memories per project (`cuba_jornada start --project NAME`); legacy NULL rows stay globally visible (zero-regression upgrade path)
+- **Compaction-survival snapshots** *(v0.8)* — `cuba_pre_compact snapshot` persists session state before `/compact`; `restore` re-injects post-compact
+- **Git-friendly sync** *(v0.8)* — `cuba_sync export` writes 1 JSON per entity (diff-able in PR review), `import` is idempotent via `ON CONFLICT DO NOTHING`, optional zstd embeddings blob
+- **BM25 hybrid 3-way fusion** *(v0.9)* — text + vector + BM25 (`ts_rank_cd`) en una sola RRF (Robertson-Walker 1994 baseline), captura queries con términos raros que dense embeddings pierden
+- **MMR diversification** *(v0.9)* — `cuba_faro diversify=true` aplica Carbonell-Goldstein 1998 con Jaccard sim entre candidatos, evita top-K redundantes
+- **OOD abstention** *(v0.9)* — `cuba_faro abstain_ood=true` con Mahalanobis ridge-regularized Σ⁻¹ (Lee NeurIPS 2018), retorna abstención formal en lugar de matches espurios
+- **Conformal prediction** *(v0.9)* — quantiles empíricos sin asumir normalidad (Vovk 2005, Angelopoulos-Bates 2023); captura anisotropía cosine documentada por Ethayarajh 2019
+- **Testing effect decay** *(v0.9)* — halflife escalado por `(1 + ln(1+access_count))` (Karpicke-Roediger Science 2008); high-access obs decae 4-5× más lento
+- **Hebbian Δt-aware** *(v0.9)* — burst suppression `boost *= (1 - exp(-Δt/τ))`, τ=600s; anti-saturación inspirada en STDP triplet rules (Pfister-Gerstner 2006)
+- **Robbins-Monro stochastic LR** *(v0.9)* — `η = 0.05/√(1 + access_count/100)` en Oja's rule, convergencia O(1/√t)
+- **Source credibility tracking** *(v0.9)* — Beta(α,β) Bayesian update per source en `brain_source_trust` (Yin-Han-Yu IEEE TKDE 2008), action `cuba_calibrar trust`
+- **sqlx-migrate** *(v0.9)* — 14 migraciones SQL versionadas en `rust/migrations/`, bootstrap transparente para DBs legacy v0.7/v0.8
 - **Error memory** — Never repeat the same mistake (anti-repetition guard + pattern detection)
 
 ### Comparison
@@ -76,6 +96,20 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 | Contradiction auto-supersede | Yes | No |
 | GDPR Right to Erasure | Yes | No |
 | Graceful shutdown (SIGTERM/SIGINT) | Yes | No |
+| Project scoping (per-project isolation) *(v0.8)* | Yes | No |
+| Compaction-survival snapshots *(v0.8)* | Yes | No |
+| Git-friendly export/import *(v0.8)* | Yes | No |
+| LLM-judge for ambiguous contradictions *(v0.8)* | Yes | No |
+| BM25 + vector + text 3-way RRF *(v0.9)* | Yes | No |
+| MMR diversification *(v0.9)* | Yes | No |
+| OOD abstention via Mahalanobis *(v0.9)* | Yes | No |
+| Conformal prediction (distribution-free) *(v0.9)* | Yes | No |
+| Testing-effect decay *(v0.9)* | Yes | No |
+| Hebbian Δt-aware burst suppression *(v0.9)* | Yes | No |
+| Robbins-Monro stochastic LR *(v0.9)* | Yes | No |
+| Source credibility tracking Beta(α,β) *(v0.9)* | Yes | No |
+| sqlx-migrate versioned migrations *(v0.9)* | Yes | No |
+| Exact tiktoken token budget *(v0.9)* | Yes | No |
 
 ---
 
@@ -185,7 +219,7 @@ Without ONNX, the server uses deterministic hash-based embeddings — functional
 
 ---
 
-## The 19 Tools
+## The 23 Tools
 
 Every tool is named after Cuban culture — memorable, professional, meaningful.
 
@@ -237,6 +271,28 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 | `cuba_eco` | **Eco** — echo | RLHF feedback: positive (Oja boost), negative (decrease), correct (update with versioning). |
 | `cuba_vigia` | **Vigia** — watchman | Analytics: summary, **enhanced health** (null embeddings, active triggers, table sizes, embedding model), drift (chi-squared), Leiden communities, Brandes bridges. |
 | `cuba_forget` | **Forget** — forget | GDPR Right to Erasure: cascading hard-delete of entity and ALL references (observations, episodes, relations, errors, sessions). Irreversible. |
+
+### v0.8 — Engram-inspired additions
+
+| Tool | Meaning | What it does |
+|------|---------|-------------|
+| `cuba_proyecto` | **Proyecto** — project | Per-project isolation. `switch` upserts a project and binds it to the active session; reads/writes auto-scope via `project_id`. Legacy NULL rows stay globally visible. Actions: `list / current / switch / stats / rename / merge`. |
+| `cuba_pre_compact` | **Pre-compact** | Survives `/compact`. `snapshot` persists session state (recent obs, decisions, unresolved errors, pending embeddings, goals) into `brain_compaction_snapshots`. `restore` returns the latest snapshot for the active session. |
+| `cuba_sync` | **Sync** | Git-friendly export/import. Writes 1 JSON per entity + monthly-partitioned episodes + decisions + relations.json + manifest.json (sha hash). `import` is idempotent via `ON CONFLICT DO NOTHING`. Optional `embeddings.bin.zst` blob (off by default — re-embed on import). |
+| `cuba_juez` | **Juez** — judge | LLM-judge for ambiguous (cosine 0.6-0.8) contradictions. Trait `ContradictionJudge` with three backends: `ClaudeCodeJudge` (subprocess, $0 with subscription), `AnthropicApiJudge` (feature `anthropic-api`), `HeuristicJudge` (fallback). Verdicts cached in `brain_judgments` (UNIQUE per pair). |
+
+### v0.8 environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CUBA_PROJECT_FILTER` | _(unset)_ | Set to `off` to disable project scoping (admin/debug). |
+| `CUBA_SYNC_DIR` | `./.cuba-memorys` | Root for `cuba_sync` export/import. |
+| `CUBA_JUDGE` | `auto` | Judge backend: `claude_cli` / `anthropic_api` / `heuristic` / `auto`. |
+| `CUBA_JUEZ_CLI` | `claude` | Subprocess CLI for `ClaudeCodeJudge`. |
+| `CUBA_JUEZ_MODEL` | `claude-haiku-4-5` | Model passed to the judge backend. |
+| `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Subprocess/HTTP timeout. |
+| `CUBA_JUEZ_MAX_PAIRS` | `5` | Cap on pairs `cuba_juez scan_entity` will escalate per call. |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Required for `AnthropicApiJudge` (only when feature `anthropic-api` is built in). |
 
 ---
 
@@ -477,6 +533,8 @@ Active access resets the clock — frequently used memories stay strong.
 
 | Version | Key Changes |
 |---------|-------------|
+| **0.9.0** | Search & Retrieval upgrades + Cognitive layer refinements + sqlx-migrate foundation. **PR #5**: 14 migraciones versionadas en `rust/migrations/`, bootstrap transparente para DBs v0.7/v0.8. **PR #6**: BM25 ts_rank_cd 3-way RRF (Robertson-Walker 1994), MMR diversification con Jaccard sim (Carbonell-Goldstein 1998), OOD Mahalanobis con ridge regularization (Lee NeurIPS 2018), tiktoken-rs cl100k_base exact counting, `hnsw.ef_search=200` dinámico en verify (recall@10≈0.99). **PR #7**: conformal prediction empírica reemplaza z-score gaussiano (Vovk 2005, Angelopoulos-Bates 2023), testing effect Karpicke-Roediger 2008 en zafra decay, Hebbian Δt-aware burst suppression τ=600s (anti-saturación STDP-light), Robbins-Monro stochastic LR en Oja `η=0.05/√(1+access/100)`, source credibility tracking Beta(α,β) Bayesian Yin-Han-Yu IEEE TKDE 2008 con nueva action `cuba_calibrar trust`. Nuevas deps: `tiktoken-rs 0.7`, `nalgebra 0.33` (no LAPACK), sqlx feature `migrate`, `async-trait 0.1`. 23 tools, 97 tests (+22 nuevos), 0 clippy, 0 tech debt, 0 breaking changes. |
+| **0.8.0** | 4 new tools inspired by Engram Cloud + zero-regression refactor of all v0.7 readers/writers. **`cuba_proyecto`** — per-project isolation via `project_id` UUID FK on 6 tables (NULL = global = back-compat). **`cuba_pre_compact`** — snapshot/restore session state across `/compact`. **`cuba_sync`** — git-friendly export (1 JSON per entity + monthly-partitioned episodes + manifest with content-derived hash) and idempotent import. **`cuba_juez`** — LLM-judge for ambiguous (cosine 0.6-0.8) contradictions via subprocess to `claude` CLI ($0 with subscription) or Anthropic API behind feature `anthropic-api`, with heuristic fallback. Verdicts cached permanently. 4 new idempotent migrations (project scoping, compaction snapshots, sync state, judgments). All 19 v0.7 handlers audited (~30 SQL queries patched with `($N::uuid IS NULL OR project_id = $N OR project_id IS NULL)` pattern). New deps: `zstd 0.13`, `async-trait 0.1`, optional `reqwest 0.12`. 75 tests, 0 clippy, 0 tech debt. |
 | **0.7.0** | 10 algorithmic improvements: PageRank blend (α=0.3, preserves Hebbian/BCM), hybrid verify (trigram+embedding fusion), ONNX semaphore (Little's Law), sigmoid entropy routing (Jaynes MaxEnt), word-level session boost, weighted Hebbian neighbors (Collins & Loftus), exponential coverage saturation, O(n) entropy. 19 bug fixes: hash embeddings corrupting DB (×5), centrality /2, cache LRU, jornada TOCTOU, alarma self-match, 6 schema mismatches. Removed blake3 dependency. MCP Registry publish fixed. npm postinstall version sync. 68 tests, 0 clippy, 0 tech debt. |
 | **0.6.0** | Contextual Retrieval (+20% recall), importance priors, score breakdown, compact format (~35% fewer tokens), session provenance/diff, semantic dedup, auto-tagging (TF-IDF), Adamic-Adar link prediction, bulk ingest (cuba_ingesta), enhanced health metrics, partial indexes, embedding model versioning. Auto Docker PostgreSQL setup. 19 tools, 56 tests. |
 | **0.5.0** | Temporal reasoning (before/after/timeline), contradiction detection (cosine + negation heuristics), prospective memory triggers (centinela), Bayesian calibration (calibrar), abductive inference (hipotesis), gap detection (reflexion). 18 tools. |

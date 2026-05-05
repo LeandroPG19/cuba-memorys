@@ -1,8 +1,8 @@
 {
   "name": "cuba-memorys",
-  "version": "0.7.0",
+  "version": "0.9.3",
   "mcpName": "io.github.LeandroPG19/cuba-memorys",
-  "description": "Persistent memory for AI agents — knowledge graph MCP server with 19 tools: Hebbian learning, RRF fusion, episodic memory, contradiction detection, prospective triggers, Bayesian calibration, link prediction. PostgreSQL, sub-millisecond.",
+  "description": "Persistent memory for AI agents — knowledge graph MCP server with 23 tools: sqlx-migrate, BM25 hybrid + MMR + OOD abstention + tiktoken budget, conformal prediction, testing-effect decay (Karpicke-Roediger 2008), Hebbian Δt-aware, Robbins-Monro Oja, source credibility tracking. Plus v0.8 features (project scoping, compaction snapshots, git-friendly sync, LLM-judge), Hebbian learning, RRF fusion, episodic memory, prospective triggers, Bayesian calibration, link prediction. PostgreSQL + pgvector, sub-millisecond.",
   "license": "CC-BY-NC-4.0",
   "author": "Leandro Pérez G.",
   "repository": {

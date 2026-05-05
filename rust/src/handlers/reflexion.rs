@@ -25,12 +25,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 async fn analyze(pool: &PgPool) -> Result<Value> {
+    // V0.8: resolve project once and pass to each scan
+    let project_id = crate::project::current_project_id(pool).await?;
+
     let (isolated, underconnected, type_silos, obs_gaps, density_anomalies) = tokio::try_join!(
-        find_isolated(pool),
-        find_underconnected(pool),
-        find_type_silos(pool),
-        find_observation_gaps(pool),
-        find_density_anomalies(pool),
+        find_isolated(pool, project_id),
+        find_underconnected(pool, project_id),
+        find_type_silos(pool, project_id),
+        find_observation_gaps(pool, project_id),
+        find_density_anomalies(pool, project_id),
     )?;
 
     // Build human-readable recommendations
@@ -106,28 +109,37 @@ async fn analyze(pool: &PgPool) -> Result<Value> {
 }
 
 /// 1. Entities with no relations at all.
-async fn find_isolated(pool: &PgPool) -> Result<Vec<(String, String)>> {
+async fn find_isolated(
+    pool: &PgPool,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Vec<(String, String)>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT e.name, e.entity_type
          FROM brain_entities e
          LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
          WHERE r.id IS NULL
+           AND ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL)
          ORDER BY e.importance DESC
          LIMIT 20",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
 }
 
 /// 2. High-importance entities with fewer than 3 relations (knowledge islands).
-async fn find_underconnected(pool: &PgPool) -> Result<Vec<(String, f64, i64)>> {
+async fn find_underconnected(
+    pool: &PgPool,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Vec<(String, f64, i64)>> {
     let rows: Vec<(String, f64, i64)> = sqlx::query_as(
         "WITH entity_degree AS (
             SELECT e.id, e.name, e.importance::float8,
                    COUNT(r.id) AS degree
             FROM brain_entities e
             LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
+            WHERE ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL)
             GROUP BY e.id, e.name, e.importance
         )
         SELECT name, importance, degree
@@ -136,28 +148,39 @@ async fn find_underconnected(pool: &PgPool) -> Result<Vec<(String, f64, i64)>> {
         ORDER BY importance DESC
         LIMIT 10",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
 }
 
 /// 3. Pairs of entity types with no cross-connections (silos).
-async fn find_type_silos(pool: &PgPool) -> Result<Vec<(String, String)>> {
-    // Get all entity types present
-    let types: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT entity_type FROM brain_entities ORDER BY entity_type")
-            .fetch_all(pool)
-            .await?;
+async fn find_type_silos(
+    pool: &PgPool,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Vec<(String, String)>> {
+    // Get all entity types present (project-scoped)
+    let types: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT entity_type FROM brain_entities
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         ORDER BY entity_type",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
 
-    // Get all connected type pairs
+    // Get all connected type pairs (project-scoped on both entities)
     let connected: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT LEAST(e1.entity_type, e2.entity_type),
                          GREATEST(e1.entity_type, e2.entity_type)
          FROM brain_relations r
          JOIN brain_entities e1 ON r.from_entity = e1.id
          JOIN brain_entities e2 ON r.to_entity = e2.id
-         WHERE e1.entity_type != e2.entity_type",
+         WHERE e1.entity_type != e2.entity_type
+           AND ($1::uuid IS NULL OR e1.project_id = $1 OR e1.project_id IS NULL)
+           AND ($1::uuid IS NULL OR e2.project_id = $1 OR e2.project_id IS NULL)",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -178,7 +201,10 @@ async fn find_type_silos(pool: &PgPool) -> Result<Vec<(String, String)>> {
 }
 
 /// 4. Entities with many facts but no decisions or lessons recorded.
-async fn find_observation_gaps(pool: &PgPool) -> Result<Vec<(String, i64, i64, i64)>> {
+async fn find_observation_gaps(
+    pool: &PgPool,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Vec<(String, i64, i64, i64)>> {
     let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
         "SELECT e.name,
                 COUNT(*) FILTER (WHERE o.observation_type = 'fact') AS facts,
@@ -187,6 +213,7 @@ async fn find_observation_gaps(pool: &PgPool) -> Result<Vec<(String, i64, i64, i
          FROM brain_entities e
          JOIN brain_observations o ON e.id = o.entity_id
          WHERE o.observation_type != 'superseded'
+           AND ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL)
          GROUP BY e.id, e.name
          HAVING COUNT(*) FILTER (WHERE o.observation_type = 'fact') > 3
             AND (COUNT(*) FILTER (WHERE o.observation_type = 'decision') = 0
@@ -194,13 +221,17 @@ async fn find_observation_gaps(pool: &PgPool) -> Result<Vec<(String, i64, i64, i
          ORDER BY facts DESC
          LIMIT 10",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)
 }
 
 /// 5. Statistical outliers by observation/relation count (|z-score| > 2.0).
-async fn find_density_anomalies(pool: &PgPool) -> Result<Vec<(String, i64, i64, f64, f64)>> {
+async fn find_density_anomalies(
+    pool: &PgPool,
+    project_id: Option<uuid::Uuid>,
+) -> Result<Vec<(String, i64, i64, f64, f64)>> {
     let rows: Vec<(String, i64, i64, f64, f64)> = sqlx::query_as(
         "WITH stats AS (
             SELECT e.id, e.name,
@@ -210,6 +241,7 @@ async fn find_density_anomalies(pool: &PgPool) -> Result<Vec<(String, i64, i64, 
             LEFT JOIN brain_observations o ON e.id = o.entity_id
                 AND o.observation_type != 'superseded'
             LEFT JOIN brain_relations r ON e.id = r.from_entity OR e.id = r.to_entity
+            WHERE ($1::uuid IS NULL OR e.project_id = $1 OR e.project_id IS NULL)
             GROUP BY e.id, e.name
         ),
         global AS (
@@ -230,6 +262,7 @@ async fn find_density_anomalies(pool: &PgPool) -> Result<Vec<(String, i64, i64, 
         ORDER BY ABS(obs_zscore) + ABS(rel_zscore) DESC
         LIMIT 10",
     )
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
     Ok(rows)

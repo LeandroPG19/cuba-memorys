@@ -167,14 +167,14 @@ mod tests {
 
     #[test]
     fn test_pagerank_convergence_constants() {
-        assert!(DAMPING > 0.0 && DAMPING < 1.0);
-        assert!(ITERATIONS > 0);
-        assert!(CONVERGENCE_THRESHOLD > 0.0);
+        const _: () = assert!(DAMPING > 0.0 && DAMPING < 1.0);
+        const _: () = assert!(ITERATIONS > 0);
+        const _: () = assert!(CONVERGENCE_THRESHOLD > 0.0);
     }
 
     #[test]
     fn test_minmax_normalization() {
-        let ranks = vec![0.001, 0.005, 0.002, 0.010];
+        let ranks = [0.001, 0.005, 0.002, 0.010];
         let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let range = (max_r - min_r).max(1e-12);
@@ -205,7 +205,7 @@ mod tests {
     /// Verify the guard fires before the normalization step.
     #[test]
     fn test_uniform_ranks_trigger_early_return() {
-        let ranks = vec![0.25_f64; 4]; // 4-node perfectly balanced graph
+        let ranks = [0.25_f64; 4]; // 4-node perfectly balanced graph
         let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let range = max_r - min_r;
@@ -226,7 +226,7 @@ mod tests {
     /// Non-uniform ranks (realistic case) should NOT trigger early return.
     #[test]
     fn test_non_uniform_ranks_proceed_to_blend() {
-        let ranks = vec![0.01_f64, 0.05, 0.02, 0.10]; // star-like graph
+        let ranks = [0.01_f64, 0.05, 0.02, 0.10]; // star-like graph
         let min_r = ranks.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_r = ranks.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let range = max_r - min_r;

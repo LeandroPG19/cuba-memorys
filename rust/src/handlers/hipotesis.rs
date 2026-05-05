@@ -47,12 +47,20 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or(10)
         .min(50);
 
-    // Check effect entity exists
-    let effect_exists: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1 LIMIT 1")
-            .bind(effect)
-            .fetch_optional(pool)
-            .await?;
+    // V0.8: scope abductive search to current project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    // Check effect entity exists (within scope)
+    let effect_exists: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM brain_entities
+         WHERE name = $1
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)
+         LIMIT 1",
+    )
+    .bind(effect)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
 
     if effect_exists.is_none() {
         return Ok(serde_json::json!({
@@ -60,7 +68,7 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
             "effect": effect,
             "hypotheses": [],
             "count": 0,
-            "note": "Effect entity not found in knowledge graph"
+            "note": "Effect entity not found in knowledge graph (within current project scope)"
         }));
     }
 
@@ -68,6 +76,7 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
     // path_strength = product of relation strengths along the chain.
     // plausibility = path_strength × entity_importance (incorporates PageRank + Hebbian boosts).
     // Cycle prevention via path array.
+    // V0.8: $4 = project_id; both relations and target entities filtered by it.
     let rows: Vec<(String, String, f64, i64, f64, f64)> = sqlx::query_as(
         "WITH RECURSIVE causal_chain AS (
             -- Base: direct causes of the effect
@@ -81,6 +90,7 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
             JOIN brain_entities target ON r.to_entity = target.id
             WHERE target.name = $1
               AND r.relation_type IN ('causes', 'related_to', 'depends_on')
+              AND ($4::uuid IS NULL OR r.project_id = $4 OR r.project_id IS NULL)
 
             UNION ALL
 
@@ -96,6 +106,7 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
             WHERE cc.depth < $2
               AND r.relation_type IN ('causes', 'related_to', 'depends_on')
               AND NOT (r.from_entity = ANY(cc.path))
+              AND ($4::uuid IS NULL OR r.project_id = $4 OR r.project_id IS NULL)
         )
         SELECT
             e.name,
@@ -106,12 +117,14 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
             (cc.path_strength * e.importance)::float8 AS plausibility_score
         FROM causal_chain cc
         JOIN brain_entities e ON cc.current_node = e.id
+        WHERE ($4::uuid IS NULL OR e.project_id = $4 OR e.project_id IS NULL)
         ORDER BY plausibility_score DESC
         LIMIT $3",
     )
     .bind(effect)
     .bind(max_depth)
     .bind(limit)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 

@@ -21,7 +21,17 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Positive RLHF: Oja's rule — importance += η * (1 - importance).
+/// Positive RLHF: Oja's rule with V0.9 Robbins-Monro adaptive learning rate.
+///
+/// V0.9: η_t = η_0 / sqrt(1 + access_count/100) — Robbins-Monro 1951
+/// stochastic approximation. Convergence O(1/√t) instead of constant rate.
+/// As an observation accumulates feedback, the marginal effect of each
+/// additional Oja step shrinks → bounded importance volatility, no
+/// single noisy signal can radically swing a well-established memory.
+///
+/// At access_count=0: η = 0.05 (original behavior).
+/// At access_count=100: η ≈ 0.0354.
+/// At access_count=1000: η ≈ 0.0157.
 async fn positive(
     pool: &PgPool,
     entity_name: Option<&str>,
@@ -33,7 +43,10 @@ async fn positive(
         let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
         let result = sqlx::query(
             "UPDATE brain_observations SET
-                importance = LEAST(importance + 0.05 * (1.0 - importance), 1.0),
+                importance = LEAST(
+                    importance + (0.05 / SQRT(1.0 + access_count::float8 / 100.0)) * (1.0 - importance),
+                    1.0
+                ),
                 access_count = access_count + 1,
                 last_accessed = NOW()
              WHERE id = $1",
@@ -47,7 +60,10 @@ async fn positive(
     if let Some(name) = entity_name {
         let result = sqlx::query(
             "UPDATE brain_entities SET
-                importance = LEAST(importance + 0.05 * (1.0 - importance), 1.0),
+                importance = LEAST(
+                    importance + (0.05 / SQRT(1.0 + access_count::float8 / 100.0)) * (1.0 - importance),
+                    1.0
+                ),
                 access_count = access_count + 1,
                 updated_at = NOW()
              WHERE name = $1",
@@ -61,11 +77,11 @@ async fn positive(
     Ok(serde_json::json!({
         "action": "positive",
         "boosted_count": boosted,
-        "rule": "oja_positive"
+        "rule": "oja_positive_robbins_monro"
     }))
 }
 
-/// Negative RLHF: anti-Oja — importance -= η * importance.
+/// Negative RLHF: anti-Oja with V0.9 Robbins-Monro adaptive learning rate.
 async fn negative(
     pool: &PgPool,
     entity_name: Option<&str>,
@@ -77,7 +93,10 @@ async fn negative(
         let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
         let result = sqlx::query(
             "UPDATE brain_observations SET
-                importance = GREATEST(importance - 0.05 * importance, 0.0),
+                importance = GREATEST(
+                    importance - (0.05 / SQRT(1.0 + access_count::float8 / 100.0)) * importance,
+                    0.0
+                ),
                 last_accessed = NOW()
              WHERE id = $1",
         )
@@ -90,7 +109,10 @@ async fn negative(
     if let Some(name) = entity_name {
         let result = sqlx::query(
             "UPDATE brain_entities SET
-                importance = GREATEST(importance - 0.05 * importance, 0.0),
+                importance = GREATEST(
+                    importance - (0.05 / SQRT(1.0 + access_count::float8 / 100.0)) * importance,
+                    0.0
+                ),
                 updated_at = NOW()
              WHERE name = $1",
         )
@@ -103,7 +125,7 @@ async fn negative(
     Ok(serde_json::json!({
         "action": "negative",
         "decreased_count": decreased,
-        "rule": "oja_negative"
+        "rule": "oja_negative_robbins_monro"
     }))
 }
 
@@ -143,4 +165,55 @@ async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> R
         "new_content": correction,
         "versioned": true
     }))
+}
+
+/// V0.8: Internal reflection helper used by `cuba_pre_compact` to build a
+/// session-scoped summary before context compaction. Returns dense markdown
+/// (~500 tokens) summarizing observations created in the given session.
+///
+/// Pure aggregation — does not modify state. Caller is responsible for
+/// persisting it (typically into `brain_compaction_snapshots`).
+pub async fn reflect(pool: &PgPool, session_id: uuid::Uuid) -> Result<String> {
+    type Row = (String, i64);
+    let by_type: Vec<Row> = sqlx::query_as(
+        "SELECT observation_type, COUNT(*) FROM brain_observations
+         WHERE session_id = $1
+         GROUP BY observation_type
+         ORDER BY COUNT(*) DESC",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let recent: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT e.name, o.observation_type, o.content
+         FROM brain_observations o
+         JOIN brain_entities e ON o.entity_id = e.id
+         WHERE o.session_id = $1 AND o.observation_type != 'superseded'
+         ORDER BY o.created_at DESC
+         LIMIT 12",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut md = String::with_capacity(2048);
+    md.push_str("# Session reflection\n\n");
+    if !by_type.is_empty() {
+        md.push_str("## Counts by type\n");
+        for (t, n) in &by_type {
+            md.push_str(&format!("- {t}: {n}\n"));
+        }
+        md.push('\n');
+    }
+    if !recent.is_empty() {
+        md.push_str("## Recent observations (newest first)\n");
+        for (entity, ty, content) in &recent {
+            let snippet = crate::handlers::zafra::safe_truncate(content, 160);
+            md.push_str(&format!("- [{ty}] {entity}: {snippet}\n"));
+        }
+    }
+    Ok(md)
 }

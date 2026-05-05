@@ -24,6 +24,11 @@ async fn main() {
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
 
+    // V0.9: optional Prometheus /metrics endpoint (no-op without `observability` feature).
+    if let Err(e) = cuba_memorys::observability::init() {
+        tracing::warn!(error = %e, "observability init failed — continuing without /metrics");
+    }
+
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();

@@ -49,47 +49,29 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("query is required");
     }
 
+    // V0.8: project_id FK is the canonical scoping primitive (filtered always).
+    // The legacy `project` TEXT column is still honored when explicitly passed
+    // (back-compat with v0.7 callers that filter by project_name string).
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // FIX A-001: Parameterized query builder — eliminates CWE-89 SQL injection.
     // All user-supplied values use $N bind parameters instead of format!().
-    let errors = if let Some(proj) = project {
-        if resolved_only {
-            sqlx::query_as::<_, ErrorRow>(
-                "SELECT id, error_type, error_message, solution, resolved, project,
-                        similarity(error_message, $1)::float8 AS sim
-                 FROM brain_errors
-                 WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
-                   AND resolved = true
-                   AND project = $2
-                 ORDER BY sim DESC LIMIT 20"
-            )
-            .bind(query)
-            .bind(proj)
-            .fetch_all(pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, ErrorRow>(
-                "SELECT id, error_type, error_message, solution, resolved, project,
-                        similarity(error_message, $1)::float8 AS sim
-                 FROM brain_errors
-                 WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
-                   AND project = $2
-                 ORDER BY sim DESC LIMIT 20"
-            )
-            .bind(query)
-            .bind(proj)
-            .fetch_all(pool)
-            .await?
-        }
-    } else if resolved_only {
+    // V0.8: $3 = legacy project text filter (NULL = no filter on text column),
+    //       $4 = current project_id FK (NULL = no scoping).
+    let errors = if resolved_only {
         sqlx::query_as::<_, ErrorRow>(
             "SELECT id, error_type, error_message, solution, resolved, project,
                     similarity(error_message, $1)::float8 AS sim
              FROM brain_errors
              WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
                AND resolved = true
-             ORDER BY sim DESC LIMIT 20"
+               AND ($2::text IS NULL OR project = $2)
+               AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
+             ORDER BY sim DESC LIMIT 20",
         )
         .bind(query)
+        .bind(project)
+        .bind(project_id)
         .fetch_all(pool)
         .await?
     } else {
@@ -98,9 +80,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                     similarity(error_message, $1)::float8 AS sim
              FROM brain_errors
              WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
-             ORDER BY sim DESC LIMIT 20"
+               AND ($2::text IS NULL OR project = $2)
+               AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
+             ORDER BY sim DESC LIMIT 20",
         )
         .bind(query)
+        .bind(project)
+        .bind(project_id)
         .fetch_all(pool)
         .await?
     };
@@ -129,11 +115,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         // FIX: Match against error_message, not solution.
         // solution is NULL on unresolved errors (resolved=false), so
         // similarity(solution, $1) was always NULL > 0.5 → false → never triggered.
+        // V0.8: anti-repetition guard scoped to current project.
         let failed_similar: Vec<(String,)> = sqlx::query_as(
             "SELECT error_message FROM brain_errors
-             WHERE resolved = false AND similarity(error_message, $1) > 0.5 LIMIT 3",
+             WHERE resolved = false AND similarity(error_message, $1) > 0.5
+               AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)
+             LIMIT 3",
         )
         .bind(action)
+        .bind(project_id)
         .fetch_all(pool)
         .await?;
 

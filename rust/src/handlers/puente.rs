@@ -50,10 +50,13 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let from_id = get_entity_id(pool, from).await?;
     let to_id = get_entity_id(pool, to).await?;
 
+    // V0.8: Resolve current project for new relations
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Upsert relation (strengthen if exists, create if not)
     let result = sqlx::query(
-        "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional, project_id)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (from_entity, to_entity, relation_type)
          DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
                        last_traversed = NOW()
@@ -63,6 +66,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     .bind(to_id)
     .bind(rel_type)
     .bind(bidirectional)
+    .bind(project_id)
     .fetch_one(pool)
     .await?;
 
@@ -77,8 +81,8 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     // If bidirectional, create reverse
     if bidirectional {
         sqlx::query(
-            "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional)
-             VALUES ($1, $2, $3, true)
+            "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional, project_id)
+             VALUES ($1, $2, $3, true, $4)
              ON CONFLICT (from_entity, to_entity, relation_type)
              DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
                            last_traversed = NOW()",
@@ -86,6 +90,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         .bind(to_id)
         .bind(from_id)
         .bind(rel_type)
+        .bind(project_id)
         .execute(pool)
         .await?;
     }
@@ -148,7 +153,10 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let start_id = get_entity_id(pool, start).await?;
 
-    // CTE-based depth-first traversal
+    // V0.8: scope traversal to current project
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    // CTE-based depth-first traversal (project-scoped on relations)
     let paths: Vec<(String, String, f64, i32)> = sqlx::query_as(
         r#"
         WITH RECURSIVE graph_walk AS (
@@ -161,6 +169,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
             FROM brain_relations r
             JOIN brain_entities e2 ON r.to_entity = e2.id
             WHERE r.from_entity = $1
+              AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
 
             UNION ALL
 
@@ -174,6 +183,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
             JOIN brain_entities e2 ON r.to_entity = e2.id
             JOIN graph_walk gw ON r.from_entity = gw.current_node
             WHERE gw.depth < $2
+              AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
         )
         SELECT node_name, relation_type, strength, depth
         FROM graph_walk
@@ -183,17 +193,20 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
     )
     .bind(start_id)
     .bind(max_depth)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
-    // Strengthen traversed edges (Hebbian)
+    // Strengthen traversed edges (Hebbian) — only within scope
     sqlx::query(
         "UPDATE brain_relations SET
             strength = LEAST(strength + 0.02, 1.0),
             last_traversed = NOW()
-         WHERE from_entity = $1",
+         WHERE from_entity = $1
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
     )
     .bind(start_id)
+    .bind(project_id)
     .execute(pool)
     .await?;
 
@@ -236,7 +249,10 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let start_id = get_entity_id(pool, start).await?;
 
-    // Find transitive paths using CTE
+    // V0.8: scope inference to current project
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    // Find transitive paths using CTE (project-scoped on relations & entities)
     let inferences: Vec<(String, i32, f64)> = sqlx::query_as(
         r#"
         WITH RECURSIVE transitive_closure AS (
@@ -246,6 +262,7 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
                 r.strength AS path_strength
             FROM brain_relations r
             WHERE r.from_entity = $1
+              AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
 
             UNION ALL
 
@@ -256,17 +273,20 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
             FROM brain_relations r
             JOIN transitive_closure tc ON r.from_entity = tc.current_node
             WHERE tc.depth < $2
+              AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
         )
         SELECT e.name, tc.depth, tc.path_strength
         FROM transitive_closure tc
         JOIN brain_entities e ON tc.current_node = e.id
         WHERE tc.depth > 1
+          AND ($3::uuid IS NULL OR e.project_id = $3 OR e.project_id IS NULL)
         ORDER BY tc.path_strength DESC
         LIMIT 20
         "#,
     )
     .bind(start_id)
     .bind(max_depth)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 
@@ -310,11 +330,19 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or(10)
         .min(50);
 
-    let entity_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1 LIMIT 1")
-            .bind(entity_name)
-            .fetch_optional(pool)
-            .await?;
+    // V0.8: scope link prediction to current project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    let entity_id: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM brain_entities
+         WHERE name = $1
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)
+         LIMIT 1",
+    )
+    .bind(entity_name)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
 
     let entity_id = match entity_id {
         Some((id,)) => id,
@@ -323,18 +351,19 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
                 "action": "predict",
                 "entity": entity_name,
                 "predictions": [],
-                "note": "Entity not found"
+                "note": "Entity not found (within current project scope)"
             }))
         }
     };
 
-    // Adamic-Adar link prediction via SQL CTEs
+    // Adamic-Adar link prediction via SQL CTEs (project-scoped on every relation/entity)
     let predictions: Vec<(String, String, f64)> = sqlx::query_as(
         r#"
         WITH entity_neighbors AS (
             SELECT CASE WHEN from_entity = $1 THEN to_entity ELSE from_entity END AS neighbor
             FROM brain_relations
-            WHERE from_entity = $1 OR to_entity = $1
+            WHERE (from_entity = $1 OR to_entity = $1)
+              AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
         ),
         candidate_links AS (
             SELECT DISTINCT
@@ -345,12 +374,17 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
             WHERE CASE WHEN r.from_entity = en.neighbor THEN r.to_entity ELSE r.from_entity END != $1
               AND CASE WHEN r.from_entity = en.neighbor THEN r.to_entity ELSE r.from_entity END
                   NOT IN (SELECT neighbor FROM entity_neighbors)
+              AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
         ),
         neighbor_degrees AS (
             SELECT node, SUM(cnt) AS degree FROM (
-                SELECT from_entity AS node, COUNT(*) AS cnt FROM brain_relations GROUP BY from_entity
+                SELECT from_entity AS node, COUNT(*) AS cnt FROM brain_relations
+                  WHERE ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
+                  GROUP BY from_entity
                 UNION ALL
-                SELECT to_entity, COUNT(*) FROM brain_relations GROUP BY to_entity
+                SELECT to_entity, COUNT(*) FROM brain_relations
+                  WHERE ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
+                  GROUP BY to_entity
             ) sub GROUP BY node
         ),
         aa_scores AS (
@@ -362,12 +396,14 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         SELECT e.name, e.entity_type, aa.aa_score::float8
         FROM aa_scores aa
         JOIN brain_entities e ON aa.candidate = e.id
+        WHERE ($3::uuid IS NULL OR e.project_id = $3 OR e.project_id IS NULL)
         ORDER BY aa.aa_score DESC
         LIMIT $2
         "#,
     )
     .bind(entity_id)
     .bind(limit)
+    .bind(project_id)
     .fetch_all(pool)
     .await?;
 

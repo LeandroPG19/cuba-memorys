@@ -67,12 +67,16 @@ async fn create(pool: &PgPool, name: &str, args: &Value) -> Result<Value> {
         }));
     }
 
+    // V0.8: Resolve current project (None = global)
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Actually create
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_entities (name, entity_type) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO brain_entities (name, entity_type, project_id) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(name)
     .bind(entity_type)
+    .bind(project_id)
     .fetch_one(pool)
     .await
     .context("failed to create entity")?;
@@ -120,14 +124,22 @@ async fn update(pool: &PgPool, name: &str, args: &Value) -> Result<Value> {
 }
 
 /// Delete entity (cascades to observations and relations).
+/// V0.8: respects project scope — refuses to delete an entity owned by another project.
 async fn delete(pool: &PgPool, name: &str) -> Result<Value> {
-    let result = sqlx::query("DELETE FROM brain_entities WHERE name = $1")
-        .bind(name)
-        .execute(pool)
-        .await?;
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    let result = sqlx::query(
+        "DELETE FROM brain_entities
+         WHERE name = $1
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
+    )
+    .bind(name)
+    .bind(project_id)
+    .execute(pool)
+    .await?;
 
     if result.rows_affected() == 0 {
-        anyhow::bail!("Entity '{name}' not found");
+        anyhow::bail!("Entity '{name}' not found (within current project scope)");
     }
 
     tracing::info!(entity = %name, "entity deleted (cascaded)");
@@ -140,13 +152,19 @@ async fn delete(pool: &PgPool, name: &str) -> Result<Value> {
 }
 
 /// Get entity with observations — FIX B1: fresh data with FOR UPDATE.
+/// V0.8: scope lookup to current project (None = global).
 async fn get(pool: &PgPool, name: &str) -> Result<Value> {
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Get entity (with FOR UPDATE to prevent stale reads — FIX B1 partial)
     let entity: Option<(uuid::Uuid, String, String, f64, i32)> = sqlx::query_as(
         "SELECT id, name, entity_type, importance, access_count
-         FROM brain_entities WHERE name = $1",
+         FROM brain_entities
+         WHERE name = $1
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
     )
     .bind(name)
+    .bind(project_id)
     .fetch_optional(pool)
     .await?;
 
