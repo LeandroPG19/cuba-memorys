@@ -859,8 +859,10 @@ def _boost_session_results(
         return
     for r in results:
         content_lower = r.get("content", r.get("name", "")).lower()
-        if any(kw in content_lower for kw in keywords):
-            r["rrf_score"] = r.get("rrf_score", 0) * 1.15
+        for kw in keywords:
+            if kw in content_lower:
+                r["rrf_score"] = r.get("rrf_score", 0) * 1.15
+                break
     results.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
 
 
