@@ -1,0 +1,13 @@
+# MCP server for this workspace — v0.10.0 (feature/mejoras)
+# Restart Grok session or run /mcps after saving.
+
+[mcp_servers.cuba-memorys]
+command = "/home/leandro/.grok/worktrees/mcp-cuba-memorys/2026-06-03-7ea0067b/rust/target/release/cuba-memorys"
+enabled = true
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+
+[mcp_servers.cuba-memorys.env]
+DATABASE_URL = "postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
+CUBA_JUDGE = "heuristic"
+RUST_LOG = "cuba_memorys=warn"

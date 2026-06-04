@@ -1,19 +1,25 @@
-//! Graph energy scores — uses persisted PageRank from `brain_node_metrics`.
+//! Graph energy scores — blends persisted PageRank with structural centrality.
 
 use anyhow::Result;
 use sqlx::PgPool;
 
-/// Blend PageRank into energy_score for all entities (additive, does not remove handlers).
+/// Recompute `energy_score` from `pagerank_score` and `betweenness_centrality`.
+/// Call after `pagerank::compute_and_store` (zafra pagerank action).
 pub async fn refresh_energy_scores(pool: &PgPool) -> Result<u64> {
     let result = sqlx::query(
         r#"INSERT INTO brain_node_metrics (node_id, pagerank_score, energy_score, last_calculated)
            SELECT e.id,
-                  COALESCE(e.importance, 0.5),
-                  COALESCE(e.importance, 0.5) * 0.85,
+                  COALESCE(m.pagerank_score, e.importance::float8, 0.5),
+                  LEAST(
+                    COALESCE(m.pagerank_score, e.importance::float8, 0.5) * 0.75
+                    + COALESCE(m.betweenness_centrality, 0.0) * 0.25,
+                    1.0
+                  ),
                   NOW()
            FROM brain_entities e
+           LEFT JOIN brain_node_metrics m ON m.node_id = e.id
            ON CONFLICT (node_id) DO UPDATE SET
-             pagerank_score = EXCLUDED.pagerank_score,
+             pagerank_score = COALESCE(EXCLUDED.pagerank_score, brain_node_metrics.pagerank_score),
              energy_score = EXCLUDED.energy_score,
              last_calculated = NOW()"#,
     )

@@ -312,8 +312,8 @@ async fn drift(pool: &PgPool) -> Result<Value> {
 }
 
 async fn communities(pool: &PgPool) -> Result<Value> {
-    match crate::graph::community::detect(pool).await {
-        Ok(communities) => {
+    match crate::graph::community::detect_and_persist(pool).await {
+        Ok((communities, nodes_tagged)) => {
             let community_json: Vec<Value> = communities
                 .iter()
                 .map(|(id, members)| {
@@ -327,8 +327,10 @@ async fn communities(pool: &PgPool) -> Result<Value> {
             Ok(serde_json::json!({
                 "metric": "communities",
                 "algorithm": "leiden",
+                "persisted": true,
+                "nodes_tagged": nodes_tagged,
                 "communities": community_json,
-                "count": community_json.len()
+                "count": communities.len()
             }))
         }
         Err(e) => {

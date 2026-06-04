@@ -171,6 +171,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 serde_json::json!({"action": "pagerank", "updated": ranked, "energy_refreshed": energy}),
             )
         }
+        "communities" => {
+            let (communities, nodes) = crate::graph::community::detect_and_persist(pool).await?;
+            Ok(serde_json::json!({
+                "action": "communities",
+                "communities": communities.len(),
+                "nodes_tagged": nodes,
+                "algorithm": "leiden_v1"
+            }))
+        }
         "summarize" => {
             let entity_name = args
                 .get("entity_name")

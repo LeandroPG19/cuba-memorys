@@ -135,20 +135,16 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .await
     .context("failed to insert observation")?;
 
-    if crate::core::bitemporal_enabled() {
-        let fact = crate::core::bitemporal::Fact::builder(
-            entity_name.to_string(),
-            obs_type.to_string(),
-            content.to_string(),
-        )
-        .subject_entity_id(entity_id)
-        .project_id(project_id)
-        .confidence(importance as f32)
-        .build();
-        if let Err(e) = crate::core::bitemporal::append_fact(pool, &fact).await {
-            tracing::warn!(error = %e, "bitemporal append_fact skipped (table may be absent)");
-        }
-    }
+    crate::core::bitemporal::append_observation_fact(
+        pool,
+        entity_id,
+        entity_name,
+        obs_type,
+        content,
+        project_id,
+        importance as f32,
+    )
+    .await;
 
     tracing::info!(
         entity = %entity_name,
@@ -369,6 +365,13 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         importance: f64,
         tags: Vec<String>,
     }
+    struct InsertedObs {
+        entity_id: uuid::Uuid,
+        entity_name: String,
+        content: String,
+        obs_type: String,
+        importance: f64,
+    }
     enum BatchAction {
         Insert(PendingObs),
         Reinforce(uuid::Uuid),
@@ -450,6 +453,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut reinforced = 0u32;
     // Collect (obs_id, content, entity_name, entity_type) for contextual embedding after commit
     let mut inserted_for_embed: Vec<(uuid::Uuid, String, String, String)> = Vec::new();
+    let mut inserted_for_facts: Vec<InsertedObs> = Vec::new();
 
     for action in &actions {
         match action {
@@ -474,6 +478,13 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     pending.entity_name.clone(),
                     pending.entity_type.clone(),
                 ));
+                inserted_for_facts.push(InsertedObs {
+                    entity_id: pending.entity_id,
+                    entity_name: pending.entity_name.clone(),
+                    content: pending.content.clone(),
+                    obs_type: pending.obs_type.clone(),
+                    importance: pending.importance,
+                });
                 added += 1;
             }
             BatchAction::Reinforce(obs_id) => {
@@ -495,6 +506,19 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     tx.commit()
         .await
         .context("failed to commit batch_add transaction")?;
+
+    for obs in &inserted_for_facts {
+        crate::core::bitemporal::append_observation_fact(
+            pool,
+            obs.entity_id,
+            &obs.entity_name,
+            &obs.obs_type,
+            &obs.content,
+            project_id,
+            obs.importance as f32,
+        )
+        .await;
+    }
 
     // V11+V0.6: Store contextual embeddings with model versioning after commit
     if !inserted_for_embed.is_empty() {

@@ -95,6 +95,33 @@ impl FactBuilder {
     }
 }
 
+/// Mirror a semantic observation into `brain_facts` (best-effort).
+pub async fn append_observation_fact(
+    pool: &PgPool,
+    entity_id: uuid::Uuid,
+    entity_name: &str,
+    obs_type: &str,
+    content: &str,
+    project_id: Option<uuid::Uuid>,
+    confidence: f32,
+) {
+    if !crate::core::bitemporal_enabled() {
+        return;
+    }
+    let fact = Fact::builder(
+        entity_name.to_string(),
+        obs_type.to_string(),
+        content.to_string(),
+    )
+    .subject_entity_id(entity_id)
+    .project_id(project_id)
+    .confidence(confidence)
+    .build();
+    if let Err(e) = append_fact(pool, &fact).await {
+        tracing::warn!(error = %e, "bitemporal append_fact skipped (table may be absent)");
+    }
+}
+
 pub async fn append_fact(pool: &PgPool, fact: &Fact) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO brain_facts (

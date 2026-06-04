@@ -419,13 +419,35 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         })
         .collect();
 
-    let count = prediction_json.len();
+    let mut merged = prediction_json;
+    if let Ok(activated) =
+        crate::graph::activation::activated_neighbor_names(pool, entity_name, limit as usize).await
+    {
+        let existing: std::collections::HashSet<String> = merged
+            .iter()
+            .filter_map(|v| v.get("entity").and_then(|e| e.as_str()).map(str::to_string))
+            .collect();
+        for name in activated {
+            if existing.contains(&name) {
+                continue;
+            }
+            merged.push(serde_json::json!({
+                "entity": name,
+                "entity_type": "concept",
+                "adamic_adar_score": 0.0,
+                "activation_score": 0.5,
+                "recommendation": "Spreading-activation neighbor (graph proximity)"
+            }));
+        }
+    }
+
+    let count = merged.len();
     Ok(serde_json::json!({
         "action": "predict",
         "entity": entity_name,
-        "predictions": prediction_json,
+        "predictions": merged,
         "count": count,
-        "algorithm": "Adamic-Adar (sum of 1/log(degree) for common neighbors)"
+        "algorithm": "Adamic-Adar + spreading activation"
     }))
 }
 
