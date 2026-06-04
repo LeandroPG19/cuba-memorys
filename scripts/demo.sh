@@ -16,6 +16,12 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Longer pauses when recording the README GIF (asciinema)
+PAUSE="${DEMO_PAUSE:-0.35}"
+if [[ "${RECORD_DEMO:-}" == "1" ]]; then
+  PAUSE="1.8"
+fi
+
 if [[ ! -x "$BINARY" ]]; then
   echo "Binary not found: $BINARY (run: cd rust && cargo build --release)"
   exit 1
@@ -49,7 +55,7 @@ try:
 except Exception:
     print('(no output)')
 " 2>/dev/null || echo "(timeout)"
-  sleep 0.35
+  sleep "$PAUSE"
 }
 
 clear
@@ -61,12 +67,16 @@ cat <<'BANNER'
   ╚══════════════════════════════════════════════════════════╝
 BANNER
 echo -e "${NC}"
-sleep 1.2
+sleep 2
+
+echo -e "${YELLOW}${BOLD}  ★ RELEASE v0.10.0 — Jun 2026 ★${NC}"
+echo -e "${DIM}  (replaces v0.7 demo: 19 tools → 25 tools + bitemporal + graph metrics)${NC}"
+sleep 2
 
 echo -e "${YELLOW}# PyPI:${NC}  pip install cuba-memorys==1.12.0"
 echo -e "${YELLOW}# npm:${NC}   npm install -g cuba-memorys@0.10.0"
 echo -e "${MAGENTA}# MCP:${NC}   claude mcp add cuba-memorys -- cuba-memorys"
-sleep 1.2
+sleep 2
 
 echo -e "\n${BOLD}── Knowledge graph + bitemporal mirror ──${NC}"
 call alma '{"action":"create","name":"cuba-memorys","entity_type":"project"}' \

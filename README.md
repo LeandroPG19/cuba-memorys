@@ -30,7 +30,7 @@
 ## Demo
 
 <p align="center">
-  <img src="assets/demo.gif" alt="Cuba-Memorys v0.10.0 terminal demo — 25 MCP tools, bitemporal facts, hybrid BM25+RRF search, PageRank, Leiden communities, session lifecycle" width="700" />
+  <img src="assets/demo-v0.10.gif" alt="Cuba-Memorys v0.10.0 terminal demo — 25 MCP tools, bitemporal facts, hybrid BM25+RRF search, PageRank, Leiden communities, session lifecycle" width="700" />
 </p>
 
 ---
@@ -533,7 +533,7 @@ export DATABASE_URL=postgresql://cuba:memorys2026@127.0.0.1:5488/brain
 
 Publishing (maintainers): tag `v0.10.0` triggers [`.github/workflows/publish.yml`](.github/workflows/publish.yml) — GitHub Release binaries, PyPI wheels, npm, MCP Registry.
 
-Regenerate README demo GIF: `./scripts/record-demo-gif.sh` (requires [asciinema](https://asciinema.org/) + [agg](https://github.com/asciinema/agg)).
+Regenerate README demo GIF: `./scripts/record-demo-gif.sh` → `assets/demo-v0.10.gif` (requires [asciinema](https://asciinema.org/) + [agg](https://github.com/asciinema/agg)).
 
 | Channel | Version | Install |
 |---------|---------|---------|
