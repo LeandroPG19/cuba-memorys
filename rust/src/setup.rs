@@ -72,7 +72,9 @@ pub async fn resolve_database_url() -> String {
             log("This will create a local PostgreSQL database for AI memory storage.");
             log("A Docker container 'cuba-memorys-db' will be created with:");
             log(&format!("  - Image:    {PG_IMAGE}"));
-            log(&format!("  - Port:     {PG_PORT} (mapped to container 5432)"));
+            log(&format!(
+                "  - Port:     {PG_PORT} (mapped to container 5432)"
+            ));
             log(&format!("  - Database: {PG_DB}"));
             log(&format!("  - User:     {PG_USER}"));
             log("  - Volume:   cuba_memorys_data (persistent across restarts)");

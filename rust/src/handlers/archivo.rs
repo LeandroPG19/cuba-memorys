@@ -168,7 +168,14 @@ async fn verify(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or(10_000)
         .clamp(1, 1_000_000);
 
-    type Row = (i64, Option<Vec<u8>>, String, Value, Vec<u8>, chrono::DateTime<chrono::Utc>);
+    type Row = (
+        i64,
+        Option<Vec<u8>>,
+        String,
+        Value,
+        Vec<u8>,
+        chrono::DateTime<chrono::Utc>,
+    );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, prev_hash, action, payload, current_hash, created_at
          FROM brain_audit_log ORDER BY id ASC LIMIT $1",

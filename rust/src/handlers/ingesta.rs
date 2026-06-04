@@ -31,10 +31,7 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("items array is empty");
     }
     if items.len() > 200 {
-        anyhow::bail!(
-            "ingest limit is 200 items per call (got {})",
-            items.len()
-        );
+        anyhow::bail!("ingest limit is 200 items per call (got {})", items.len());
     }
 
     // Build batch_add-compatible observations array
@@ -78,10 +75,7 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
     if let Some(obj) = response.as_object_mut() {
         obj.insert("action".to_string(), serde_json::json!("ingest"));
         obj.insert("skipped_invalid".to_string(), serde_json::json!(skipped));
-        obj.insert(
-            "total_items".to_string(),
-            serde_json::json!(items.len()),
-        );
+        obj.insert("total_items".to_string(), serde_json::json!(items.len()));
     }
 
     Ok(response)
@@ -165,7 +159,10 @@ fn classify_paragraph(text: &str) -> &'static str {
         "error"
     } else if lower.contains("fix") || lower.contains("solution") || lower.contains("resolved") {
         "solution"
-    } else if lower.contains("prefer") || lower.contains("preference") || lower.contains("always use") {
+    } else if lower.contains("prefer")
+        || lower.contains("preference")
+        || lower.contains("always use")
+    {
         "preference"
     } else {
         "fact"

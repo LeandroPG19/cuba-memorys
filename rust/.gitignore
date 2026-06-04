@@ -1,21 +1,3 @@
-# Build artifacts
 target/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# ONNX models (downloaded at runtime, not committed)
 models/
 *.onnx
-
-# Environment
-.env
-.env.local

@@ -3,8 +3,19 @@ target/
 
 # Environment files with secrets
 .env
+.env.local
 .env.*
 !.env.example
+
+# Python / Node caches
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.tmp
 
 # IDE
 .idea/

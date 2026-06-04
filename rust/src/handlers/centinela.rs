@@ -211,14 +211,13 @@ pub async fn check_triggers(
         let new_count = fire_count + 1;
         let deactivate = *max_fires > 0 && new_count >= *max_fires;
 
-        if let Err(e) = sqlx::query(
-            "UPDATE brain_triggers SET fire_count = $2, active = $3 WHERE id = $1",
-        )
-        .bind(id)
-        .bind(new_count)
-        .bind(!deactivate)
-        .execute(pool)
-        .await
+        if let Err(e) =
+            sqlx::query("UPDATE brain_triggers SET fire_count = $2, active = $3 WHERE id = $1")
+                .bind(id)
+                .bind(new_count)
+                .bind(!deactivate)
+                .execute(pool)
+                .await
         {
             tracing::warn!(trigger_id = %id, error = %e, "failed to update trigger fire_count");
         }

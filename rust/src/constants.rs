@@ -13,7 +13,7 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
 pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-                                         // Below PRED_ERROR_UPDATE → create new observation
+// Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.

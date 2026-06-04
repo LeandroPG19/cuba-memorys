@@ -94,8 +94,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run E2E tests
+      - name: Rust DB integration tests
+        env:
+          DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
+        run: |
+          cargo test --test integration --test v08_project_scoping --test v09_integration -- --ignored --nocapture
+
+      - name: Run E2E tests (25 MCP tools)
         env:
           DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
           CUBA_BINARY_PATH: ./target/release/cuba-memorys
+          CUBA_JUDGE: heuristic
         run: python tests/e2e_all_tools.py

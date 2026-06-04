@@ -155,9 +155,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
                     let elapsed = chrono::Utc::now() - started_at;
                     let compaction_hint = elapsed
-                        > chrono::Duration::seconds(
-                            crate::constants::COMPACTION_HINT_HOURS * 3600,
-                        )
+                        > chrono::Duration::seconds(crate::constants::COMPACTION_HINT_HOURS * 3600)
                         || obs_count >= crate::constants::COMPACTION_HINT_OBS_COUNT;
 
                     let last_snapshot: Option<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> =

@@ -3,7 +3,7 @@
 //! Validates JSON-RPC message format, tool definitions, and
 //! protocol invariants without requiring a live database.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Verify all 25 tools are defined in constants
 /// (v0.8 added cuba_proyecto, cuba_pre_compact, cuba_sync, cuba_juez;

@@ -17,13 +17,17 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 
     let error_id: uuid::Uuid = error_id_str.parse().context("invalid error_id UUID")?;
+    let project_id = crate::project::current_project_id(pool).await?;
 
     // Mark error as resolved
     let result = sqlx::query(
-        "UPDATE brain_errors SET solution = $2, resolved = true, resolved_at = NOW() WHERE id = $1",
+        "UPDATE brain_errors SET solution = $2, resolved = true, resolved_at = NOW()
+         WHERE id = $1
+           AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)",
     )
     .bind(error_id)
     .bind(solution)
+    .bind(project_id)
     .execute(pool)
     .await?;
 

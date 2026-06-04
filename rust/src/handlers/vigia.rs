@@ -208,26 +208,23 @@ async fn health(pool: &PgPool) -> Result<Value> {
     .await
     .unwrap_or((0,));
 
-    let active_triggers: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_triggers WHERE active = TRUE",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    let active_triggers: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM brain_triggers WHERE active = TRUE")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0,));
 
-    let obs_table_size: (String,) = sqlx::query_as(
-        "SELECT pg_size_pretty(pg_total_relation_size('brain_observations'))",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(("unknown".to_string(),));
+    let obs_table_size: (String,) =
+        sqlx::query_as("SELECT pg_size_pretty(pg_total_relation_size('brain_observations'))")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(("unknown".to_string(),));
 
-    let entities_table_size: (String,) = sqlx::query_as(
-        "SELECT pg_size_pretty(pg_total_relation_size('brain_entities'))",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(("unknown".to_string(),));
+    let entities_table_size: (String,) =
+        sqlx::query_as("SELECT pg_size_pretty(pg_total_relation_size('brain_entities'))")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(("unknown".to_string(),));
 
     Ok(serde_json::json!({
         "metric": "health",

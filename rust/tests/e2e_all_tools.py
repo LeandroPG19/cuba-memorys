@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E2E Test for all 13 cuba-memorys MCP tools.
+E2E Test for all 25 cuba-memorys MCP tools.
 Tests each tool against a real PostgreSQL database.
 """
 
@@ -964,6 +964,70 @@ def test_cuba_forget():
     return True
 
 
+def test_v08_v09_tools():
+    """Smoke-test v0.8–v0.10 tools (read-mostly + light writes)."""
+    print("\n" + "=" * 60)
+    print("TESTING: v0.8–v0.10 tools (12)")
+    print("=" * 60)
+
+    test("cuba_reflexion", "analyze", {"action": "analyze"})
+    test("cuba_hipotesis", "explain", {"action": "explain", "effect": "_e2e_cronica"})
+    test("cuba_contradiccion", "scan", {"action": "scan"})
+    test(
+        "cuba_centinela",
+        "create",
+        {
+            "action": "create",
+            "entity_pattern": "_e2e_cronica",
+            "condition_type": "on_access",
+            "message": "E2E centinela trigger",
+        },
+    )
+    test("cuba_centinela", "list", {"action": "list"})
+    test("cuba_calibrar", "stats", {"action": "stats"})
+    test("cuba_calibrar", "metrics", {"action": "metrics"})
+    test(
+        "cuba_ingesta",
+        "parse",
+        {
+            "action": "parse",
+            "entity_name": "_e2e_cronica",
+            "text": "E2E ingesta paragraph one.\n\nSecond paragraph for parse split.",
+        },
+    )
+    test("cuba_proyecto", "list", {"action": "list"})
+    test("cuba_proyecto", "current", {"action": "current"})
+    test("cuba_pre_compact", "restore", {"action": "restore"})
+    test("cuba_sync", "status", {"action": "status"})
+    test(
+        "cuba_juez",
+        "scan_entity",
+        {"action": "scan_entity", "entity_name": "_e2e_cronica", "max_pairs": 1},
+    )
+    test(
+        "cuba_pizarra",
+        "write",
+        {
+            "action": "write",
+            "content": "E2E working memory note",
+            "tag": "e2e",
+            "ttl_seconds": 120,
+        },
+    )
+    test("cuba_pizarra", "read", {"action": "read", "tag": "e2e"})
+    test(
+        "cuba_archivo",
+        "append",
+        {
+            "action": "append",
+            "event_action": "e2e_test",
+            "payload": {"tool": "cuba_archivo"},
+        },
+    )
+    test("cuba_archivo", "verify", {"action": "verify", "limit": 5})
+    test("cuba_archivo", "tail", {"action": "tail", "limit": 3})
+
+
 def cleanup():
     """Clean up remaining test entities."""
     print("\n" + "=" * 60)
@@ -995,7 +1059,7 @@ def main():
 
     print("\n")
     print("=" * 60)
-    print("CUBA-MEMORYS E2E TEST SUITE - ALL 13 TOOLS")
+    print("CUBA-MEMORYS E2E TEST SUITE - ALL 25 TOOLS")
     print("=" * 60)
 
     # Run all tool tests
@@ -1012,6 +1076,7 @@ def main():
     test_cuba_vigia()
     test_cuba_zafra()
     test_cuba_forget()
+    test_v08_v09_tools()
 
     # Cleanup
     cleanup()

@@ -4,6 +4,7 @@
 
 pub mod adwin;
 pub mod allen;
+pub mod calibration;
 pub mod density;
 pub mod dual_strength;
 pub mod hebbian;

@@ -112,15 +112,14 @@ pub async fn compute_top(pool: &PgPool, top_n: usize) -> Result<Vec<(String, u32
     let adj = fetch_adjacency(pool).await?;
     let kcore = compute_in_memory(&adj);
     let mut ranked: Vec<(Uuid, u32)> = kcore.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked.truncate(top_n);
     let ids: Vec<Uuid> = ranked.iter().map(|(id, _)| *id).collect();
-    let names: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, name FROM brain_entities WHERE id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
+    let names: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM brain_entities WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
     let name_map: HashMap<Uuid, String> = names.into_iter().collect();
     Ok(ranked
         .into_iter()

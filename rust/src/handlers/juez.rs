@@ -14,7 +14,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::cognitive::judge::{default_max_pairs, resolve_judge, Judgment};
+use crate::cognitive::judge::{Judgment, default_max_pairs, resolve_judge};
 use crate::constants::{JUEZ_AMBIGUOUS_HI, JUEZ_AMBIGUOUS_LO};
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
@@ -173,18 +173,13 @@ async fn scan_entity(pool: &PgPool, entity_name: &str, max_pairs: usize) -> Resu
     }))
 }
 
-async fn fetch_obs_pair(
-    pool: &PgPool,
-    a: Uuid,
-    b: Uuid,
-) -> Result<Option<(String, String)>> {
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, content FROM brain_observations WHERE id IN ($1, $2)",
-    )
-    .bind(a)
-    .bind(b)
-    .fetch_all(pool)
-    .await?;
+async fn fetch_obs_pair(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Option<(String, String)>> {
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, content FROM brain_observations WHERE id IN ($1, $2)")
+            .bind(a)
+            .bind(b)
+            .fetch_all(pool)
+            .await?;
     if rows.len() != 2 {
         return Ok(None);
     }
@@ -211,21 +206,18 @@ async fn lookup_cached(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Option<Judgmen
     .bind(b)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(verdict, confidence, reason, backend, model)| Judgment {
-        verdict,
-        confidence,
-        reason,
-        backend,
-        model,
-    }))
+    Ok(
+        row.map(|(verdict, confidence, reason, backend, model)| Judgment {
+            verdict,
+            confidence,
+            reason,
+            backend,
+            model,
+        }),
+    )
 }
 
-async fn persist_judgment(
-    pool: &PgPool,
-    a: Uuid,
-    b: Uuid,
-    j: &Judgment,
-) -> Result<()> {
+async fn persist_judgment(pool: &PgPool, a: Uuid, b: Uuid, j: &Judgment) -> Result<()> {
     let project_id = crate::project::current_project_id(pool).await?;
     sqlx::query(
         "INSERT INTO brain_judgments

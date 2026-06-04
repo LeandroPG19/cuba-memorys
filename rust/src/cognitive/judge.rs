@@ -62,8 +62,7 @@ pub fn resolve_judge() -> Box<dyn ContradictionJudge> {
             if crate::protocol::client_supports_sampling() {
                 return Box::new(MCPSamplingJudge);
             }
-            if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into()))
-            {
+            if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
                 return Box::new(ClaudeCodeJudge::from_env());
             }
             #[cfg(feature = "anthropic-api")]
@@ -94,8 +93,7 @@ pub struct ClaudeCodeJudge {
 impl ClaudeCodeJudge {
     pub fn from_env() -> Self {
         let cli = env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".to_string());
-        let model = env::var("CUBA_JUEZ_MODEL")
-            .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+        let model = env::var("CUBA_JUEZ_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
         let timeout_secs = env::var("CUBA_JUEZ_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -116,13 +114,7 @@ impl ContradictionJudge for ClaudeCodeJudge {
     async fn judge(&self, content_a: &str, content_b: &str) -> Result<Judgment> {
         let prompt = build_prompt(content_a, content_b);
         let mut child = tokio::process::Command::new(&self.cli)
-            .args([
-                "--model",
-                &self.model,
-                "--print",
-                "--output-format",
-                "json",
-            ])
+            .args(["--model", &self.model, "--print", "--output-format", "json"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -171,8 +163,7 @@ impl AnthropicApiJudge {
     pub fn from_env() -> Self {
         Self {
             api_key: env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            model: env::var("CUBA_JUEZ_MODEL")
-                .unwrap_or_else(|_| "claude-haiku-4-5".to_string()),
+            model: env::var("CUBA_JUEZ_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string()),
             timeout: Duration::from_secs(
                 env::var("CUBA_JUEZ_TIMEOUT_SECS")
                     .ok()
@@ -383,8 +374,7 @@ mod tests {
 
     #[test]
     fn test_parse_judgment_wrapped_in_prose() {
-        let raw =
-            "Sure! Here is the JSON: {\"verdict\":\"supersedes\",\"confidence\":0.7,\"reason\":\"newer\"} OK?";
+        let raw = "Sure! Here is the JSON: {\"verdict\":\"supersedes\",\"confidence\":0.7,\"reason\":\"newer\"} OK?";
         let j = parse_judgment(raw);
         assert_eq!(j.verdict, "supersedes");
         assert_eq!(j.confidence, 0.7);

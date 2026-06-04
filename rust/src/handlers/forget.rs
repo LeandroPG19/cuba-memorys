@@ -40,6 +40,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         );
     }
 
+    let project_id = crate::project::current_project_id(pool).await?;
+
     // Use a transaction for atomicity
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
 
@@ -76,11 +78,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .context("failed to delete sessions")?;
 
     // 3. Delete the entity itself (FK CASCADE handles observations, relations, AND episodes)
-    let entity_deleted = sqlx::query("DELETE FROM brain_entities WHERE name = $1")
-        .bind(entity_name)
-        .execute(&mut *tx)
-        .await
-        .context("failed to delete entity")?;
+    let entity_deleted = sqlx::query(
+        "DELETE FROM brain_entities WHERE name = $1
+         AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
+    )
+    .bind(entity_name)
+    .bind(project_id)
+    .execute(&mut *tx)
+    .await
+    .context("failed to delete entity")?;
 
     tx.commit().await.context("failed to commit transaction")?;
 

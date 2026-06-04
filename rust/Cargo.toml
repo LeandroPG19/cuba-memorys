@@ -1,6 +1,6 @@
 [package]
 name = "cuba-memorys"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2024"
 description = "Knowledge Graph MCP Server — 25 tools, sqlx-migrate, BM25/MMR/OOD search, conformal prediction, testing-effect/Δt-Hebbian/Robbins-Monro cognitive, source credibility, closeness/harmonic/k-core graph, working-memory + Allen interval + ADWIN drift + MI tagging, audit hash-chain (CFR-21) + RLS, MCP Resources URI scheme, optional Prometheus /metrics + MCPSamplingJudge, plus v0.8 features (project scoping, snapshots, sync, LLM-judge)"
 license = "CC-BY-NC-4.0"
@@ -84,6 +84,9 @@ mimalloc = "0.1"
 
 [features]
 default = []
+bitemporal = []
+graph-energy = []
+eval-benchmarks = []
 # Enables AnthropicApiJudge in cuba_juez. Adds reqwest + rustls (~150KB to binary).
 anthropic-api = ["dep:reqwest"]
 # V0.9: Prometheus /metrics endpoint with RED metrics per handler.

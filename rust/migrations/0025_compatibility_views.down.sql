@@ -1,0 +1,1 @@
+DROP VIEW IF EXISTS v_observations_compat;

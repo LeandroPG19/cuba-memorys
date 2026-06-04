@@ -80,7 +80,13 @@ async fn read(pool: &PgPool, args: &Value) -> Result<Value> {
     let session_id = crate::handlers::jornada::current_session_id(pool).await?;
     let project_id = crate::project::current_project_id(pool).await?;
 
-    type Row = (Uuid, String, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
+    type Row = (
+        Uuid,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, content, tag, created_at, expires_at FROM brain_wm
          WHERE expires_at > NOW()

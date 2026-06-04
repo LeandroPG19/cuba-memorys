@@ -17,9 +17,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "traverse" => traverse(pool, &args).await,
         "infer" => infer(pool, &args).await,
         "predict" => predict_links(pool, &args).await,
-        _ => anyhow::bail!(
-            "Invalid action: {action}. Use create/delete/traverse/infer/predict"
-        ),
+        _ => anyhow::bail!("Invalid action: {action}. Use create/delete/traverse/infer/predict"),
     }
 }
 
@@ -73,7 +71,9 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let is_new: bool = result.get::<bool, _>("is_insert");
     if !is_new {
         tracing::info!(
-            from = from, to = to, rel = rel_type,
+            from = from,
+            to = to,
+            rel = rel_type,
             "relation already exists — strengthened (Hebbian)"
         );
     }
@@ -352,7 +352,7 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
                 "entity": entity_name,
                 "predictions": [],
                 "note": "Entity not found (within current project scope)"
-            }))
+            }));
         }
     };
 

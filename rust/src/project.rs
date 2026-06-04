@@ -1,18 +1,4 @@
 //! Project scoping helpers (v0.8).
-//!
-//! Resolves the active project for the current MCP session and exposes
-//! filter clauses that handlers can splice into their SQL.
-//!
-//! ## Resolution order
-//! 1. If `CUBA_PROJECT_FILTER=off` → no filter (admin/debug kill-switch).
-//! 2. Else: query the most recent active session (`ended_at IS NULL`) and use
-//!    its `project_id`. If no active session or session has NULL project →
-//!    no filter (returns rows from all projects + global NULL rows).
-//!
-//! ## Backward compatibility
-//! Legacy rows have `project_id IS NULL` (= global). They remain visible from
-//! every project scope. Behavior of v0.7 callers (no `cuba_jornada start`
-//! with `project`) is preserved exactly.
 
 use anyhow::Result;
 use sqlx::PgPool;
@@ -28,25 +14,24 @@ pub fn filter_disabled() -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("off"))
 }
 
+/// SQL fragment: restrict rows to active project + global NULL rows.
+/// Bind `$n` to `Option<Uuid>` from [`current_project_id`].
+pub fn project_scope_clause(project_param: &str) -> String {
+    format!("({project_param}::uuid IS NULL OR project_id = {project_param} OR project_id IS NULL)")
+}
+
+async fn propagate_rls_guc(pool: &PgPool, value: &str) -> Result<()> {
+    sqlx::query("SELECT set_config('app.current_project', $1, false)")
+        .bind(value)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Resolve the active project for the most recent open session.
-///
-/// Returns:
-/// - `Ok(None)` when filter is disabled, no active session exists, or the
-///   session has no project assigned. Callers MUST treat None as "no filter".
-/// - `Ok(Some(uuid))` when the active session is bound to a project.
-///
-/// V0.9: also propagates the resolved project (or sentinel `*` when filter
-/// is disabled) into PostgreSQL session via `SET LOCAL app.current_project`,
-/// which feeds the RLS policies installed by migration 0017. The `SET LOCAL`
-/// is best-effort and silently ignored if the migration has not run (older
-/// DBs predate RLS).
 pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
     if filter_disabled() {
-        // Tell RLS to bypass too
-        sqlx::query("SET LOCAL app.current_project = '*'")
-            .execute(pool)
-            .await
-            .ok();
+        propagate_rls_guc(pool, "*").await.ok();
         return Ok(None);
     }
     let row: Option<(Option<Uuid>,)> = sqlx::query_as(
@@ -58,26 +43,17 @@ pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
     .fetch_optional(pool)
     .await?;
     let pid = row.and_then(|(p,)| p);
-    // Propagate to RLS context. Empty string = no filter (v0.7/v0.8 back-compat).
-    let value = pid
-        .as_ref()
-        .map(|u| u.to_string())
-        .unwrap_or_default();
-    let stmt = format!(
-        "SET LOCAL app.current_project = '{}'",
-        value.replace('\'', "''")
-    );
-    sqlx::query(&stmt).execute(pool).await.ok();
+    let value = pid.as_ref().map(|u| u.to_string()).unwrap_or_default();
+    propagate_rls_guc(pool, &value).await.ok();
     Ok(pid)
 }
 
 /// Resolve a project name to its UUID. Returns None if not found.
 pub async fn resolve_project_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM brain_projects WHERE name = $1")
-            .bind(name)
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM brain_projects WHERE name = $1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|(id,)| id))
 }
 
@@ -92,4 +68,26 @@ pub async fn upsert_project(pool: &PgPool, name: &str) -> Result<Uuid> {
     .fetch_one(pool)
     .await?;
     Ok(row.0)
+}
+
+/// Verify an observation belongs to the current project scope (IDOR guard).
+pub async fn observation_in_scope(
+    pool: &PgPool,
+    observation_id: Uuid,
+    project_id: Option<Uuid>,
+) -> Result<bool> {
+    if filter_disabled() || project_id.is_none() {
+        return Ok(true);
+    }
+    let pid = project_id.unwrap();
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM brain_observations
+         WHERE id = $1 AND (project_id = $2 OR project_id IS NULL)
+         LIMIT 1",
+    )
+    .bind(observation_id)
+    .bind(pid)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
 }

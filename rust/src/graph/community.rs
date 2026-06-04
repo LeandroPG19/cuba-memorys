@@ -94,7 +94,7 @@ pub async fn detect(pool: &PgPool) -> Result<Vec<(usize, Vec<String>)>> {
     }
 
     let mut result: Vec<(usize, Vec<String>)> = communities.into_iter().collect();
-    result.sort_by(|a, b| b.1.len().cmp(&a.1.len())); // Largest first
+    result.sort_by_key(|b| std::cmp::Reverse(b.1.len())); // Largest first
     Ok(result)
 }
 

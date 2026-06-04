@@ -1,41 +1,50 @@
-# Python
+# Compiled and build artifacts
 __pycache__/
+*.pyc
 *.py[cod]
 *.egg-info/
 *.egg
+*.o
+*.obj
 dist/
 build/
-.mypy_cache/
-.pytest_cache/
-venv/
-.venv/
-uv.lock
-
-# Rust
 rust/target/
 
-# Environment
-.env
-.env.*
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# AI/ML caches
-.fastembed_cache/
-.claude/
-
-# MCP config (local)
-.mcp.json
-.mcpregistry_*
-
-# npm
+# Dependencies
+.venv/
+venv/
 node_modules/
 npm/.bin/
 
-# OS
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Editors
+.vscode/
+.idea/
+
+# Project-specific (cuba-memorys)
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+uv.lock
+.fastembed_cache/
+.claude/
+.mcp.json
+.mcpregistry_*
 .DS_Store
 Thumbs.db
+
+# Database backups (local only — never commit dumps)
+backups/
+!backups/.gitkeep

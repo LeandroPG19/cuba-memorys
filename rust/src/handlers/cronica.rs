@@ -135,6 +135,21 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .await
     .context("failed to insert observation")?;
 
+    if crate::core::bitemporal_enabled() {
+        let fact = crate::core::bitemporal::Fact::builder(
+            entity_name.to_string(),
+            obs_type.to_string(),
+            content.to_string(),
+        )
+        .subject_entity_id(entity_id)
+        .project_id(project_id)
+        .confidence(importance as f32)
+        .build();
+        if let Err(e) = crate::core::bitemporal::append_fact(pool, &fact).await {
+            tracing::warn!(error = %e, "bitemporal append_fact skipped (table may be absent)");
+        }
+    }
+
     tracing::info!(
         entity = %entity_name,
         obs_type = %obs_type,
@@ -153,15 +168,14 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     let entity_name_for_embed = entity_name.to_string();
     tokio::spawn(async move {
         // Fetch entity type for contextual embedding
-        let entity_type: String = sqlx::query_scalar(
-            "SELECT entity_type FROM brain_entities WHERE name = $1",
-        )
-        .bind(&entity_name_for_embed)
-        .fetch_optional(&embed_pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "concept".to_string());
+        let entity_type: String =
+            sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE name = $1")
+                .bind(&entity_name_for_embed)
+                .fetch_optional(&embed_pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "concept".to_string());
 
         // Guard: only store embeddings when the real ONNX model is loaded.
         // Hash-based fallback embeddings are not semantically valid — storing
@@ -387,13 +401,12 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
 
         let entity_id = ensure_entity(pool, entity_name, project_id).await?;
         // Fetch entity_type for contextual embedding
-        let entity_type: String = sqlx::query_scalar(
-            "SELECT entity_type FROM brain_entities WHERE id = $1",
-        )
-        .bind(entity_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|_| "concept".to_string());
+        let entity_type: String =
+            sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE id = $1")
+                .bind(entity_id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or_else(|_| "concept".to_string());
 
         let dedup = check_dedup(pool, entity_id, content).await?;
 
@@ -836,15 +849,14 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     let content_owned = content.to_string();
     let entity_name_owned = entity_name.to_string();
     tokio::spawn(async move {
-        let entity_type: String = sqlx::query_scalar(
-            "SELECT entity_type FROM brain_entities WHERE name = $1",
-        )
-        .bind(&entity_name_owned)
-        .fetch_optional(&embed_pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "concept".to_string());
+        let entity_type: String =
+            sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE name = $1")
+                .bind(&entity_name_owned)
+                .fetch_optional(&embed_pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "concept".to_string());
 
         // Same guard as observation storage: skip hash embeddings to avoid
         // corrupting the episode vector index.
@@ -951,18 +963,18 @@ fn information_density(content: &str) -> f64 {
 /// Returns lowercase keywords sorted by descending frequency.
 fn extract_tags(content: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has",
-        "had", "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall",
-        "can", "for", "and", "but", "or", "nor", "not", "no", "so", "yet", "both", "either",
-        "neither", "each", "every", "all", "any", "few", "more", "most", "other", "some", "such",
-        "than", "too", "very", "just", "about", "above", "after", "again", "also", "as", "at",
-        "before", "between", "by", "from", "how", "in", "into", "it", "its", "of", "on", "only",
-        "out", "over", "own", "same", "that", "this", "these", "those", "through", "to", "under",
-        "until", "up", "what", "when", "where", "which", "while", "who", "whom", "why", "with",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "for", "and", "but", "or", "nor", "not", "no", "so", "yet", "both", "either", "neither",
+        "each", "every", "all", "any", "few", "more", "most", "other", "some", "such", "than",
+        "too", "very", "just", "about", "above", "after", "again", "also", "as", "at", "before",
+        "between", "by", "from", "how", "in", "into", "it", "its", "of", "on", "only", "out",
+        "over", "own", "same", "that", "this", "these", "those", "through", "to", "under", "until",
+        "up", "what", "when", "where", "which", "while", "who", "whom", "why", "with",
         // Spanish
         "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "con", "por",
-        "para", "es", "son", "fue", "ser", "estar", "que", "se", "si", "como", "pero", "mas",
-        "ya", "entre", "cuando", "todo", "esta", "desde", "su", "sus", "le", "les",
+        "para", "es", "son", "fue", "ser", "estar", "que", "se", "si", "como", "pero", "mas", "ya",
+        "entre", "cuando", "todo", "esta", "desde", "su", "sus", "le", "les",
     ];
 
     let words: Vec<String> = content
@@ -978,7 +990,7 @@ fn extract_tags(content: &str) -> Vec<String> {
     }
 
     let mut sorted: Vec<(String, usize)> = freq.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     sorted.into_iter().take(5).map(|(w, _)| w).collect()
 }
 

@@ -8,15 +8,18 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::sync::chunk::{
-    payload_hash, Counts, EntityFile, EpisodeFile, ErrorFile, Manifest, ObservationRow,
-    ProjectRow, RelationRow, SCHEMA_VERSION,
+    Counts, EntityFile, EpisodeFile, ErrorFile, Manifest, ObservationRow, ProjectRow, RelationRow,
+    SCHEMA_VERSION, payload_hash,
 };
 use crate::sync::paths::{ensure_within, resolve_dir, slug};
 
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let dir_arg = args.get("dir").and_then(|v| v.as_str());
-    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("project");
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project");
     let with_embeddings = args
         .get("with_embeddings")
         .and_then(|v| v.as_bool())
@@ -50,10 +53,12 @@ async fn export(
         crate::project::current_project_id(pool).await?
     };
     let project_name: Option<String> = match project_id {
-        Some(pid) => sqlx::query_scalar("SELECT name FROM brain_projects WHERE id = $1")
-            .bind(pid)
-            .fetch_optional(pool)
-            .await?,
+        Some(pid) => {
+            sqlx::query_scalar("SELECT name FROM brain_projects WHERE id = $1")
+                .bind(pid)
+                .fetch_optional(pool)
+                .await?
+        }
         None => None,
     };
 
@@ -64,7 +69,11 @@ async fn export(
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(|(id, name, created_at)| ProjectRow { id, name, created_at })
+    .map(|(id, name, created_at)| ProjectRow {
+        id,
+        name,
+        created_at,
+    })
     .collect();
 
     // 2. Entities (with their observations bundled)
@@ -95,18 +104,21 @@ async fn export(
     let mut emb_blob: Vec<u8> = Vec::new();
 
     for (id, name, entity_type, importance, access_count, p_id, created_at) in entity_rows {
-        let observations: Vec<ObservationRow> = sqlx::query_as::<_, (
-            Uuid,
-            String,
-            String,
-            String,
-            f64,
-            Vec<String>,
-            Option<Uuid>,
-            Option<Uuid>,
-            chrono::DateTime<Utc>,
-            Option<String>,
-        )>(
+        let observations: Vec<ObservationRow> = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                String,
+                String,
+                f64,
+                Vec<String>,
+                Option<Uuid>,
+                Option<Uuid>,
+                chrono::DateTime<Utc>,
+                Option<String>,
+            ),
+        >(
             "SELECT id, content, observation_type, source, importance::float8, tags,
                     project_id, session_id, created_at, embedding_model
              FROM brain_observations
@@ -135,14 +147,13 @@ async fn export(
         // Optional embeddings blob (only requested observations)
         if with_embeddings {
             for obs in &observations {
-                let emb: Option<pgvector::Vector> = sqlx::query_scalar(
-                    "SELECT embedding FROM brain_observations WHERE id = $1",
-                )
-                .bind(obs.id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
+                let emb: Option<pgvector::Vector> =
+                    sqlx::query_scalar("SELECT embedding FROM brain_observations WHERE id = $1")
+                        .bind(obs.id)
+                        .fetch_optional(pool)
+                        .await
+                        .ok()
+                        .flatten();
                 if let Some(v) = emb {
                     let floats: Vec<f32> = v.to_vec();
                     emb_blob.extend_from_slice(obs.id.as_bytes());
@@ -281,16 +292,19 @@ async fn export(
     }
 
     // 6. Relations (single small array)
-    let relation_rows: Vec<RelationRow> = sqlx::query_as::<_, (
-        Uuid,
-        Uuid,
-        Uuid,
-        String,
-        f64,
-        bool,
-        Option<Uuid>,
-        chrono::DateTime<Utc>,
-    )>(
+    let relation_rows: Vec<RelationRow> = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            f64,
+            bool,
+            Option<Uuid>,
+            chrono::DateTime<Utc>,
+        ),
+    >(
         "SELECT id, from_entity, to_entity, relation_type, strength::float8,
                 bidirectional, project_id, created_at
          FROM brain_relations
@@ -317,7 +331,10 @@ async fn export(
         root.join("relations.json"),
         serde_json::to_vec_pretty(&relation_rows)?,
     )?;
-    std::fs::write(root.join("projects.json"), serde_json::to_vec_pretty(&projects)?)?;
+    std::fs::write(
+        root.join("projects.json"),
+        serde_json::to_vec_pretty(&projects)?,
+    )?;
 
     // 7. Optional embeddings blob
     if with_embeddings && !emb_blob.is_empty() {
@@ -380,8 +397,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         anyhow::bail!("no manifest.json at {}", root.display());
     }
     let manifest_bytes = std::fs::read(&manifest_path)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
-        .context("parse manifest.json")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("parse manifest.json")?;
 
     if manifest.schema_version > SCHEMA_VERSION + 1 {
         anyhow::bail!(
@@ -392,12 +409,11 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     }
 
     // Idempotent: re-import same manifest = no-op (PRIMARY KEY conflict)
-    let already: Option<(i32,)> = sqlx::query_as(
-        "SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1",
-    )
-    .bind(&manifest.manifest_hash)
-    .fetch_optional(pool)
-    .await?;
+    let already: Option<(i32,)> =
+        sqlx::query_as("SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1")
+            .bind(&manifest.manifest_hash)
+            .fetch_optional(pool)
+            .await?;
     if let Some((prev,)) = already {
         return Ok(serde_json::json!({
             "action": "import",
@@ -422,8 +438,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     // 1. Projects (must come first — FK target)
     let projects_path = root.join("projects.json");
     if projects_path.exists() {
-        let projects: Vec<ProjectRow> =
-            serde_json::from_slice(&std::fs::read(projects_path)?)?;
+        let projects: Vec<ProjectRow> = serde_json::from_slice(&std::fs::read(projects_path)?)?;
         for p in projects {
             let r = sqlx::query(
                 "INSERT INTO brain_projects (id, name, created_at)
@@ -560,8 +575,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     // 5. Relations
     let relations_path = root.join("relations.json");
     if relations_path.exists() {
-        let rels: Vec<RelationRow> =
-            serde_json::from_slice(&std::fs::read(relations_path)?)?;
+        let rels: Vec<RelationRow> = serde_json::from_slice(&std::fs::read(relations_path)?)?;
         for rel in rels {
             let r = sqlx::query(
                 "INSERT INTO brain_relations
@@ -744,4 +758,3 @@ async fn status(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
         "recent_imports": imported_json,
     }))
 }
-

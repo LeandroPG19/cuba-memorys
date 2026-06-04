@@ -27,8 +27,8 @@ fn unique(prefix: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_project_scoping_end_to_end() {
-    let url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL env var required for integration tests");
+    let url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
 
     // 1. Schema migration — must apply cleanly twice (idempotent).
     let pool = cuba_memorys::db::create_pool(&url)
@@ -176,13 +176,10 @@ async fn test_project_scoping_end_to_end() {
     println!("  ✓ faro under project B does not leak project A content");
 
     // vigia summary under B should count only B's rows for entities/observations.
-    let vigia_b = cuba_memorys::handlers::dispatch(
-        &pool,
-        "cuba_vigia",
-        json!({"metric": "summary"}),
-    )
-    .await
-    .expect("vigia summary B");
+    let vigia_b =
+        cuba_memorys::handlers::dispatch(&pool, "cuba_vigia", json!({"metric": "summary"}))
+            .await
+            .expect("vigia summary B");
     let vigia_b_text = extract_content_text(&vigia_b);
     assert!(
         vigia_b_text.contains("\"project_scoped\":true"),
@@ -221,13 +218,9 @@ async fn test_project_scoping_end_to_end() {
     println!("  ✓ session without project sees rows from any project");
 
     // 5. cuba_proyecto list/stats verify counts.
-    let list = cuba_memorys::handlers::dispatch(
-        &pool,
-        "cuba_proyecto",
-        json!({"action": "list"}),
-    )
-    .await
-    .expect("proyecto list");
+    let list = cuba_memorys::handlers::dispatch(&pool, "cuba_proyecto", json!({"action": "list"}))
+        .await
+        .expect("proyecto list");
     let list_text = extract_content_text(&list);
     assert!(
         list_text.contains(&project_a) && list_text.contains(&project_b),

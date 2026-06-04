@@ -196,8 +196,14 @@ mod tests {
         let blended = 0.3 * rank_norm + 0.7 * existing;
         // With overwrite: importance = rank_norm = 0.2 (destroyed)
         // With blend: importance = 0.06 + 0.56 = 0.62 (preserved most of prior)
-        assert!(blended > 0.5, "blend should preserve existing importance: got {blended}");
-        assert!(blended < existing, "blend should incorporate PageRank signal");
+        assert!(
+            blended > 0.5,
+            "blend should preserve existing importance: got {blended}"
+        );
+        assert!(
+            blended < existing,
+            "blend should incorporate PageRank signal"
+        );
     }
 
     /// Symmetric graphs produce equal ranks for all nodes. Without the early-return
