@@ -40,6 +40,7 @@ npm/.bin/
 uv.lock
 .fastembed_cache/
 .claude/
+.grok/
 .mcp.json
 .mcpregistry_*
 .DS_Store
