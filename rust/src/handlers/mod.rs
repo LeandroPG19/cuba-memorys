@@ -82,7 +82,11 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
 
     let elapsed = start.elapsed();
     let elapsed_ms = elapsed.as_millis();
-    let outcome = if dispatch_result.is_ok() { "ok" } else { "error" };
+    let outcome = if dispatch_result.is_ok() {
+        "ok"
+    } else {
+        "error"
+    };
     // V0.9: Prometheus RED metrics (no-op when feature observability disabled)
     crate::observability::record_handler(tool_name, outcome, elapsed.as_secs_f64());
     tracing::info!(tool = %tool_name, elapsed_ms = %elapsed_ms, outcome = %outcome, "handler completed");

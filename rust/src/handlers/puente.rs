@@ -17,9 +17,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "traverse" => traverse(pool, &args).await,
         "infer" => infer(pool, &args).await,
         "predict" => predict_links(pool, &args).await,
-        _ => anyhow::bail!(
-            "Invalid action: {action}. Use create/delete/traverse/infer/predict"
-        ),
+        _ => anyhow::bail!("Invalid action: {action}. Use create/delete/traverse/infer/predict"),
     }
 }
 
@@ -73,7 +71,9 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let is_new: bool = result.get::<bool, _>("is_insert");
     if !is_new {
         tracing::info!(
-            from = from, to = to, rel = rel_type,
+            from = from,
+            to = to,
+            rel = rel_type,
             "relation already exists — strengthened (Hebbian)"
         );
     }
@@ -352,7 +352,7 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
                 "entity": entity_name,
                 "predictions": [],
                 "note": "Entity not found (within current project scope)"
-            }))
+            }));
         }
     };
 
@@ -419,13 +419,35 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         })
         .collect();
 
-    let count = prediction_json.len();
+    let mut merged = prediction_json;
+    if let Ok(activated) =
+        crate::graph::activation::activated_neighbor_names(pool, entity_name, limit as usize).await
+    {
+        let existing: std::collections::HashSet<String> = merged
+            .iter()
+            .filter_map(|v| v.get("entity").and_then(|e| e.as_str()).map(str::to_string))
+            .collect();
+        for name in activated {
+            if existing.contains(&name) {
+                continue;
+            }
+            merged.push(serde_json::json!({
+                "entity": name,
+                "entity_type": "concept",
+                "adamic_adar_score": 0.0,
+                "activation_score": 0.5,
+                "recommendation": "Spreading-activation neighbor (graph proximity)"
+            }));
+        }
+    }
+
+    let count = merged.len();
     Ok(serde_json::json!({
         "action": "predict",
         "entity": entity_name,
-        "predictions": prediction_json,
+        "predictions": merged,
         "count": count,
-        "algorithm": "Adamic-Adar (sum of 1/log(degree) for common neighbors)"
+        "algorithm": "Adamic-Adar + spreading activation"
     }))
 }
 

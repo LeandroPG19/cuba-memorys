@@ -208,8 +208,8 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
             .context("input_ids tensor")?;
         let attn_t = ort::value::Tensor::from_array((shape.clone(), attn))
             .context("attention_mask tensor")?;
-        let type_t = ort::value::Tensor::from_array((shape, types))
-            .context("token_type_ids tensor")?;
+        let type_t =
+            ort::value::Tensor::from_array((shape, types)).context("token_type_ids tensor")?;
 
         let outputs = session
             .run(ort::inputs! {

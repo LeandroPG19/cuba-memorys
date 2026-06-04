@@ -90,7 +90,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
                 betweenness[w] += delta[w];
             }
         }
-
     }
 
     // Normalize (undirected Brandes: divide by (n-1)(n-2)/2)

@@ -6,6 +6,42 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.10.0] — 2026-06-04 (Cargo `0.10.0` · npm `0.10.0` · PyPI `1.12.0`)
+
+Knowledge-graph memory plane: bitemporal facts, graph metrics, retrieval benchmarks,
+and MCP unified search view — built on the v0.9 hybrid `cuba_faro` stack (not replaced).
+
+### Added
+- **Bitemporal core** (`core::bitemporal`, migration `0018`): `brain_facts` +
+  `brain_fact_supersedes`; writes mirror observations on `cuba_cronica` add/batch_add
+  and `cuba_ingesta` (via batch). **Default on**; disable with `CUBA_BITEMPORAL=0`.
+- **Entity linking & temporal query** (`core::entity_linking`, `core::temporal_query`,
+  migrations `0019`–`0020`).
+- **Graph metrics** (migration `0022`): `brain_node_metrics` with PageRank, energy,
+  betweenness; `cuba_zafra` `pagerank` persists ranks then refreshes energy scores.
+- **Communities** (migration `0023`): Leiden detection + `detect_and_persist`;
+  `cuba_zafra` action `communities`; `cuba_vigia` health metric persists tags.
+- **Spreading activation** (`graph::activation`): multi-hop propagation; enriches
+  `cuba_puente` `predict` alongside Adamic-Adar.
+- **Eval harness** (`eval/`): nDCG@k, MRR, P@k, R@k over live `cuba_faro` hybrid;
+  JSONL dataset loader + builtin smoke set; JSON reporters.
+- **MCP memory v2 view** (migration `0024`): `v_unified_memory_search` joins facts via
+  `brain_entities` (never `fact_id = node_id`).
+- **Compatibility views** (migration `0025`): `v_observations_compat`.
+- **Calibration alignment** (migration `0021`), scripts: `backup-db.sh`, `restore-db.sh`,
+  `merge-gate.sh`, `mcp_live_session_test.py`.
+
+### Changed
+- `cuba_faro` remains production hybrid search (RRF + BM25 + vector + optional rerank).
+- PageRank REM cycle also upserts `brain_node_metrics.pagerank_score`.
+
+### Notes
+- Optional Cargo features `bitemporal`, `graph-energy`, `eval-benchmarks` are markers;
+  modules ship in the default library build.
+- Run `./scripts/merge-gate.sh` before merging to `main`.
+
+---
+
 ## [0.9.3] — 2026-05-04 (Cargo `0.9.3` · npm `0.9.3` · PyPI `1.11.3`)
 
 Final piece of the v0.9.x roadmap. The cross-encoder reranker is now a

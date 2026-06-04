@@ -55,7 +55,13 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 async fn list(pool: &PgPool) -> Result<Value> {
-    type Row = (Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, i64);
+    type Row = (
+        Uuid,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        i64,
+    );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT p.id, p.name, p.created_at, p.last_active_at,
                 (SELECT COUNT(*) FROM brain_entities e WHERE e.project_id = p.id) AS entity_count
@@ -139,7 +145,7 @@ async fn stats(pool: &PgPool, name: Option<&str>) -> Result<Value> {
                 "action": "stats",
                 "project": null,
                 "note": "no active project — pass `name` or start a session with --project",
-            }))
+            }));
         }
     };
 
@@ -163,11 +169,10 @@ async fn stats(pool: &PgPool, name: Option<&str>) -> Result<Value> {
             .bind(pid)
             .fetch_one(pool)
             .await?;
-    let errors: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM brain_errors WHERE project_id = $1")
-            .bind(pid)
-            .fetch_one(pool)
-            .await?;
+    let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM brain_errors WHERE project_id = $1")
+        .bind(pid)
+        .fetch_one(pool)
+        .await?;
     let relations: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM brain_relations WHERE project_id = $1")
             .bind(pid)
@@ -187,14 +192,13 @@ async fn stats(pool: &PgPool, name: Option<&str>) -> Result<Value> {
 }
 
 async fn rename(pool: &PgPool, from: &str, to: &str) -> Result<Value> {
-    let updated: Option<(Uuid,)> = sqlx::query_as(
-        "UPDATE brain_projects SET name = $2 WHERE name = $1 RETURNING id",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_optional(pool)
-    .await
-    .context("rename failed")?;
+    let updated: Option<(Uuid,)> =
+        sqlx::query_as("UPDATE brain_projects SET name = $2 WHERE name = $1 RETURNING id")
+            .bind(from)
+            .bind(to)
+            .fetch_optional(pool)
+            .await
+            .context("rename failed")?;
     Ok(serde_json::json!({
         "action": "rename",
         "from": from,

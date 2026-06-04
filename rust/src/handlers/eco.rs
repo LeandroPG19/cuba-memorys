@@ -38,9 +38,13 @@ async fn positive(
     observation_id: Option<&str>,
 ) -> Result<Value> {
     let mut boosted = 0u32;
+    let project_id = crate::project::current_project_id(pool).await?;
 
     if let Some(obs_id_str) = observation_id {
         let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
+        if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
+            anyhow::bail!("observation not in current project scope");
+        }
         let result = sqlx::query(
             "UPDATE brain_observations SET
                 importance = LEAST(
@@ -66,9 +70,11 @@ async fn positive(
                 ),
                 access_count = access_count + 1,
                 updated_at = NOW()
-             WHERE name = $1",
+             WHERE name = $1
+               AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
         )
         .bind(name)
+        .bind(project_id)
         .execute(pool)
         .await?;
         boosted += result.rows_affected() as u32;
@@ -88,9 +94,13 @@ async fn negative(
     observation_id: Option<&str>,
 ) -> Result<Value> {
     let mut decreased = 0u32;
+    let project_id = crate::project::current_project_id(pool).await?;
 
     if let Some(obs_id_str) = observation_id {
         let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
+        if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
+            anyhow::bail!("observation not in current project scope");
+        }
         let result = sqlx::query(
             "UPDATE brain_observations SET
                 importance = GREATEST(
@@ -114,9 +124,11 @@ async fn negative(
                     0.0
                 ),
                 updated_at = NOW()
-             WHERE name = $1",
+             WHERE name = $1
+               AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
         )
         .bind(name)
+        .bind(project_id)
         .execute(pool)
         .await?;
         decreased += result.rows_affected() as u32;
@@ -133,6 +145,10 @@ async fn negative(
 async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> Result<Value> {
     let obs_id_str = observation_id.context("observation_id required for correct")?;
     let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
+    let project_id = crate::project::current_project_id(pool).await?;
+    if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
+        anyhow::bail!("observation not in current project scope");
+    }
     let correction = args
         .get("correction")
         .and_then(|v| v.as_str())

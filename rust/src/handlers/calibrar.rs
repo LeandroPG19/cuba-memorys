@@ -17,9 +17,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "resolve" => resolve(pool, &args).await,
         "trust" => trust_stats(pool).await,
         "metrics" => metrics(pool).await,
-        _ => anyhow::bail!(
-            "Invalid action: {action}. Use stats/history/resolve/trust/metrics"
-        ),
+        _ => anyhow::bail!("Invalid action: {action}. Use stats/history/resolve/trust/metrics"),
     }
 }
 
@@ -124,8 +122,7 @@ async fn trust_stats(pool: &PgPool) -> Result<Value> {
             let p_correct = alpha / (alpha + beta);
             let total = alpha + beta - 2.0; // resolved outcomes (subtract Beta(1,1) prior)
             // Beta variance = αβ / ((α+β)² · (α+β+1)) — narrows as data grows
-            let variance =
-                (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
+            let variance = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
             serde_json::json!({
                 "source": source,
                 "alpha": alpha,
@@ -309,7 +306,11 @@ async fn resolve(pool: &PgPool, args: &Value) -> Result<Value> {
         .await
         .unwrap_or_default();
 
-        let column = if outcome == "correct" { "alpha" } else { "beta" };
+        let column = if outcome == "correct" {
+            "alpha"
+        } else {
+            "beta"
+        };
         for (source,) in &sources {
             let sql = format!(
                 "INSERT INTO brain_source_trust (source, alpha, beta, updated_at)

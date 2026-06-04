@@ -90,9 +90,9 @@ pub fn fuse(
     let mut unique: Vec<RankedResult> = Vec::new();
     for (id, score) in sorted {
         if let Some(mut item) = items.remove(&id) {
-            let is_dup = unique
-                .iter()
-                .any(|existing| text_overlap(&item.content, &existing.content) > dedup_threshold);
+            let is_dup = unique.iter().any(|existing| {
+                content_overlap(&item.content, &existing.content) > dedup_threshold
+            });
             if !is_dup {
                 item.score = score;
                 unique.push(item);
@@ -108,7 +108,8 @@ pub fn fuse(
 /// V0.7 (Mejora 8b): Tokenizes by non-alphanumeric characters instead of
 /// whitespace only. Fixes: "configuracion." != "configuracion" which caused
 /// false negatives in multilingual dedup detection.
-fn text_overlap(a: &str, b: &str) -> f64 {
+/// Lexical overlap ratio for post-fusion deduplication (used by `cuba_faro`).
+pub fn content_overlap(a: &str, b: &str) -> f64 {
     let tokenize = |s: &str| -> HashSet<String> {
         s.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -170,12 +171,12 @@ mod tests {
 
     #[test]
     fn test_text_overlap_identical() {
-        assert!((text_overlap("hello world", "hello world") - 1.0).abs() < 0.01);
+        assert!((content_overlap("hello world", "hello world") - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_text_overlap_disjoint() {
-        assert_eq!(text_overlap("hello world", "foo bar"), 0.0);
+        assert_eq!(content_overlap("hello world", "foo bar"), 0.0);
     }
 
     #[test]

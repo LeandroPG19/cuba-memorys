@@ -9,6 +9,27 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 
+async fn refresh_ood_cache(pool: &PgPool, project_id: Option<uuid::Uuid>) -> Result<()> {
+    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats};
+    let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
+        "SELECT embedding FROM brain_observations
+         WHERE embedding IS NOT NULL AND observation_type != 'superseded'
+           AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         ORDER BY importance DESC LIMIT 500",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    if raw.len() < MIN_SAMPLES_FOR_OOD {
+        return Ok(());
+    }
+    let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
+    if let Some(stats) = OodStats::fit(&embeddings) {
+        crate::search::ood_cache::store(project_id, stats);
+    }
+    Ok(())
+}
+
 pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -124,6 +145,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(serde_json::json!({"action": "merge", "merged": merged, "threshold": sim_threshold}))
         }
         "stats" => {
+            let project_id = crate::project::current_project_id(pool).await?;
+            refresh_ood_cache(pool, project_id).await.ok();
             let entities: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_entities")
                 .fetch_one(pool)
                 .await?;
@@ -141,7 +164,21 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         }
         "pagerank" => {
             let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
-            Ok(serde_json::json!({"action": "pagerank", "updated": ranked}))
+            let energy = crate::graph::energy::refresh_energy_scores(pool)
+                .await
+                .unwrap_or(0);
+            Ok(
+                serde_json::json!({"action": "pagerank", "updated": ranked, "energy_refreshed": energy}),
+            )
+        }
+        "communities" => {
+            let (communities, nodes) = crate::graph::community::detect_and_persist(pool).await?;
+            Ok(serde_json::json!({
+                "action": "communities",
+                "communities": communities.len(),
+                "nodes_tagged": nodes,
+                "algorithm": "leiden_v1"
+            }))
         }
         "summarize" => {
             let entity_name = args

@@ -208,26 +208,23 @@ async fn health(pool: &PgPool) -> Result<Value> {
     .await
     .unwrap_or((0,));
 
-    let active_triggers: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM brain_triggers WHERE active = TRUE",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    let active_triggers: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM brain_triggers WHERE active = TRUE")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0,));
 
-    let obs_table_size: (String,) = sqlx::query_as(
-        "SELECT pg_size_pretty(pg_total_relation_size('brain_observations'))",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(("unknown".to_string(),));
+    let obs_table_size: (String,) =
+        sqlx::query_as("SELECT pg_size_pretty(pg_total_relation_size('brain_observations'))")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(("unknown".to_string(),));
 
-    let entities_table_size: (String,) = sqlx::query_as(
-        "SELECT pg_size_pretty(pg_total_relation_size('brain_entities'))",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(("unknown".to_string(),));
+    let entities_table_size: (String,) =
+        sqlx::query_as("SELECT pg_size_pretty(pg_total_relation_size('brain_entities'))")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(("unknown".to_string(),));
 
     Ok(serde_json::json!({
         "metric": "health",
@@ -315,8 +312,8 @@ async fn drift(pool: &PgPool) -> Result<Value> {
 }
 
 async fn communities(pool: &PgPool) -> Result<Value> {
-    match crate::graph::community::detect(pool).await {
-        Ok(communities) => {
+    match crate::graph::community::detect_and_persist(pool).await {
+        Ok((communities, nodes_tagged)) => {
             let community_json: Vec<Value> = communities
                 .iter()
                 .map(|(id, members)| {
@@ -330,8 +327,10 @@ async fn communities(pool: &PgPool) -> Result<Value> {
             Ok(serde_json::json!({
                 "metric": "communities",
                 "algorithm": "leiden",
+                "persisted": true,
+                "nodes_tagged": nodes_tagged,
                 "communities": community_json,
-                "count": community_json.len()
+                "count": communities.len()
             }))
         }
         Err(e) => {

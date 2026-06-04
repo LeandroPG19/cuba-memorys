@@ -94,8 +94,54 @@ pub async fn detect(pool: &PgPool) -> Result<Vec<(usize, Vec<String>)>> {
     }
 
     let mut result: Vec<(usize, Vec<String>)> = communities.into_iter().collect();
-    result.sort_by(|a, b| b.1.len().cmp(&a.1.len())); // Largest first
+    result.sort_by_key(|b| std::cmp::Reverse(b.1.len())); // Largest first
     Ok(result)
+}
+
+/// Detect communities and persist to `brain_communities` + `brain_node_metrics`.
+pub async fn detect_and_persist(pool: &PgPool) -> Result<(Vec<(usize, Vec<String>)>, usize)> {
+    let communities = detect(pool).await?;
+    if communities.is_empty() {
+        return Ok((vec![], 0));
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE brain_node_metrics SET community_id = NULL")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM brain_communities")
+        .execute(&mut *tx)
+        .await?;
+
+    let mut nodes_updated = 0usize;
+    for (idx, members) in &communities {
+        let community_name = format!("leiden_{idx}");
+        let row: (uuid::Uuid,) = sqlx::query_as(
+            "INSERT INTO brain_communities (community_name, algorithm_version)
+             VALUES ($1, 'leiden_v1') RETURNING community_id",
+        )
+        .bind(&community_name)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for name in members {
+            let updated = sqlx::query(
+                r#"INSERT INTO brain_node_metrics (node_id, community_id, last_calculated)
+                   SELECT e.id, $1, NOW() FROM brain_entities e WHERE e.name = $2
+                   ON CONFLICT (node_id) DO UPDATE SET
+                     community_id = EXCLUDED.community_id,
+                     last_calculated = NOW()"#,
+            )
+            .bind(row.0)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+            nodes_updated += updated.rows_affected() as usize;
+        }
+    }
+
+    tx.commit().await?;
+    Ok((communities, nodes_updated))
 }
 
 /// Phase 1: Local Move — greedily move nodes to maximize modularity gain.

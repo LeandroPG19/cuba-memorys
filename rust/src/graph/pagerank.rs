@@ -157,6 +157,20 @@ pub async fn compute_and_store(pool: &PgPool) -> Result<usize> {
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        INSERT INTO brain_node_metrics (node_id, pagerank_score, last_calculated)
+        SELECT UNNEST($1::uuid[]), UNNEST($2::float8[]), NOW()
+        ON CONFLICT (node_id) DO UPDATE SET
+            pagerank_score = EXCLUDED.pagerank_score,
+            last_calculated = NOW()
+        "#,
+    )
+    .bind(&ids)
+    .bind(&normalized)
+    .execute(pool)
+    .await?;
+
     tracing::info!(entities = n, "PageRank blended (α=0.3, P1 batch)");
     Ok(n)
 }
@@ -196,8 +210,14 @@ mod tests {
         let blended = 0.3 * rank_norm + 0.7 * existing;
         // With overwrite: importance = rank_norm = 0.2 (destroyed)
         // With blend: importance = 0.06 + 0.56 = 0.62 (preserved most of prior)
-        assert!(blended > 0.5, "blend should preserve existing importance: got {blended}");
-        assert!(blended < existing, "blend should incorporate PageRank signal");
+        assert!(
+            blended > 0.5,
+            "blend should preserve existing importance: got {blended}"
+        );
+        assert!(
+            blended < existing,
+            "blend should incorporate PageRank signal"
+        );
     }
 
     /// Symmetric graphs produce equal ranks for all nodes. Without the early-return

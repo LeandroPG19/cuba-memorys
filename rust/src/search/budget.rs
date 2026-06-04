@@ -10,7 +10,7 @@
 //! Anthropic tokenizer notes.
 
 use std::sync::OnceLock;
-use tiktoken_rs::{cl100k_base, CoreBPE};
+use tiktoken_rs::{CoreBPE, cl100k_base};
 
 /// Lazy-initialized BPE encoder. cl100k_base allocates ~30MB.
 fn encoder() -> &'static CoreBPE {

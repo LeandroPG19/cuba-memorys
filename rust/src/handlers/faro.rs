@@ -113,7 +113,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     // V0.9: OOD pre-check (when requested). Runs before any DB call so an
     // OOD query never burns search latency. Cheap O(d²) on cached μ, Σ⁻¹.
-    if abstain_ood && mode == "hybrid"
+    if abstain_ood
+        && mode == "hybrid"
         && let Some(answer) = check_ood(pool, query, ood_threshold, project_id).await
     {
         return Ok(answer);
@@ -188,6 +189,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = crate::search::rrf::query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
+    // BM25 weight tracks text channel (Jaynes routing extension — keyword-heavy queries).
+    let bm25_weight = text_weight;
 
     // Run text search (always available — V8 graceful degradation base)
     let mut text_results = text_search(
@@ -326,7 +329,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let rrf_score = 1.0 / (rrf_k + rank as f64 + 1.0);
+            let rrf_score = bm25_weight / (rrf_k + rank as f64 + 1.0);
             fused_scores
                 .entry(id.clone())
                 .and_modify(|fr| {
@@ -351,6 +354,30 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             .partial_cmp(&a.1.total)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // Post-fusion dedup (Cormack RRF + lexical overlap — same as rrf::fuse).
+    const FUSION_DEDUP: f64 = 0.85;
+    let mut deduped: Vec<(String, FusedResult)> = Vec::with_capacity(results.len());
+    for (id, fr) in results {
+        let content = fr
+            .data
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let duplicate = deduped.iter().any(|(_, existing)| {
+            let other = existing
+                .data
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            crate::search::rrf::content_overlap(content, other) > FUSION_DEDUP
+        });
+        if !duplicate {
+            deduped.push((id, fr));
+        }
+    }
+    results = deduped;
+
     // V0.9: defer truncation. With diversify=true we need a wider pool
     // (up to limit*2) so MMR has candidates to choose from. With rerank
     // enabled we keep top-50 so the cross-encoder has enough signal.
@@ -521,10 +548,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     "vector_score".to_string(),
                     serde_json::json!(fr.vector_score),
                 );
-                obj.insert(
-                    "bm25_score".to_string(),
-                    serde_json::json!(fr.bm25_score),
-                );
+                obj.insert("bm25_score".to_string(), serde_json::json!(fr.bm25_score));
                 obj.insert(
                     "session_boosted".to_string(),
                     serde_json::json!(fr.session_boosted),
@@ -601,11 +625,7 @@ fn compact_result(r: &Value) -> Value {
 ///       Previously only used pg_trgm, missing all paraphrase matches.
 ///       Also eliminates double trigram scan (Mejora 9): entity_name is now
 ///       returned from the first query instead of running a second scan.
-async fn verify_claim(
-    pool: &PgPool,
-    claim: &str,
-    project_id: Option<uuid::Uuid>,
-) -> Result<Value> {
+async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>) -> Result<Value> {
     use std::collections::HashMap;
 
     // V0.9: bump HNSW ef_search 100 → 200 for verify-mode queries.
@@ -647,9 +667,8 @@ async fn verify_claim(
     let semantic_evidence: Vec<(uuid::Uuid, String, f64, String, String)> =
         if crate::embeddings::onnx::is_model_loaded() {
             match crate::embeddings::onnx::embed(claim).await {
-                Ok(emb) => {
-                    sqlx::query_as(
-                        "SELECT o.id, o.content,
+                Ok(emb) => sqlx::query_as(
+                    "SELECT o.id, o.content,
                                 (1.0 - (o.embedding <=> $1::vector))::float8 AS sim,
                                 o.observation_type, e.name AS entity_name
                          FROM brain_observations o
@@ -660,13 +679,12 @@ async fn verify_claim(
                            AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
                          ORDER BY o.embedding <=> $1::vector
                          LIMIT 10",
-                    )
-                    .bind(pgvector::Vector::from(emb))
-                    .bind(project_id)
-                    .fetch_all(pool)
-                    .await
-                    .unwrap_or_default()
-                }
+                )
+                .bind(pgvector::Vector::from(emb))
+                .bind(project_id)
+                .fetch_all(pool)
+                .await
+                .unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(error = %e, "embedding failed during verify — skipping semantic evidence");
                     vec![]
@@ -684,12 +702,7 @@ async fn verify_claim(
         merged
             .entry(*id)
             .and_modify(|(_, existing_sim, _, _)| *existing_sim = existing_sim.max(*sim))
-            .or_insert((
-                content.clone(),
-                *sim,
-                obs_type.clone(),
-                entity_name.clone(),
-            ));
+            .or_insert((content.clone(), *sim, obs_type.clone(), entity_name.clone()));
     }
 
     // Sort by similarity descending
@@ -703,7 +716,10 @@ async fn verify_claim(
     evidence_list.truncate(10);
 
     let similarities: Vec<f64> = evidence_list.iter().map(|(_, _, s, _, _)| *s).collect();
-    let sources: Vec<&str> = evidence_list.iter().map(|(_, _, _, t, _)| t.as_str()).collect();
+    let sources: Vec<&str> = evidence_list
+        .iter()
+        .map(|(_, _, _, t, _)| t.as_str())
+        .collect();
 
     // Mejora 9: top_entity from merged results (no second query)
     let top_entity: Option<String> = evidence_list.first().map(|(_, _, _, _, e)| e.clone());
@@ -1091,11 +1107,7 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
 /// For each top result that has an entity name, we query its related entities
 /// to provide graph context. This helps the AI understand the broader
 /// knowledge structure around search matches.
-async fn enrich_graphrag(
-    pool: &PgPool,
-    results: &[(String, FusedResult)],
-    top_k: usize,
-) -> Value {
+async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k: usize) -> Value {
     let mut context: Vec<Value> = Vec::new();
 
     for (_, fr) in results.iter().take(top_k) {
@@ -1143,6 +1155,27 @@ async fn enrich_graphrag(
     serde_json::json!(context)
 }
 
+fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
+    if dist <= threshold {
+        return None;
+    }
+    Some(serde_json::json!({
+        "mode": "hybrid",
+        "query": query,
+        "results": [],
+        "count": 0,
+        "ood": true,
+        "mahalanobis_distance": dist,
+        "ood_threshold": threshold,
+        "abstain_reason": format!(
+            "Query is out of distribution (distance {:.2} > threshold {:.2}). \
+             No relevant memory found — consider rephrasing or adding the topic explicitly.",
+            dist, threshold
+        ),
+        "graphrag_context": []
+    }))
+}
+
 /// V0.9: Out-of-distribution pre-check. Returns Some(answer) if the query
 /// should abstain (no relevant memory exists), or None to proceed with normal
 /// search. Caller is `cuba_faro` with `abstain_ood=true`.
@@ -1158,7 +1191,7 @@ async fn check_ood(
     threshold: f64,
     project_id: Option<uuid::Uuid>,
 ) -> Option<Value> {
-    use crate::search::ood::{OodStats, MIN_SAMPLES_FOR_OOD};
+    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats};
 
     if !crate::embeddings::onnx::is_model_loaded() {
         return None;
@@ -1179,32 +1212,20 @@ async fn check_ood(
     .await
     .ok()?;
 
+    if let Some(stats) = crate::search::ood_cache::get(project_id)
+        && let Some(dist) = stats.mahalanobis(&query_emb)
+    {
+        return ood_abstain_json(query, threshold, dist);
+    }
+
     if raw.len() < MIN_SAMPLES_FOR_OOD {
         return None;
     }
     let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
     let stats = OodStats::fit(&embeddings)?;
+    crate::search::ood_cache::store(project_id, stats.clone());
     let dist = stats.mahalanobis(&query_emb)?;
-
-    if dist > threshold {
-        Some(serde_json::json!({
-            "mode": "hybrid",
-            "query": query,
-            "results": [],
-            "count": 0,
-            "ood": true,
-            "mahalanobis_distance": dist,
-            "ood_threshold": threshold,
-            "abstain_reason": format!(
-                "Query is out of distribution (distance {:.2} > threshold {:.2}). \
-                 No relevant memory found — consider rephrasing or adding the topic explicitly.",
-                dist, threshold
-            ),
-            "graphrag_context": []
-        }))
-    } else {
-        None
-    }
+    ood_abstain_json(query, threshold, dist)
 }
 
 #[cfg(test)]
@@ -1250,17 +1271,35 @@ mod tests {
     #[test]
     fn test_entropy_weights_asymptotes() {
         let (tw_low, vw_low) = entropy_weights(0.0);
-        assert!(tw_low > 0.68, "low entropy should be text-heavy: got text_w={tw_low}");
-        assert!(vw_low < 0.32, "low entropy should minimize vector_w: got {vw_low}");
+        assert!(
+            tw_low > 0.68,
+            "low entropy should be text-heavy: got text_w={tw_low}"
+        );
+        assert!(
+            vw_low < 0.32,
+            "low entropy should minimize vector_w: got {vw_low}"
+        );
 
         let (tw_high, vw_high) = entropy_weights(10.0);
-        assert!(tw_high < 0.32, "high entropy should minimize text_w: got {tw_high}");
-        assert!(vw_high > 0.68, "high entropy should be vector-heavy: got {vw_high}");
+        assert!(
+            tw_high < 0.32,
+            "high entropy should minimize text_w: got {tw_high}"
+        );
+        assert!(
+            vw_high > 0.68,
+            "high entropy should be vector-heavy: got {vw_high}"
+        );
 
         // Midpoint (entropy = 2.75): exact 50/50 split
         let (tw_mid, vw_mid) = entropy_weights(2.75);
-        assert!((tw_mid - 0.5).abs() < 1e-10, "midpoint should give text_w=0.5: got {tw_mid}");
-        assert!((vw_mid - 0.5).abs() < 1e-10, "midpoint should give vector_w=0.5: got {vw_mid}");
+        assert!(
+            (tw_mid - 0.5).abs() < 1e-10,
+            "midpoint should give text_w=0.5: got {tw_mid}"
+        );
+        assert!(
+            (vw_mid - 0.5).abs() < 1e-10,
+            "midpoint should give vector_w=0.5: got {vw_mid}"
+        );
     }
 
     /// V2 step function had a 40% jump at entropy=2.0. Verify V3 sigmoid

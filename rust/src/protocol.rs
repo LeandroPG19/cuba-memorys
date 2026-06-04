@@ -62,7 +62,7 @@ pub fn client_supports_sampling() -> bool {
 
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Per-process global writer queue. All outbound JSON-RPC messages go through
 /// this; a single writer task owns stdout.
@@ -146,7 +146,9 @@ pub async fn request_sampling(prompt: &str) -> anyhow::Result<String> {
             }
         }
     });
-    outbound().send(req).map_err(|_| anyhow::anyhow!("outbound channel closed"))?;
+    outbound()
+        .send(req)
+        .map_err(|_| anyhow::anyhow!("outbound channel closed"))?;
 
     // 30s ceiling to match HANDLER_TIMEOUT — no judge call should hang the agent.
     let response = match tokio::time::timeout(HANDLER_TIMEOUT, rx).await {
@@ -388,10 +390,11 @@ pub async fn run_mcp() -> Result<()> {
     // a generous window to finish) before closing the writer. Without this
     // wait the writer would be aborted while handlers are still trying to
     // push their responses onto the channel.
-    tracing::info!("stdin closed — draining {} in-flight handlers", in_flight.len());
-    let drain = async {
-        while in_flight.join_next().await.is_some() {}
-    };
+    tracing::info!(
+        "stdin closed — draining {} in-flight handlers",
+        in_flight.len()
+    );
+    let drain = async { while in_flight.join_next().await.is_some() {} };
     let _ = tokio::time::timeout(HANDLER_TIMEOUT * 2, drain).await;
 
     // Close the outbound channel by dropping the cached sender so the writer
@@ -404,11 +407,7 @@ pub async fn run_mcp() -> Result<()> {
 
     rem_handle.abort();
     // Give the writer a brief grace period to flush remaining envelopes.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        writer_handle,
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), writer_handle).await;
     tracing::info!("REM daemon + writer drained, shutting down");
 
     Ok(())
@@ -426,10 +425,8 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
                     .get("capabilities")
                     .and_then(|c| c.get("sampling"))
                     .is_some();
-                CLIENT_SUPPORTS_SAMPLING.store(
-                    sampling_advertised,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                CLIENT_SUPPORTS_SAMPLING
+                    .store(sampling_advertised, std::sync::atomic::Ordering::Relaxed);
                 if sampling_advertised {
                     tracing::info!("client supports MCP sampling — judge auto-prefers it");
                 }
@@ -464,10 +461,7 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
         "resources/list" => list_resources(pool).await,
         "resources/read" => {
             let params = request.params.unwrap_or(Value::Null);
-            let uri = params
-                .get("uri")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
             read_resource(pool, uri).await
         }
 
@@ -655,7 +649,6 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-
 // ── V0.9: MCP Resources implementation ──────────────────────────
 
 /// List recently active entities, projects and snapshots as cuba:// URIs.
@@ -791,12 +784,11 @@ async fn read_resource(pool: &PgPool, uri: &str) -> Result<Value> {
         let id: uuid::Uuid = id_str
             .parse()
             .map_err(|_| anyhow::anyhow!("invalid snapshot UUID"))?;
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT summary_md FROM brain_compaction_snapshots WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT summary_md FROM brain_compaction_snapshots WHERE id = $1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
         let md = row
             .map(|(m,)| m)
             .ok_or_else(|| anyhow::anyhow!("snapshot not found: {id}"))?;

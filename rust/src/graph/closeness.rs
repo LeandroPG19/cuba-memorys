@@ -131,21 +131,17 @@ pub async fn compute_top(pool: &PgPool, top_n: usize) -> Result<Vec<(String, f64
 
     // Resolve names for the top
     let ids: Vec<Uuid> = ranked.iter().map(|(id, _)| *id).collect();
-    let names: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, name FROM brain_entities WHERE id = ANY($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?;
+    let names: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, name FROM brain_entities WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
     let name_map: HashMap<Uuid, String> = names.into_iter().collect();
 
     Ok(ranked
         .into_iter()
         .map(|(id, sc)| {
-            let name = name_map
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| id.to_string());
+            let name = name_map.get(&id).cloned().unwrap_or_else(|| id.to_string());
             (name, sc.harmonic, sc.closeness)
         })
         .collect())

@@ -11,5 +11,6 @@ pub mod cache;
 pub mod confidence;
 pub mod mmr;
 pub mod ood;
+pub mod ood_cache;
 pub mod rerank;
 pub mod rrf;

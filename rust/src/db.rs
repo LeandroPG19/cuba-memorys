@@ -5,7 +5,7 @@
 //! idempotent (DO $$ ... IF NOT EXISTS ... END $$) so legacy DBs (v0.7/v0.8)
 //! that already have schema applied remain compatible:
 //!
-//! - Fresh DB: `_sqlx_migrations` table is empty → all 13 migrations run in order.
+//! - Fresh DB: `_sqlx_migrations` table is empty → all migrations run in order (0001→0025).
 //! - Legacy v0.8 DB: `_sqlx_migrations` is empty BUT schema exists → migrations
 //!   re-run safely because every block checks `information_schema` first.
 //!
@@ -36,6 +36,22 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SET timezone TO 'UTC'")
+                    .execute(&mut *conn)
+                    .await?;
+                sqlx::query("SET hnsw.ef_search = 100")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                sqlx::query("SELECT set_config('app.current_project', '', false)")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                Ok(())
+            })
+        })
         .connect_with(connect_options)
         .await
         .context("failed to connect to PostgreSQL")?;
@@ -103,8 +119,8 @@ mod tests {
     fn migrator_loaded() {
         let count = MIGRATOR.iter().count();
         assert!(
-            count >= 13,
-            "expected at least 13 migrations (0001-0013), got {count}"
+            count >= 25,
+            "expected at least 25 migrations (0001-0025), got {count}"
         );
     }
 

@@ -18,8 +18,8 @@ fn unique(prefix: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn test_v09_all() {
-    let url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL env var required for integration tests");
+    let url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("pool init w/ sqlx-migrate");
@@ -42,7 +42,10 @@ async fn test_v09_all() {
             "expected ≥14 applied migrations, got {}",
             count.0
         );
-        println!("  ✓ sqlx-migrate is idempotent ({} migrations applied)", count.0);
+        println!(
+            "  ✓ sqlx-migrate is idempotent ({} migrations applied)",
+            count.0
+        );
         drop(pool2);
     }
 
@@ -122,7 +125,10 @@ async fn test_v09_all() {
     .expect("faro with diversify");
     let no_div_count = count_results(&no_div);
     let with_div_count = count_results(&with_div);
-    assert!(no_div_count > 0 && with_div_count > 0, "both must return results");
+    assert!(
+        no_div_count > 0 && with_div_count > 0,
+        "both must return results"
+    );
     println!("  ✓ MMR returns {with_div_count} diversified results");
 
     // ── PR #6 Phase 2: OOD abstention ────────────────────────────
@@ -187,30 +193,23 @@ async fn test_v09_all() {
     // ── PR #7 Phase 2: Testing effect — high access_count decays slower ─
     println!("  [7/8] PR #7: testing effect (Karpicke-Roediger 2008)");
     // Run decay; the SQL formula `(1 + ln(1+access_count))` is exercised
-    let decay_result = cuba_memorys::handlers::dispatch(
-        &pool,
-        "cuba_zafra",
-        json!({"action": "decay"}),
-    )
-    .await
-    .expect("zafra decay");
+    let decay_result =
+        cuba_memorys::handlers::dispatch(&pool, "cuba_zafra", json!({"action": "decay"}))
+            .await
+            .expect("zafra decay");
     let decay_text = extract_text(&decay_result);
     assert!(
-        decay_text.contains("testing_effect")
-            && decay_text.contains("Karpicke-Roediger"),
+        decay_text.contains("testing_effect") && decay_text.contains("Karpicke-Roediger"),
         "decay response must advertise testing effect formula"
     );
     println!("  ✓ decay formula includes testing-effect modulation");
 
     // ── PR #7 Phase 5: Source credibility — trust action returns Beta ────
     println!("  [8/8] PR #7: source credibility (Yin-Han-Yu IEEE TKDE 2008)");
-    let trust = cuba_memorys::handlers::dispatch(
-        &pool,
-        "cuba_calibrar",
-        json!({"action": "trust"}),
-    )
-    .await
-    .expect("calibrar trust");
+    let trust =
+        cuba_memorys::handlers::dispatch(&pool, "cuba_calibrar", json!({"action": "trust"}))
+            .await
+            .expect("calibrar trust");
     let trust_text = extract_text(&trust);
     assert!(
         trust_text.contains("\"alpha\":") && trust_text.contains("\"beta\":"),

@@ -42,13 +42,12 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
 
     // Resolve the session's project once (used both for filtering and for
     // tagging the snapshot row).
-    let project_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT project_id FROM brain_sessions WHERE id = $1",
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await?
-    .flatten();
+    let project_id: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM brain_sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
 
     // 1. Markdown summary via shared eco::reflect
     let summary_md = super::eco::reflect(pool, session_id).await?;
@@ -150,12 +149,11 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         .collect();
 
     // 6. Active goals from the session
-    let goals_row: Option<(Value,)> = sqlx::query_as(
-        "SELECT goals FROM brain_sessions WHERE id = $1",
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await?;
+    let goals_row: Option<(Value,)> =
+        sqlx::query_as("SELECT goals FROM brain_sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await?;
     let active_goals = goals_row
         .map(|(g,)| g)
         .unwrap_or_else(|| Value::Array(vec![]));

@@ -5,8 +5,10 @@
 
 pub mod cognitive;
 pub mod constants;
+pub mod core;
 pub mod db;
 pub mod embeddings;
+pub mod eval;
 pub mod graph;
 pub mod handlers;
 pub mod observability;
