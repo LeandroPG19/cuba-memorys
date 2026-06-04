@@ -13,17 +13,19 @@
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, neuroscience-inspired algorithms, and anti-hallucination grounding.
 
-23 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
+25 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v0.9.0** — Search & Retrieval upgrades + Cognitive layer refinements + sqlx-migrate foundation. Zero breaking changes.
-> **`cuba_faro`** ahora hace fusión RRF 3-way (text + vector + **BM25 ts_rank_cd**, Robertson-Walker 1994), con **MMR diversification** opcional (Carbonell-Goldstein 1998, λ=0.7), **OOD abstention** vía Mahalanobis con ridge-regularized Σ⁻¹ (Lee NeurIPS 2018), `hnsw.ef_search=200` dinámico en `verify` (recall@10≈0.99), y conteo exacto de tokens vía **tiktoken-rs cl100k_base** (reemplaza la heurística "len/4" que mis-contaba español 30%).
-> **Cognitive**: `cuba_zafra decay` con **testing effect** (Karpicke-Roediger Science 2008) — halflife escalado por `(1 + ln(1+access_count))`. **Hebbian Δt-aware** (anti-saturación de bursts, τ=600s, inspirado en STDP triplet). **Robbins-Monro stochastic LR** en Oja positive/negative (`η = 0.05/√(1+access/100)`). **Conformal prediction** empírica reemplaza z-score gaussiano en PE gating (Vovk 2005, Angelopoulos-Bates 2023) — distribution-free, captura anisotropía documentada por Ethayarajh EMNLP 2019. **Source credibility tracking** Beta(α,β) Bayesian update por outcome (Yin-Han-Yu IEEE TKDE 2008), nueva action `cuba_calibrar trust`.
-> **Foundation**: migraciones SQL versionadas via `sqlx-migrate` (14 archivos, idempotente, bootstrap transparente). 23 tools, 97 tests, 0 clippy warnings, 0 tech debt.
+> **v0.10.0** (2026-06-04) — Knowledge-graph memory plane on top of the v0.9 hybrid stack. **No breaking MCP API changes** for existing clients.
+> **Bitemporal facts** (`brain_facts`, migration `0018`): every `cuba_cronica` add/batch_add and `cuba_ingesta` ingest mirrors into valid-time rows — **on by default** (`CUBA_BITEMPORAL=0` to disable).
+> **Graph metrics** (`0022`–`0023`): `brain_node_metrics` (PageRank, energy, betweenness) + `brain_communities`; `cuba_zafra pagerank` / **`communities`** persist; `cuba_vigia` communities metric writes tags.
+> **Spreading activation** enriches `cuba_puente predict` alongside Adamic-Adar.
+> **Eval harness** (`rust/src/eval/`): nDCG@k, MRR, P@k, R@k over live `cuba_faro` hybrid (production path unchanged).
+> **Unified search view** (`v_unified_memory_search`, `0024`) joins facts via `brain_entities` — never `fact_id = node_id`.
+> **Shipped**: Cargo/npm `0.10.0`, PyPI `1.12.0`, GitHub Release `v0.10.0`, MCP Registry. QA: `./scripts/merge-gate.sh` (118 unit + smoke, E2E 73, MCP live 25).
 
-> [!IMPORTANT]
-> **v0.8.0** — 4 new tools inspired by Engram Cloud + zero-regression refactor.
-> **`cuba_proyecto`** isolates memories per project (column `project_id` on 6 tables, NULL = global = backward compat). **`cuba_pre_compact`** persists a markdown summary of the active session before `/compact` and restores it post-compact. **`cuba_sync`** writes a git-friendly export (1 JSON per entity, monthly-partitioned episodes, optional zstd embeddings blob) and re-imports it idempotently. **`cuba_juez`** escalates ambiguous-similarity (0.6-0.8) observation pairs to an LLM judge — defaults to a subprocess call against the user's installed `claude` CLI ($0 with a Pro/Max subscription); also supports the Anthropic API behind the `anthropic-api` Cargo feature, with a heuristic fallback when neither is available. Verdicts cached permanently in `brain_judgments`. All 19 v0.7 tools were audited for project scoping (≈30 SQL queries patched). 75 tests passing, 0 clippy warnings, 0 tech debt.
+> [!NOTE]
+> **v0.9.x** — BM25 3-way RRF, MMR, OOD abstention, conformal PE gating, testing-effect decay, tiktoken budget, cross-encoder reranker (`CUBA_RERANKER_PATH`), `cuba_archivo` audit chain, `cuba_pizarra` working memory. **25 sqlx migrations** (`0001`–`0025`), bootstrap transparente para DBs legacy.
 
 ## Demo
 
@@ -61,7 +63,13 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 - **Hebbian Δt-aware** *(v0.9)* — burst suppression `boost *= (1 - exp(-Δt/τ))`, τ=600s; anti-saturación inspirada en STDP triplet rules (Pfister-Gerstner 2006)
 - **Robbins-Monro stochastic LR** *(v0.9)* — `η = 0.05/√(1 + access_count/100)` en Oja's rule, convergencia O(1/√t)
 - **Source credibility tracking** *(v0.9)* — Beta(α,β) Bayesian update per source en `brain_source_trust` (Yin-Han-Yu IEEE TKDE 2008), action `cuba_calibrar trust`
-- **sqlx-migrate** *(v0.9)* — 14 migraciones SQL versionadas en `rust/migrations/`, bootstrap transparente para DBs legacy v0.7/v0.8
+- **sqlx-migrate** — 25 migraciones SQL versionadas en `rust/migrations/` (`0001`–`0025`), bootstrap transparente para DBs legacy
+- **Bitemporal facts** *(v0.10)* — `brain_facts` + supersede chain; mirrors observations on write (default on)
+- **Graph energy & communities** *(v0.10)* — persisted PageRank/energy in `brain_node_metrics`; Leiden → `brain_communities`
+- **Spreading activation** *(v0.10)* — multi-hop graph propagation for link prediction hints
+- **Retrieval benchmarks** *(v0.10)* — `eval/` harness measures live `cuba_faro` (nDCG, MRR, P@k, R@k)
+- **CFR-21 audit log** *(v0.9)* — `cuba_archivo` hash-chain tamper evidence
+- **Working memory buffer** *(v0.9)* — `cuba_pizarra` scratchpad per session
 - **Error memory** — Never repeat the same mistake (anti-repetition guard + pattern detection)
 
 ### Comparison
@@ -108,8 +116,12 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 | Hebbian Δt-aware burst suppression *(v0.9)* | Yes | No |
 | Robbins-Monro stochastic LR *(v0.9)* | Yes | No |
 | Source credibility tracking Beta(α,β) *(v0.9)* | Yes | No |
-| sqlx-migrate versioned migrations *(v0.9)* | Yes | No |
+| sqlx-migrate versioned migrations *(v0.9+)* | Yes | No |
 | Exact tiktoken token budget *(v0.9)* | Yes | No |
+| Bitemporal fact store *(v0.10)* | Yes | No |
+| Persisted graph metrics & communities *(v0.10)* | Yes | No |
+| Spreading activation link hints *(v0.10)* | Yes | No |
+| Built-in faro eval harness *(v0.10)* | Yes | No |
 
 ---
 
@@ -118,13 +130,13 @@ AI agents forget everything between conversations. Cuba-Memorys solves this:
 ### PyPI (recommended)
 
 ```bash
-pip install cuba-memorys
+pip install cuba-memorys==1.12.0   # wheels bundle the Rust binary (v0.10.0)
 ```
 
 ### npm
 
 ```bash
-npm install -g cuba-memorys
+npm install -g cuba-memorys@0.10.0   # downloads binary from GitHub Release on postinstall
 ```
 
 ### From source
@@ -158,7 +170,7 @@ That's it. On first run, Cuba-memorys will:
 1. Detect that no database is configured
 2. Create a Docker container with PostgreSQL + pgvector
 3. Initialize the schema automatically
-4. Start serving 19 MCP tools
+4. Start serving 25 MCP tools
 
 </details>
 
@@ -219,7 +231,7 @@ Without ONNX, the server uses deterministic hash-based embeddings — functional
 
 ---
 
-## The 23 Tools
+## The 25 Tools
 
 Every tool is named after Cuban culture — memorable, professional, meaningful.
 
@@ -228,8 +240,8 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 | Tool | Meaning | What it does |
 |------|---------|-------------|
 | `cuba_alma` | **Alma** — soul | CRUD entities. Types: `concept`, `project`, `technology`, `person`, `pattern`, `config`. Hebbian boost + access tracking. Fires prospective triggers on access. |
-| `cuba_cronica` | **Cronica** — chronicle | Observations with **semantic dedup**, **PE gating V5.2**, **importance priors** by type, **auto-tagging** (TF-IDF top-5 keywords), **session provenance**, **contextual embedding**. Also manages **episodic memories** (episode_add/episode_list) and **timeline** view. |
-| `cuba_puente` | **Puente** — bridge | Typed relations. **Traverse** walks the graph. **Infer** discovers transitive paths. **Predict** suggests missing relations via Adamic-Adar link prediction. |
+| `cuba_cronica` | **Cronica** — chronicle | Observations with **semantic dedup**, **PE gating**, **importance priors**, **auto-tagging**, **session provenance**, **contextual embedding**. **Bitemporal mirror** to `brain_facts` on add/batch_add *(v0.10, default on)*. Episodic memory (`episode_add`/`episode_list`) and **timeline**. |
+| `cuba_puente` | **Puente** — bridge | Typed relations. **Traverse**, **infer**, **predict** — Adamic-Adar + **spreading activation** neighbors *(v0.10)*. |
 | `cuba_ingesta` | **Ingesta** — intake | Bulk knowledge ingestion: accepts arrays of observations or long text with auto-classification by paragraph. |
 
 ### Search & Verification
@@ -267,9 +279,9 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 
 | Tool | Meaning | What it does |
 |------|---------|-------------|
-| `cuba_zafra` | **Zafra** — sugar harvest | Stratified decay (30d/14d/7d by type), power-law episode decay, prune, merge, summarize, pagerank, find_duplicates, export, stats, **reembed** (model migration with versioning). Auto-consolidation on >50 observations. |
+| `cuba_zafra` | **Zafra** — sugar harvest | Stratified decay, episode decay, prune, merge, summarize, **pagerank** (persists `brain_node_metrics` + energy refresh), **`communities`** (Leiden persist), find_duplicates, export, stats, **reembed**. Auto-consolidation on >50 observations. |
 | `cuba_eco` | **Eco** — echo | RLHF feedback: positive (Oja boost), negative (decrease), correct (update with versioning). |
-| `cuba_vigia` | **Vigia** — watchman | Analytics: summary, **enhanced health** (null embeddings, active triggers, table sizes, embedding model), drift (chi-squared), Leiden communities, Brandes bridges. |
+| `cuba_vigia` | **Vigia** — watchman | Summary, **health**, drift (chi-squared), **communities** (detect + persist), Brandes bridges. |
 | `cuba_forget` | **Forget** — forget | GDPR Right to Erasure: cascading hard-delete of entity and ALL references (observations, episodes, relations, errors, sessions). Irreversible. |
 
 ### v0.8 — Engram-inspired additions
@@ -294,6 +306,20 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 | `CUBA_JUEZ_MAX_PAIRS` | `5` | Cap on pairs `cuba_juez scan_entity` will escalate per call. |
 | `ANTHROPIC_API_KEY` | _(unset)_ | Required for `AnthropicApiJudge` (only when feature `anthropic-api` is built in). |
 
+### v0.9–v0.10 additional tools
+
+| Tool | Meaning | What it does |
+|------|---------|-------------|
+| `cuba_archivo` | **Archivo** — archive | CFR-21 inspired **hash-chain audit log**: append, verify integrity, tail. Tamper-evident session/ops trail. |
+| `cuba_pizarra` | **Pizarra** — chalkboard | **Working memory** scratchpad: write/read/clear short-lived notes bound to the active session. |
+
+### v0.10 environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CUBA_BITEMPORAL` | **on** (unset) | Set to `0`/`false`/`off` to stop mirroring observations into `brain_facts`. |
+| `CUBA_RERANKER_PATH` | _(unset)_ | Directory with bge-reranker-v2-m3 ONNX + tokenizer; enables cross-encoder rerank in `cuba_faro`. |
+
 ---
 
 ## Architecture
@@ -301,31 +327,25 @@ Every tool is named after Cuban culture — memorable, professional, meaningful.
 ```
 cuba-memorys/
 ├── docker-compose.yml           # Dedicated PostgreSQL 18 (port 5488)
-├── server.json                  # MCP Registry manifest
+├── server.json                  # MCP Registry manifest (npm 0.10.0 / PyPI 1.12.0)
 ├── pyproject.toml               # Maturin (bindings = "bin") — PyPI wheel
-├── package.json                 # npm wrapper
-└── rust/                        # v0.7.0
+├── package.json                 # npm wrapper → GitHub Release binary
+├── scripts/                     # merge-gate, backup/restore, MCP live session test
+└── rust/                        # v0.10.0
+    ├── migrations/              # sqlx-migrate 0001–0025 (bitemporal, graph, views)
     ├── src/
-    │   ├── main.rs              # mimalloc + graceful shutdown (SIGTERM/SIGINT)
-    │   ├── lib.rs               # Shared types and utilities
-    │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h cycle)
-    │   ├── db.rs                # sqlx PgPool (10 max, 600s idle, 1800s lifetime)
-    │   ├── setup.rs             # Zero-config Docker PostgreSQL auto-provisioning
-    │   ├── schema.sql           # 8 tables, 20+ indexes, HNSW
-    │   ├── constants.rs         # Tool definitions, thresholds, importance priors
-    │   ├── handlers/            # 19 MCP tool handlers (1 file each)
-    │   ├── cognitive/           # Hebbian/BCM (hebbian.rs), PE gating V5.2
-    │   │                        # (prediction_error.rs), dual-strength learning
-    │   │                        # (dual_strength.rs), Shannon entropy (density.rs)
-    │   ├── search/              # RRF fusion (rrf.rs), confidence (confidence.rs),
-    │   │                        # LRU cache (cache.rs)
-    │   ├── graph/               # Brandes centrality (centrality.rs), Leiden
-    │   │                        # communities (community.rs), PageRank (pagerank.rs)
-    │   └── embeddings/          # ONNX multilingual-e5-small (contextual embedding,
-    │                            # spawn_blocking, hash fallback)
-    ├── scripts/
-    │   └── download_model.sh    # Download multilingual-e5-small ONNX (~113MB)
-    └── tests/                   # 55 unit + 13 smoke tests
+    │   ├── main.rs              # mimalloc + graceful shutdown
+    │   ├── lib.rs               # Library surface (handlers, eval, graph, core)
+    │   ├── protocol.rs          # JSON-RPC 2.0 + MCP correlator / sampling / cancel
+    │   ├── core/                # bitemporal, entity_linking, temporal_query
+    │   ├── eval/                # faro benchmark harness (nDCG, MRR, P@k, R@k)
+    │   ├── handlers/            # 25 MCP tool handlers
+    │   ├── cognitive/           # Hebbian, conformal PE, calibration, judge
+    │   ├── search/              # RRF, BM25, MMR, OOD, rerank, tiktoken budget
+    │   ├── graph/               # PageRank, Leiden, energy, activation, k-core
+    │   └── embeddings/          # ONNX e5-small (contextual), hash fallback
+    ├── scripts/download_model.sh
+    └── tests/                   # unit + smoke + integration + e2e_all_tools.py
 ```
 
 ### Performance: Rust vs Python
@@ -352,6 +372,11 @@ cuba-memorys/
 | `brain_episodes` | Episodic memory | Tulving 1972, actors/artifacts TEXT[], power-law decay (Wixted 2004) |
 | `brain_triggers` | Prospective memory | on_access/on_session_start/on_error_match, max_fires, expiration |
 | `brain_verify_log` | Bayesian calibration | claim, confidence, grounding_level, outcome (correct/incorrect) |
+| `brain_facts` *(v0.10)* | Bitemporal semantics | subject/predicate/object, valid_from/to, `is_current`, entity FK |
+| `brain_fact_supersedes` *(v0.10)* | Fact lineage | old_fact_id → new_fact_id + reason |
+| `brain_node_metrics` *(v0.10)* | Graph analytics | pagerank_score, energy_score, betweenness, community_id |
+| `brain_communities` *(v0.10)* | Leiden clusters | community_name, algorithm_version, modularity |
+| `v_unified_memory_search` *(v0.10)* | MCP search view | Observations + facts joined via `brain_entities` |
 
 ### Search Pipeline
 
@@ -434,6 +459,9 @@ Min-max normalized ranks blended via convex combination (α=0.3). Preserves Hebb
 | `ONNX_MODEL_PATH` | — | Path to multilingual-e5-small model directory (optional) |
 | `ORT_DYLIB_PATH` | — | Path to libonnxruntime.so (optional) |
 | `RUST_LOG` | `cuba_memorys=info` | Log level filter |
+| `CUBA_BITEMPORAL` | on | Bitemporal mirror on write (`0` to disable) |
+| `CUBA_RERANKER_PATH` | — | bge-reranker-v2-m3 ONNX directory for `cuba_faro` rerank |
+| `CUBA_JUDGE` | `auto` | Contradiction judge backend (`heuristic` / `claude_cli` / …) |
 
 ### Docker Compose
 
@@ -493,21 +521,41 @@ Active access resets the clock — frequently used memories stay strong.
 
 ---
 
+## Release & QA (v0.10)
+
+Pre-merge / pre-release gate (requires Postgres on `:5488`):
+
+```bash
+export DATABASE_URL=postgresql://cuba:memorys2026@127.0.0.1:5488/brain
+./scripts/merge-gate.sh          # fmt, clippy, unit+integration, E2E 73, MCP live 25, cargo audit
+./scripts/backup-db.sh           # optional; keeps last 7 dumps in ./backups/
+```
+
+Publishing (maintainers): tag `v0.10.0` triggers [`.github/workflows/publish.yml`](.github/workflows/publish.yml) — GitHub Release binaries, PyPI wheels, npm, MCP Registry.
+
+| Channel | Version | Install |
+|---------|---------|---------|
+| Cargo / Release | `0.10.0` | [releases/tag/v0.10.0](https://github.com/LeandroPG19/cuba-memorys/releases/tag/v0.10.0) |
+| npm | `0.10.0` | `npm i -g cuba-memorys@0.10.0` |
+| PyPI | `1.12.0` | `pip install cuba-memorys==1.12.0` |
+
+---
+
 ## Security & Audit
 
-**Internal Audit Verdict: GO** (2026-03-28)
+**Internal Audit Verdict: GO** (2026-03-28) — re-validated on v0.10 merge gate.
 
 | Check | Result |
 |-------|:------:|
 | SQL injection | All queries parameterized (sqlx bind) |
 | SEC-002 wildcard injection | Fixed (POSITION-based) |
-| CVEs in dependencies | 0 active (sqlx 0.8.6, tokio 1.50.0) |
+| CVEs in dependencies | `cargo audit` in CI (allowed advisories documented) |
 | UTF-8 safety | `safe_truncate` on all string slicing |
 | Secrets | All via environment variables |
 | Division by zero | Protected with `.max(1e-9)` |
 | Error handling | All `?` propagated with `anyhow::Context` |
-| Clippy | 0 warnings |
-| Tests | 68 passing (55 unit + 13 smoke) + 49 E2E |
+| Clippy | 0 warnings (`-D warnings` locally) |
+| Tests | 118 unit + 13 smoke; E2E 73; MCP live session 25 tools |
 | Licenses | All MIT/Apache-2.0 (0 GPL/AGPL) |
 
 ---
@@ -533,6 +581,8 @@ Active access resets the clock — frequently used memories stay strong.
 
 | Version | Key Changes |
 |---------|-------------|
+| **0.10.0** | Bitemporal `brain_facts` (default on), graph metrics/communities/activation, eval harness over live `cuba_faro`, views `v_unified_memory_search` + `v_observations_compat`, migrations `0018`–`0025`, merge-gate scripts. **Shipped** npm `0.10.0`, PyPI `1.12.0`. Hybrid search unchanged (RRF+BM25+vector). |
+| **0.9.3** | Real bge-reranker-v2-m3 ONNX cross-encoder in `cuba_faro` (`CUBA_RERANKER_PATH`). |
 | **0.9.0** | Search & Retrieval upgrades + Cognitive layer refinements + sqlx-migrate foundation. **PR #5**: 14 migraciones versionadas en `rust/migrations/`, bootstrap transparente para DBs v0.7/v0.8. **PR #6**: BM25 ts_rank_cd 3-way RRF (Robertson-Walker 1994), MMR diversification con Jaccard sim (Carbonell-Goldstein 1998), OOD Mahalanobis con ridge regularization (Lee NeurIPS 2018), tiktoken-rs cl100k_base exact counting, `hnsw.ef_search=200` dinámico en verify (recall@10≈0.99). **PR #7**: conformal prediction empírica reemplaza z-score gaussiano (Vovk 2005, Angelopoulos-Bates 2023), testing effect Karpicke-Roediger 2008 en zafra decay, Hebbian Δt-aware burst suppression τ=600s (anti-saturación STDP-light), Robbins-Monro stochastic LR en Oja `η=0.05/√(1+access/100)`, source credibility tracking Beta(α,β) Bayesian Yin-Han-Yu IEEE TKDE 2008 con nueva action `cuba_calibrar trust`. Nuevas deps: `tiktoken-rs 0.7`, `nalgebra 0.33` (no LAPACK), sqlx feature `migrate`, `async-trait 0.1`. 23 tools, 97 tests (+22 nuevos), 0 clippy, 0 tech debt, 0 breaking changes. |
 | **0.8.0** | 4 new tools inspired by Engram Cloud + zero-regression refactor of all v0.7 readers/writers. **`cuba_proyecto`** — per-project isolation via `project_id` UUID FK on 6 tables (NULL = global = back-compat). **`cuba_pre_compact`** — snapshot/restore session state across `/compact`. **`cuba_sync`** — git-friendly export (1 JSON per entity + monthly-partitioned episodes + manifest with content-derived hash) and idempotent import. **`cuba_juez`** — LLM-judge for ambiguous (cosine 0.6-0.8) contradictions via subprocess to `claude` CLI ($0 with subscription) or Anthropic API behind feature `anthropic-api`, with heuristic fallback. Verdicts cached permanently. 4 new idempotent migrations (project scoping, compaction snapshots, sync state, judgments). All 19 v0.7 handlers audited (~30 SQL queries patched with `($N::uuid IS NULL OR project_id = $N OR project_id IS NULL)` pattern). New deps: `zstd 0.13`, `async-trait 0.1`, optional `reqwest 0.12`. 75 tests, 0 clippy, 0 tech debt. |
 | **0.7.0** | 10 algorithmic improvements: PageRank blend (α=0.3, preserves Hebbian/BCM), hybrid verify (trigram+embedding fusion), ONNX semaphore (Little's Law), sigmoid entropy routing (Jaynes MaxEnt), word-level session boost, weighted Hebbian neighbors (Collins & Loftus), exponential coverage saturation, O(n) entropy. 19 bug fixes: hash embeddings corrupting DB (×5), centrality /2, cache LRU, jornada TOCTOU, alarma self-match, 6 schema mismatches. Removed blake3 dependency. MCP Registry publish fixed. npm postinstall version sync. 68 tests, 0 clippy, 0 tech debt. |

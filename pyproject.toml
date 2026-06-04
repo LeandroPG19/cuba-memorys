@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "cuba-memorys"
 version = "1.12.0"
-description = "Persistent memory MCP server for AI agents. 25 tools: sqlx-migrate, BM25+MMR+OOD hybrid retrieval, conformal prediction, Hebbian/BCM learning, project scoping, CFR-21 audit chain, MCP Resources/Sampling. Rust + PostgreSQL + pgvector."
+description = "Persistent memory MCP server for AI agents (v0.10). 25 tools: bitemporal facts, sqlx-migrate, BM25+MMR+OOD hybrid retrieval, graph metrics, conformal prediction, Hebbian/BCM, project scoping, CFR-21 audit chain. Rust + PostgreSQL + pgvector."
 readme = "README.md"
 license = { text = "CC-BY-NC-4.0" }
 requires-python = ">=3.9"
