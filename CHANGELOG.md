@@ -6,7 +6,7 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
-## [0.10.0] — 2026-06-04 (Cargo `0.10.0`)
+## [0.10.0] — 2026-06-04 (Cargo `0.10.0` · npm `0.10.0` · PyPI `1.12.0`)
 
 Knowledge-graph memory plane: bitemporal facts, graph metrics, retrieval benchmarks,
 and MCP unified search view — built on the v0.9 hybrid `cuba_faro` stack (not replaced).
