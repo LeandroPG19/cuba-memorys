@@ -1271,18 +1271,20 @@ async def _consolidate_merge(args: dict[str, Any]) -> str:
     if dupes:
         pool = await db.get_pool()
         async with pool.acquire() as conn, conn.transaction():
-                for d in dupes:
-                    await conn.execute(
-                        "UPDATE brain_observations SET "
-                        "importance = LEAST(1.0, importance + 0.1) "
-                        "WHERE id = $1",
-                        d["id_a"],
-                    )
-                    await conn.execute(
-                        "DELETE FROM brain_observations WHERE id = $1",
-                        d["id_b"],
-                    )
-                    merged += 1
+            updates = [(d["id_a"],) for d in dupes]
+            deletes = [(d["id_b"],) for d in dupes]
+
+            await conn.executemany(
+                "UPDATE brain_observations SET "
+                "importance = LEAST(1.0, importance + 0.1) "
+                "WHERE id = $1",
+                updates,
+            )
+            await conn.executemany(
+                "DELETE FROM brain_observations WHERE id = $1",
+                deletes,
+            )
+            merged = len(dupes)
     search.cache_clear()
     return db.serialize({"action": "merged", "pairs_merged": merged})
 
