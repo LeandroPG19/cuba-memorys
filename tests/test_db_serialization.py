@@ -8,7 +8,26 @@ from datetime import datetime, date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from cuba_memorys.db import _json_default, serialize, _DB_NAME_PATTERN
+from cuba_memorys.db import _json_default, serialize, _DB_NAME_PATTERN, has_pgvector
+import cuba_memorys.db
+
+
+class TestHasPgVector:
+    """Tests for has_pgvector() flag."""
+
+    def test_has_pgvector_toggle(self) -> None:
+        """🟢 has_pgvector() correctly reports the state of the global flag."""
+        # Save original state
+        original = cuba_memorys.db._pgvector_available
+        try:
+            cuba_memorys.db._pgvector_available = True
+            assert has_pgvector() is True
+
+            cuba_memorys.db._pgvector_available = False
+            assert has_pgvector() is False
+        finally:
+            # Restore original state
+            cuba_memorys.db._pgvector_available = original
 
 
 class TestJsonDefault:
