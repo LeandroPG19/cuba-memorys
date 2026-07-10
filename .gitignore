@@ -39,6 +39,7 @@ assets/demo.cast
 # Project-specific (cuba-memorys)
 .mypy_cache/
 .pytest_cache/
+.hypothesis/
 .ruff_cache/
 uv.lock
 .fastembed_cache/

@@ -51,10 +51,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 sqlx::query(
                     "UPDATE brain_observations SET
                         importance = GREATEST(
-                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0
+                            importance * EXP(-0.693
+                                * EXTRACT(EPOCH FROM (NOW() - GREATEST(last_accessed, last_decayed_at))) / 86400.0
                                 / ($1 * (1.0 + LN(1.0 + access_count::float8)))),
                             0.01
                         ),
+                        last_decayed_at = NOW(),
                         updated_at = NOW()
                      WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
                        AND last_accessed < NOW() - INTERVAL '1 day'"
@@ -66,8 +68,9 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 sqlx::query(
                     "UPDATE brain_observations SET
                         importance = GREATEST(
-                            importance * EXP(-0.693 * EXTRACT(EPOCH FROM (NOW() - last_accessed)) / 86400.0 /
-                                ((CASE observation_type
+                            importance * EXP(-0.693
+                                * EXTRACT(EPOCH FROM (NOW() - GREATEST(last_accessed, last_decayed_at))) / 86400.0
+                                / ((CASE observation_type
                                     WHEN 'fact'       THEN 30.0
                                     WHEN 'preference' THEN 30.0
                                     WHEN 'error'      THEN 14.0
@@ -79,6 +82,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                             ),
                             0.01
                         ),
+                        last_decayed_at = NOW(),
                         updated_at = NOW()
                      WHERE observation_type NOT IN ('decision', 'lesson', 'superseded')
                        AND last_accessed < NOW() - INTERVAL '1 day'"
