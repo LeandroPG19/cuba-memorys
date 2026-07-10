@@ -1,11 +1,16 @@
-//! Community detection using the Leiden algorithm.
+//! Community detection: Louvain local-move with a connectivity refinement pass.
 //!
-//! Traag, Waltman, van Eck — "From Louvain to Leiden" (Nature, 2019).
+//! Honest scope: this is single-level Louvain (Blondel et al. 2008) greedy
+//! modularity maximization, followed by a BFS pass that splits any internally
+//! disconnected community — the one well-connectedness guarantee Leiden (Traag
+//! et al., Nature 2019) is known for. It is NOT full Leiden: there is no
+//! aggregation/coarsening phase, so it does not build a hierarchy or reach
+//! Leiden's refined-partition guarantees. The outer loop re-runs local-move on
+//! the same graph, not on a contracted one.
 //!
-//! Three-phase algorithm that guarantees well-connected communities:
-//! 1. Local Move: greedily move nodes to maximize modularity.
-//! 2. Refinement: split communities to guarantee internal connectivity.
-//! 3. Aggregation: build reduced graph and repeat.
+//! Phases:
+//! 1. Local move: greedily move nodes to maximize modularity gain.
+//! 2. Refinement: split communities that are internally disconnected.
 
 use anyhow::Result;
 use sqlx::PgPool;
@@ -16,8 +21,8 @@ const MAX_LOCAL_ITERATIONS: usize = 50;
 
 /// Detect communities and return them as Vec<(community_id, members)>.
 ///
-/// Uses Leiden algorithm (Traag et al., Nature 2019) instead of simple
-/// label propagation. Guarantees internally connected communities.
+/// Uses single-level Louvain + connectivity refinement (see module docs),
+/// not full Leiden. Guarantees internally connected communities.
 pub async fn detect(pool: &PgPool) -> Result<Vec<(usize, Vec<String>)>> {
     // Fetch graph
     let edges: Vec<(uuid::Uuid, uuid::Uuid, f64)> =
@@ -72,13 +77,13 @@ pub async fn detect(pool: &PgPool) -> Result<Vec<(usize, Vec<String>)>> {
     // Initialize: each node in its own community
     let mut labels: Vec<usize> = (0..n).collect();
 
-    // Leiden outer loop
+    // Louvain local-move outer loop (no aggregation — see module docs)
     for _outer in 0..MAX_OUTER_ITERATIONS {
-        let changed = leiden_phase(&neighbors, &node_strength, &mut labels, total_weight);
+        let changed = louvain_local_move(&neighbors, &node_strength, &mut labels, total_weight);
         if !changed {
             tracing::info!(
                 iterations = _outer + 1,
-                "Leiden community detection converged"
+                "Louvain community detection converged"
             );
             break;
         }
@@ -115,10 +120,10 @@ pub async fn detect_and_persist(pool: &PgPool) -> Result<(Vec<(usize, Vec<String
 
     let mut nodes_updated = 0usize;
     for (idx, members) in &communities {
-        let community_name = format!("leiden_{idx}");
+        let community_name = format!("community_{idx}");
         let row: (uuid::Uuid,) = sqlx::query_as(
             "INSERT INTO brain_communities (community_name, algorithm_version)
-             VALUES ($1, 'leiden_v1') RETURNING community_id",
+             VALUES ($1, 'louvain_refined_v1') RETURNING community_id",
         )
         .bind(&community_name)
         .fetch_one(&mut *tx)
@@ -151,7 +156,7 @@ pub async fn detect_and_persist(pool: &PgPool) -> Result<(Vec<(usize, Vec<String
 ///      - [Σ_in / (2m) - (Σ_tot / (2m))² - (k_i / (2m))²]
 ///
 /// Returns true if any node changed community.
-fn leiden_phase(
+fn louvain_local_move(
     neighbors: &[Vec<(usize, f64)>],
     node_strength: &[f64],
     labels: &mut [usize],
@@ -205,9 +210,13 @@ fn leiden_phase(
 
                 let sigma_tot_candidate = community_totals.get(&candidate).copied().unwrap_or(0.0);
 
-                // Standard Louvain ΔQ (Newman-Girvan):
-                // Gain from adding to candidate minus loss from removing from current
-                let delta_q = (ki_in_candidate - ki_in_current) / m2
+                // Standard Louvain ΔQ (Newman-Girvan), moving i from C to D:
+                //   ΔQ = [k_i,in(D) - k_i,in(C)]/m
+                //      + k_i·[(Σ_tot(C) - k_i) - Σ_tot(D)]/(2m²)
+                // The neighbor-attraction term is /m, i.e. *2/m2 — it was /m2
+                // (half), which biased every move toward the size-penalty term and
+                // over-fragmented the partition. Verified against the closed form.
+                let delta_q = (ki_in_candidate - ki_in_current) * 2.0 / m2
                     + ki * ((sigma_tot_current - ki) - sigma_tot_candidate) / (m2 * m2) * 2.0;
 
                 if delta_q > best_delta_q {
@@ -300,7 +309,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_leiden_phase_two_clusters() {
+    fn test_louvain_local_move_two_clusters() {
         // Two fully connected cliques: {0,1,2} and {3,4,5}
         // connected by a weak bridge 2-3
         let neighbors = vec![
@@ -325,7 +334,7 @@ mod tests {
 
         let mut labels: Vec<usize> = (0..6).collect();
 
-        leiden_phase(&neighbors, &node_strength, &mut labels, total_weight);
+        louvain_local_move(&neighbors, &node_strength, &mut labels, total_weight);
 
         // Nodes 0, 1, 2 should be in the same community
         assert_eq!(labels[0], labels[1]);
