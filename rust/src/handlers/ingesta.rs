@@ -71,6 +71,21 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         }));
     }
 
+    // Phase 4 (opt-in): knowledge-update. Before ingesting, ask the judge whether
+    // each new fact SUPERSEDES an existing, related-but-not-duplicate observation;
+    // if so, mark the old one superseded (never deleted). This is exactly the
+    // "invalidate on update" that makes Zep/Graphiti win LongMemEval, built on
+    // cuba's bitemporal supersede. Default off — pure ADD otherwise.
+    let supersede_conflicts = args
+        .get("supersede_conflicts")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let superseded = if supersede_conflicts {
+        resolve_conflicts(pool, &items).await
+    } else {
+        0
+    };
+
     // Reuse the ingest path: validation + dedup + PE-gating + embedding.
     let ingest_args = serde_json::json!({ "action": "ingest", "items": items });
     let result = ingest(pool, &ingest_args).await?;
@@ -79,8 +94,87 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     if let Some(obj) = response.as_object_mut() {
         obj.insert("action".to_string(), serde_json::json!("auto_extract"));
         obj.insert("extracted".to_string(), serde_json::json!(extracted));
+        if supersede_conflicts {
+            obj.insert("superseded".to_string(), serde_json::json!(superseded));
+        }
     }
     Ok(response)
+}
+
+/// Phase 4: for each candidate fact, find the most similar existing observation
+/// of the same entity in the "related but not a duplicate" band, ask the judge
+/// whether the new fact replaces it, and if so mark the old one superseded.
+///
+/// Data-safe: only ever sets observation_type='superseded' (the row is retained,
+/// just excluded from active search) — never deletes. Best-effort per item.
+/// Returns how many observations were superseded.
+async fn resolve_conflicts(pool: &PgPool, items: &[Value]) -> u32 {
+    // Below the dup threshold (0.85, already blocked) but related enough to
+    // possibly conflict. Unrelated facts never reach the judge.
+    const REL_LO: f64 = 0.30;
+    const REL_HI: f64 = 0.85;
+
+    let judge = crate::cognitive::judge::resolve_judge();
+    let mut superseded = 0u32;
+
+    for item in items {
+        let (Some(entity_name), Some(content)) = (
+            item.get("entity_name").and_then(|v| v.as_str()),
+            item.get("content").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+
+        // Most similar existing, non-superseded observation of this entity.
+        let candidate: Option<(uuid::Uuid, String, f64)> = sqlx::query_as(
+            "SELECT o.id, o.content, similarity(o.content, $2)::float8 AS sim
+             FROM brain_observations o
+             JOIN brain_entities e ON e.id = o.entity_id
+             WHERE e.name = $1 AND o.observation_type != 'superseded'
+             ORDER BY sim DESC
+             LIMIT 1",
+        )
+        .bind(entity_name)
+        .bind(content)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let Some((old_id, old_content, sim)) = candidate else {
+            continue;
+        };
+        if !(REL_LO..REL_HI).contains(&sim) {
+            continue; // unrelated, or a near-duplicate the dedup gate handles
+        }
+
+        // Judge: does the new fact supersede/contradict the old one?
+        match judge.judge(content, &old_content).await {
+            Ok(j)
+                if (j.verdict == "supersedes" || j.verdict == "contradicts")
+                    && j.confidence >= 0.5 =>
+            {
+                let done = sqlx::query(
+                    "UPDATE brain_observations SET observation_type = 'superseded', updated_at = NOW()
+                     WHERE id = $1 AND observation_type != 'superseded'",
+                )
+                .bind(old_id)
+                .execute(pool)
+                .await;
+                if let Ok(r) = done
+                    && r.rows_affected() > 0
+                {
+                    superseded += 1;
+                    tracing::info!(old_id = %old_id, verdict = %j.verdict, "auto_extract superseded a stale observation");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "auto_extract: judge failed — leaving observation as-is");
+            }
+        }
+    }
+    superseded
 }
 
 /// Build the extraction instruction for the client LLM. Asks for STRICT JSON so
