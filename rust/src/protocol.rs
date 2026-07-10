@@ -550,18 +550,24 @@ async fn rem_daemon(pool: PgPool) {
 /// NOTE: Neighbor Diffusion removed — duplicates PageRank topology propagation
 /// with N+1 pattern (120 queries/cycle for 20 seeds × 6 neighbors each).
 async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
-    // 1. Get active session goals (for session protection - FIX B4)
-    let active_session: Option<(uuid::Uuid, Vec<String>)> = {
-        let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
-            "SELECT id, goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
-        )
-        .fetch_optional(pool)
-        .await?;
+    // 1. Get this process's session goals (for session protection - FIX B4).
+    // Scoped to crate::session: REM must not shield another client's entities
+    // from decay, nor leave ours unprotected because they opened a session later.
+    let active_session: Option<(uuid::Uuid, Vec<String>)> = match crate::session::session_id() {
+        Some(sid) => {
+            let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, goals FROM brain_sessions WHERE id = $1 AND ended_at IS NULL",
+            )
+            .bind(sid)
+            .fetch_optional(pool)
+            .await?;
 
-        row.map(|(id, goals)| {
-            let goal_list: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
-            (id, goal_list)
-        })
+            row.map(|(id, goals)| {
+                let goal_list: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
+                (id, goal_list)
+            })
+        }
+        None => None,
     };
 
     // 2. Get entities to protect from decay (FIX B4: exact entity_ids, not ILIKE)

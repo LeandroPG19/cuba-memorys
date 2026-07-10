@@ -19,8 +19,8 @@ cd "$RUST_DIR"
 echo "=== cargo fmt --check ==="
 cargo fmt --check
 
-echo "=== cargo clippy ==="
-cargo clippy -- -D warnings
+echo "=== cargo clippy (--all-targets: without it, tests/ is never linted) ==="
+cargo clippy --all-targets -- -D warnings
 
 echo "=== cargo test (unit + smoke) ==="
 cargo test

@@ -63,7 +63,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             "SELECT id, error_type, error_message, solution, resolved, project,
                     similarity(error_message, $1)::float8 AS sim
              FROM brain_errors
-             WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+             WHERE (search_vector @@ cuba_or_tsquery($1) OR similarity(error_message, $1) > 0.3)
                AND resolved = true
                AND ($2::text IS NULL OR project = $2)
                AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
@@ -79,7 +79,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             "SELECT id, error_type, error_message, solution, resolved, project,
                     similarity(error_message, $1)::float8 AS sim
              FROM brain_errors
-             WHERE (search_vector @@ plainto_tsquery('simple', $1) OR similarity(error_message, $1) > 0.3)
+             WHERE (search_vector @@ cuba_or_tsquery($1) OR similarity(error_message, $1) > 0.3)
                AND ($2::text IS NULL OR project = $2)
                AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
              ORDER BY sim DESC LIMIT 20",

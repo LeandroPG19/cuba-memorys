@@ -261,5 +261,4 @@ fn count_results(value: &serde_json::Value) -> usize {
         .matches("\"id\"")
         .count()
         .saturating_sub(1) // discount the wrapper id field if any
-        .max(0)
 }

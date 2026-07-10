@@ -87,10 +87,9 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .get("abstain_ood")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let ood_threshold = args
-        .get("ood_threshold")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(crate::search::ood::DEFAULT_OOD_THRESHOLD);
+    // None => derive from the embedding dimension inside check_ood, since a
+    // sane Mahalanobis cutoff scales as sqrt(d). See search::ood::default_threshold.
+    let ood_threshold = args.get("ood_threshold").and_then(|v| v.as_f64());
 
     // V0.9: BM25 (ts_rank_cd) as third RRF signal. Default true — gives
     // +8-15% recall on queries with rare entity names / specific errors.
@@ -111,8 +110,9 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     // V0.8: Resolve current project (None = no filter, see project::current_project_id)
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // V0.9: OOD pre-check (when requested). Runs before any DB call so an
-    // OOD query never burns search latency. Cheap O(d²) on cached μ, Σ⁻¹.
+    // V0.9: OOD pre-check (when requested). On a warm cache this is a single
+    // O(d²) matrix-vector product on μ, Σ⁻¹ — no DB round-trip. A cold cache
+    // pays one bounded fit (<=500 rows) before short-circuiting the search.
     if abstain_ood
         && mode == "hybrid"
         && let Some(answer) = check_ood(pool, query, ood_threshold, project_id).await
@@ -814,12 +814,12 @@ async fn text_search(
     if scope == "all" || scope == "entities" {
         let rows: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT id, name, entity_type, importance::float8,
-                    (  (ts_rank(search_vector, plainto_tsquery('simple', $1))
+                    (  (ts_rank(search_vector, cuba_or_tsquery($1))
                       + similarity(name, $1)) * 0.7
                      + importance::float8 * 0.3
                     )::float8 AS score
              FROM brain_entities
-             WHERE (search_vector @@ plainto_tsquery('simple', $1)
+             WHERE (search_vector @@ cuba_or_tsquery($1)
                 OR similarity(name, $1) > 0.3)
                AND created_at >= $3 AND created_at <= $4
                AND ($5::uuid IS NULL OR project_id = $5 OR project_id IS NULL)
@@ -851,13 +851,13 @@ async fn text_search(
     if scope == "all" || scope == "observations" {
         let rows: Vec<(uuid::Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
-                    (  (ts_rank(o.search_vector, plainto_tsquery('simple', $1))
+                    (  (ts_rank(o.search_vector, cuba_or_tsquery($1))
                       + similarity(o.content, $1)) * 0.7
                      + o.importance::float8 * 0.3
                     )::float8 AS score
              FROM brain_observations o
              JOIN brain_entities e ON o.entity_id = e.id
-             WHERE (o.search_vector @@ plainto_tsquery('simple', $1)
+             WHERE (o.search_vector @@ cuba_or_tsquery($1)
                 OR similarity(o.content, $1) > 0.3)
                AND o.observation_type != 'superseded'
                AND o.created_at >= $3 AND o.created_at <= $4
@@ -890,10 +890,10 @@ async fn text_search(
     if scope == "all" || scope == "errors" {
         let rows: Vec<(uuid::Uuid, String, String, bool, f64)> = sqlx::query_as(
             "SELECT id, error_type, error_message, resolved,
-                    (ts_rank(search_vector, plainto_tsquery('simple', $1)) +
+                    (ts_rank(search_vector, cuba_or_tsquery($1)) +
                     similarity(error_message, $1))::float8 AS score
              FROM brain_errors
-             WHERE (search_vector @@ plainto_tsquery('simple', $1)
+             WHERE (search_vector @@ cuba_or_tsquery($1)
                 OR similarity(error_message, $1) > 0.3)
                AND created_at >= $3 AND created_at <= $4
                AND ($5::uuid IS NULL OR project_id = $5 OR project_id IS NULL)
@@ -926,13 +926,13 @@ async fn text_search(
     if scope == "all" {
         let rows: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT ep.id, e.name, ep.content, ep.importance::float8,
-                    (  (ts_rank(ep.search_vector, plainto_tsquery('simple', $1))
+                    (  (ts_rank(ep.search_vector, cuba_or_tsquery($1))
                       + similarity(ep.content, $1)) * 0.7
                      + ep.importance::float8 * 0.3
                     )::float8 AS score
              FROM brain_episodes ep
              JOIN brain_entities e ON ep.entity_id = e.id
-             WHERE (ep.search_vector @@ plainto_tsquery('simple', $1)
+             WHERE (ep.search_vector @@ cuba_or_tsquery($1)
                 OR similarity(ep.content, $1) > 0.3)
                AND ep.created_at >= $3 AND ep.created_at <= $4
                AND ($5::uuid IS NULL OR ep.project_id = $5 OR ep.project_id IS NULL)
@@ -1086,13 +1086,19 @@ fn entropy_weights(entropy: f64) -> (f64, f64) {
 // and violated determinism. Cormack et al. 2009, Azure AI Search, Elasticsearch
 // all converge on k=60 as empirically optimal.
 
-/// Get active session goals for session-aware boosting.
+/// Get this process's session goals for session-aware boosting.
+///
+/// Scoped to `crate::session`: boosting results with another MCP client's
+/// goals is worse than not boosting at all.
 async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
-    let row: Option<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT goals FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
+    let Some(sid) = crate::session::session_id() else {
+        return Ok(Vec::new());
+    };
+    let row: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT goals FROM brain_sessions WHERE id = $1 AND ended_at IS NULL")
+            .bind(sid)
+            .fetch_optional(pool)
+            .await?;
 
     if let Some((goals,)) = row {
         let goals: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
@@ -1188,15 +1194,31 @@ fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
 async fn check_ood(
     pool: &PgPool,
     query: &str,
-    threshold: f64,
+    threshold: Option<f64>,
     project_id: Option<uuid::Uuid>,
 ) -> Option<Value> {
-    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats};
+    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats, default_threshold};
 
     if !crate::embeddings::onnx::is_model_loaded() {
         return None;
     }
-    let query_emb = crate::embeddings::onnx::embed(query).await.ok()?;
+    // NOTE: `embed_passage`, not `embed`. e5 is asymmetric — it prepends
+    // "query: " vs "passage: ", which shifts the vector. The density (μ, Σ⁻¹)
+    // is fitted over stored observations, i.e. *passages*. Embedding the query
+    // with the "query: " prefix would measure it against a distribution it was
+    // never in, inflating every distance and abstaining on in-corpus queries.
+    // For density estimation both sides must share the prefix.
+    let query_emb = crate::embeddings::onnx::embed_passage(query).await.ok()?;
+    // Caller may override; otherwise scale the cutoff to the embedding space.
+    let tau = threshold.unwrap_or_else(|| default_threshold(query_emb.len()));
+
+    // Cache hit: skip the 500-row fetch entirely. (Previously the SELECT ran
+    // before this check, so the cache saved the fit but never the query.)
+    if let Some(stats) = crate::search::ood_cache::get(project_id)
+        && let Some(dist) = stats.mahalanobis(&query_emb)
+    {
+        return ood_abstain_json(query, tau, dist);
+    }
 
     // Sample up to 500 active observations for the fit. Cheaper than full
     // scan, statistically sufficient for d=384.
@@ -1212,12 +1234,6 @@ async fn check_ood(
     .await
     .ok()?;
 
-    if let Some(stats) = crate::search::ood_cache::get(project_id)
-        && let Some(dist) = stats.mahalanobis(&query_emb)
-    {
-        return ood_abstain_json(query, threshold, dist);
-    }
-
     if raw.len() < MIN_SAMPLES_FOR_OOD {
         return None;
     }
@@ -1225,7 +1241,7 @@ async fn check_ood(
     let stats = OodStats::fit(&embeddings)?;
     crate::search::ood_cache::store(project_id, stats.clone());
     let dist = stats.mahalanobis(&query_emb)?;
-    ood_abstain_json(query, threshold, dist)
+    ood_abstain_json(query, tau, dist)
 }
 
 #[cfg(test)]

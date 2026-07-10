@@ -28,21 +28,20 @@ async fn propagate_rls_guc(pool: &PgPool, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the active project for the most recent open session.
+/// Resolve the active project for the session **this process** opened.
+///
+/// Previously this ran `SELECT ... WHERE ended_at IS NULL ORDER BY started_at
+/// DESC LIMIT 1`, which is a global question: with several MCP clients sharing
+/// one database, the newest session anywhere won, and observations were tagged
+/// with someone else's project. See [`crate::session`].
+///
+/// No session in this process => `None` => unscoped, which is the safe answer.
 pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
     if filter_disabled() {
         propagate_rls_guc(pool, "*").await.ok();
         return Ok(None);
     }
-    let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-        "SELECT project_id FROM brain_sessions
-         WHERE ended_at IS NULL
-         ORDER BY started_at DESC
-         LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    let pid = row.and_then(|(p,)| p);
+    let pid = crate::session::project_id();
     let value = pid.as_ref().map(|u| u.to_string()).unwrap_or_default();
     propagate_rls_guc(pool, &value).await.ok();
     Ok(pid)

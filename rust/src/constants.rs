@@ -158,7 +158,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "diversify": {"type": "boolean", "description": "v0.9: post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},
                     "mmr_lambda": {"type": "number", "description": "v0.9: MMR balance — 1.0 pure relevance, 0.0 pure diversity. Default 0.7."},
                     "abstain_ood": {"type": "boolean", "description": "v0.9: abstain (return empty results with abstain_reason) when query is out-of-distribution via Mahalanobis distance. Default false."},
-                    "ood_threshold": {"type": "number", "description": "v0.9: Mahalanobis distance threshold for abstention (default 5.0)."},
+                    "ood_threshold": {"type": "number", "description": "v0.9: Mahalanobis distance threshold for abstention. Defaults to sqrt(chi2_0.99(d)), which scales with the embedding dimension (~21.25 for d=384). Override only if you calibrated on your own corpus."},
                     "enable_bm25": {"type": "boolean", "description": "v0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector. Catches queries with rare terms that dense embeddings miss. Default true."},
                     "rerank": {"type": "boolean", "description": "v0.9.2: cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3 (Xiao 2023). Auto-enabled when CUBA_RERANKER_PATH points to a valid ONNX. Identity fallback otherwise."}
                 },

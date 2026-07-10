@@ -28,7 +28,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 async fn snapshot(pool: &PgPool) -> Result<Value> {
-    let session_id = match super::jornada::current_session_id(pool).await? {
+    let session_id = match crate::session::session_id() {
         Some(id) => id,
         None => {
             return Ok(serde_json::json!({
@@ -204,7 +204,7 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
 }
 
 async fn restore(pool: &PgPool) -> Result<Value> {
-    let session_id = match super::jornada::current_session_id(pool).await? {
+    let session_id = match crate::session::session_id() {
         Some(id) => id,
         None => {
             return Ok(serde_json::json!({

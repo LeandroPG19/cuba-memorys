@@ -111,13 +111,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     let tags = extract_tags(content);
 
     // V0.6: Session provenance — link observation to active session
-    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let active_session_id: Option<uuid::Uuid> = crate::session::session_id();
 
     let row: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id)
@@ -162,7 +156,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     let obs_id_for_embed = row.0;
     let content_for_embed = content.to_string();
     let entity_name_for_embed = entity_name.to_string();
-    tokio::spawn(async move {
+    crate::tasks::spawn(async move {
         // Fetch entity type for contextual embedding
         let entity_type: String =
             sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE name = $1")
@@ -220,7 +214,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         // V0.6: Auto-consolidation — spawn merge+prune for overloaded entities
         let pool_clone = pool.clone();
         let eid = entity_id;
-        tokio::spawn(async move {
+        crate::tasks::spawn(async move {
             // Auto-merge >0.9 similarity within this entity
             let _ = sqlx::query(
                 "WITH dupes AS (
@@ -439,13 +433,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     }
 
     // V0.6: Fetch active session once for provenance
-    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let active_session_id: Option<uuid::Uuid> = crate::session::session_id();
 
     // Execute all writes atomically in a single transaction
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
@@ -523,7 +511,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     // V11+V0.6: Store contextual embeddings with model versioning after commit
     if !inserted_for_embed.is_empty() {
         let embed_pool = pool.clone();
-        tokio::spawn(async move {
+        crate::tasks::spawn(async move {
             for (obs_id, content, entity_name, entity_type) in inserted_for_embed {
                 // Same guard as single-add: skip if no real ONNX model to avoid
                 // storing hash embeddings that corrupt vector search.
@@ -843,13 +831,7 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     let density = information_density(content);
 
     // V0.6: Session provenance for episodes
-    let active_session_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let active_session_id: Option<uuid::Uuid> = crate::session::session_id();
 
     let row: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_episodes (entity_id, content, actors, artifacts, importance, session_id, project_id)
@@ -872,7 +854,7 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
     let embed_pool = pool.clone();
     let content_owned = content.to_string();
     let entity_name_owned = entity_name.to_string();
-    tokio::spawn(async move {
+    crate::tasks::spawn(async move {
         let entity_type: String =
             sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE name = $1")
                 .bind(&entity_name_owned)
