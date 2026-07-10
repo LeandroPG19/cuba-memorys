@@ -115,7 +115,7 @@ intervalo REM fijo `exp(-ln2·(4h)/H)`.
 
 ## 3. Tier 1 — Alto impacto, bajo coste (hacer primero)
 
-### 1.1 ⭐ Extracción automática de hechos vía MCP Sampling — cierra la brecha #1
+### 1.1 ⭐ Extracción automática de hechos vía MCP Sampling — ✅ Fase 3 hecha
 
 **Problema:** el agente olvida llamar a `cuba_cronica`. **Solución del ecosistema (mem0):** extraer los
 hechos salientes del turno con un LLM, en dos fases (extracción + update).
@@ -127,6 +127,14 @@ Fuente: [mem0 arxiv 2504.19413](https://arxiv.org/html/2504.19413v1).
 Sampling — $0, sin API key) que devuelva los hechos salientes en JSON, y los inserte con el pipeline de
 dedup/PE-gating existente. Es la misma jugada del juez $0 de Engram.
 **Coste:** medio-bajo (el andamiaje de sampling ya existe). **Impacto:** altísimo — ataca el AP2.
+
+> **Estado (Fase 3, hecha):** implementado como `cuba_ingesta action=auto_extract`. Pide al LLM del
+> cliente (vía `protocol::request_sampling_max`, el mismo camino del juez) que extraiga hechos durables en
+> JSON, y los inserta por el pipeline `ingest`→`cronica batch_add` (dedup + PE-gating + embedding).
+> **Solo AÑADE, nunca borra.** Degrada honestamente si el cliente no soporta sampling (`degraded:true`,
+> verificado end-to-end). Parser robusto (fences/prosa/filas inválidas) con 4 unit tests. `source=inference`.
+> **Techo de verificación:** el ida-y-vuelta real de sampling necesita un cliente capaz y escribiría en la
+> DB viva, así que no se ejercita aquí; sí el parser (tests) y la ruta degradada (end-to-end).
 
 ### 1.2 ⭐ ADD/UPDATE/DELETE/NOOP delegado al LLM — cierra la brecha #2
 
