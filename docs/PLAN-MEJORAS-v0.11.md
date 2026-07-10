@@ -101,7 +101,7 @@ No tiene sentido optimizar retrieval sobre un motor roto. Estado tras la sesión
 | 0.4 | Sesión/proyecto globales entre procesos | ✅ **arreglado** (`session.rs`) | `project.rs`, 8 handlers |
 | 0.5 | Embeddings perdidos al cerrar (fire-and-forget) | ✅ **arreglado** (`tasks.rs` + drain) | `main.rs`, `cronica.rs` |
 | 0.6 | Decay recompone 10-80× (REM cada 4h) | ✅ **arreglado** (migración 0028, ancla `last_decayed_at`) | `zafra.rs`, `protocol.rs` |
-| 0.7 | `cuba` es superuser → RLS y audit inertes | ⏳ **pendiente (operativo, no ejecutado por seguridad de datos)** | migración 0017 |
+| 0.7 | `cuba` es superuser → RLS y audit inertes | ✅ **arreglado** (rol `cuba_app` no-superuser + `CUBA_SKIP_MIGRATIONS`; verificado en brain_dev) | `scripts/create-app-role.sql`, `db.rs` |
 | 0.8 | Leiden es Louvain 1-nivel, ΔQ partido a la mitad | ✅ **arreglado** (ΔQ ×2, renombrado honesto) | `graph/community.rs` |
 | 0.9 | Sin CHECK del invariante bitemporal | ✅ **arreglado** (migración 0029) | `brain_facts` |
 | 0.10 | Índices ausentes en `created_at` | ✅ **arreglado** (migración 0030) | varias tablas |
@@ -136,7 +136,16 @@ dedup/PE-gating existente. Es la misma jugada del juez $0 de Engram.
 > **Techo de verificación:** el ida-y-vuelta real de sampling necesita un cliente capaz y escribiría en la
 > DB viva, así que no se ejercita aquí; sí el parser (tests) y la ruta degradada (end-to-end).
 
-### 1.2 ⭐ ADD/UPDATE/DELETE/NOOP delegado al LLM — cierra la brecha #2
+### 1.2 ⭐ ADD/UPDATE/DELETE/NOOP delegado al LLM — ✅ hecho (cierra la brecha #2)
+
+> **Estado (hecho):** modelado explícito en `cognitive/memory_op.rs`. El juez LLM
+> clasifica el candidato vs el hecho similar y ese veredicto mapea a una operación:
+> supersedes/contradicts→Update (supersede viejo + conserva nuevo), complementary/
+> unrelated→Add, baja-confianza/unknown→Noop. `auto_extract` devuelve el desglose
+> `{add,update,delete,noop}`. Verificado end-to-end en brain_dev (mock de sampling,
+> como cuba_app no-superuser): supersedes→update:1, complementary→add:1, baja-conf→
+> noop:1; conteo activo estable (bitemporal). 6 unit tests del mapeo.
+
 
 **Problema:** `cognitive/prediction_error.rs` decide reinforce/update/create por umbral de coseno — el
 enfoque frágil que mem0 abandonó explícitamente. **Solución:** cuando el PE-gate caiga en la banda
@@ -159,7 +168,21 @@ versión completa (contexto generado por LLM por chunk):
 CHANGELOG v0.9.3 lo vende como real pero no corre); (b) enriquecer el prefijo contextual con una frase
 generada por sampling. **Coste:** (a) bajo, (b) medio. **Impacto:** alto y **medible**.
 
-### 1.4 Migrar el embedding a bge-m3 (1024-d, multilingüe) para español — ⚙️ código listo; migración es ops
+### 1.4 Migrar el embedding a bge-m3 (1024-d, multilingüe) para español — ✅ hecho y MEDIDO en lab
+
+> **Estado (hecho, con evidencia):** pipeline ONNX desacoplado del modelo
+> (`CUBA_EMBEDDING_DIM`, `CUBA_QUERY_PREFIX`/`CUBA_PASSAGE_PREFIX`, `CUBA_POOLING`,
+> `CUBA_EMBED_MODEL`); `token_type_ids` solo se envía si el modelo lo declara
+> (bge-m3/XLM-RoBERTa no lo usa); `CUBA_HANDLER_TIMEOUT_SECS` para reembed largo.
+> `scripts/migrate-embedding-dim.sh` retipa las columnas y reconstruye HNSW.
+> Migrado brain_dev a vector(1024), reembebidas 1237 obs con bge-m3 (CLS, sin
+> prefijo). **Comparación medida sobre el mismo dataset español (mismo binario):
+> nDCG@10 global 0.7344 (e5-384) → 0.9292 (bge-m3-1024), +19.5 pts;
+> knowledge-update +36.9.** La migración de la DB VIVA sigue siendo ops (toca
+> datos): cambiar `~/.mcp.json` a los models bge-m3 + las `CUBA_*` vars, correr el
+> script de migración + `cuba_zafra reembed` sobre brain. Los defaults preservan e5,
+> así que subir el código NO cambia el comportamiento hasta activar las vars.
+
 
 > **Estado:** el código quedó **preparado** para 1024-d sin bugs latentes: el umbral OOD ya escala con la
 > dimensión (`ood::default_threshold`), y el export/import de `cuba_sync` ahora guarda `embedding_dim` en
@@ -199,9 +222,15 @@ bajo verbos, mover analytics raras a `cuba_vigia`). **Coste:** bajo (es API surf
 > `cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--json]`. Es **no-mutante**
 > (flag `track_access=false` en `cuba_faro`, verificado por hash antes/después).
 > Línea base sobre el corpus real (1420 obs): nDCG@10=0.79, MRR=0.73, R@10=0.83.
-> **Falta (Fase 2.1b):** portar el dataset LongMemEval real (500 preguntas) con
-> sus 5 habilidades (extracción, multi-sesión, temporal, knowledge-update,
-> abstención) — el smoke actual solo mide retrieval sobre 5 queries.
+> **Fase 2.1b — ✅ hecho (taxonomía, no el corpus literal):** el corpus de
+> LongMemEval es conversacional (haystack de sesiones) y no se ingiere tal cual en
+> el KG de entidades/observaciones de cuba, así que se adoptó su **taxonomía de 5
+> habilidades** en el harness ejecutable: `EvaluationSample` gana `ability` y
+> `abstain`; `run_faro_eval` reporta desglose por-habilidad (nDCG/recall) y accuracy
+> de abstención (éxito = el OOD no devuelve nada ante query fuera de dominio).
+> Dataset español curado sobre el corpus real en
+> `rust/tests/datasets/longmemeval_abilities_es.jsonl`. Medido en brain_dev (bge-m3):
+> global nDCG@10=0.9292, abstención=100%, knowledge-update=1.00, temporal=0.979.
 
 
 **El problema de fondo:** el eval de cuba (`rust/src/eval/`) mide nDCG/MRR pero **no tiene callers** y no
