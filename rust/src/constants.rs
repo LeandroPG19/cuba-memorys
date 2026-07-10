@@ -383,14 +383,15 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_ingesta",
-            "Bulk knowledge ingestion: 'ingest' accepts an array of {entity_name, content, observation_type} items. 'parse' splits long text by paragraphs and auto-classifies each. Internally uses same dedup/embedding pipeline as cronica.",
+            "Bulk knowledge ingestion. 'ingest': array of {entity_name, content, observation_type} items. 'parse': split long text by paragraphs + heuristic classify. 'auto_extract' (v0.11): the calling client's LLM extracts salient durable facts from a turn/conversation via MCP Sampling ($0, no API key) and ingests them — the automatic-extraction that mem0/Zep have. All routes share the dedup/PE-gating/embedding pipeline; none delete.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["ingest", "parse"], "description": "Ingestion mode. 'ingest' for structured items, 'parse' for raw text splitting."},
+                    "action": {"type": "string", "enum": ["ingest", "parse", "auto_extract"], "description": "Ingestion mode. 'ingest' for structured items, 'parse' for raw text splitting, 'auto_extract' for LLM extraction via MCP sampling."},
                     "items": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?} objects (for ingest action, max 200)"},
                     "entity_name": {"type": "string", "description": "Entity to attach parsed observations to (for parse action)"},
-                    "text": {"type": "string", "description": "Long text to split into observations (for parse action)"}
+                    "text": {"type": "string", "description": "Raw text: paragraphs to split (parse) or a turn/conversation to extract facts from (auto_extract)"},
+                    "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"}
                 },
                 "required": ["action"]
             }),
