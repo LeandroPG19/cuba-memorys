@@ -18,6 +18,12 @@ pub struct Manifest {
     pub exported_at: DateTime<Utc>,
     pub counts: Counts,
     pub with_embeddings: bool,
+    /// Embedding dimension of the exported vectors. Import uses it to parse the
+    /// blob; without it the record size is unknown for any model other than the
+    /// original 384-d one. `#[serde(default)]` keeps old manifests loadable
+    /// (they fall back to 384 on import).
+    #[serde(default)]
+    pub embedding_dim: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

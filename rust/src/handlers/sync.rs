@@ -102,6 +102,7 @@ async fn export(
     let mut entity_files = 0u32;
     let mut obs_count = 0u32;
     let mut emb_blob: Vec<u8> = Vec::new();
+    let mut emb_dim: Option<usize> = None;
 
     for (id, name, entity_type, importance, access_count, p_id, created_at) in entity_rows {
         let observations: Vec<ObservationRow> = sqlx::query_as::<
@@ -156,6 +157,9 @@ async fn export(
                         .flatten();
                 if let Some(v) = emb {
                     let floats: Vec<f32> = v.to_vec();
+                    if emb_dim.is_none() {
+                        emb_dim = Some(floats.len());
+                    }
                     emb_blob.extend_from_slice(obs.id.as_bytes());
                     for f in floats {
                         emb_blob.extend_from_slice(&f.to_le_bytes());
@@ -364,6 +368,7 @@ async fn export(
         exported_at: Utc::now(),
         counts: counts.clone(),
         with_embeddings,
+        embedding_dim: emb_dim,
     };
     std::fs::write(
         root.join("manifest.json"),
@@ -604,19 +609,23 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     if manifest.with_embeddings && blob_path.exists() {
         let compressed = std::fs::read(&blob_path)?;
         let raw = crate::sync::compressor::decompress(&compressed)?;
-        // Format: [16-byte UUID][384*4 bytes f32]* (rec_size = 16 + 1536 = 1552)
-        const REC_SIZE: usize = 16 + 384 * 4;
-        if raw.len() % REC_SIZE != 0 {
+        // Format: [16-byte UUID][dim*4 bytes f32]*. dim comes from the manifest
+        // (older manifests without it fall back to 384, the original model), so
+        // this survives a switch to bge-m3 (1024-d) instead of misparsing.
+        let dim = manifest.embedding_dim.unwrap_or(384);
+        let rec_size = 16 + dim * 4;
+        if rec_size == 16 || raw.len() % rec_size != 0 {
             tracing::warn!(
-                "embeddings blob length {} not a multiple of {} — skipping",
+                "embeddings blob length {} not a multiple of {} (dim {}) — skipping",
                 raw.len(),
-                REC_SIZE
+                rec_size,
+                dim
             );
         } else {
-            for chunk in raw.chunks_exact(REC_SIZE) {
+            for chunk in raw.chunks_exact(rec_size) {
                 let id_bytes: [u8; 16] = chunk[..16].try_into().unwrap();
                 let id = Uuid::from_bytes(id_bytes);
-                let mut floats = Vec::with_capacity(384);
+                let mut floats = Vec::with_capacity(dim);
                 for f_chunk in chunk[16..].chunks_exact(4) {
                     let arr: [u8; 4] = f_chunk.try_into().unwrap();
                     floats.push(f32::from_le_bytes(arr));

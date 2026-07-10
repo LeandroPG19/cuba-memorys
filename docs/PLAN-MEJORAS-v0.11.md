@@ -159,7 +159,22 @@ versión completa (contexto generado por LLM por chunk):
 CHANGELOG v0.9.3 lo vende como real pero no corre); (b) enriquecer el prefijo contextual con una frase
 generada por sampling. **Coste:** (a) bajo, (b) medio. **Impacto:** alto y **medible**.
 
-### 1.4 Migrar el embedding a bge-m3 (1024-d, multilingüe) para español
+### 1.4 Migrar el embedding a bge-m3 (1024-d, multilingüe) para español — ⚙️ código listo; migración es ops
+
+> **Estado:** el código quedó **preparado** para 1024-d sin bugs latentes: el umbral OOD ya escala con la
+> dimensión (`ood::default_threshold`), y el export/import de `cuba_sync` ahora guarda `embedding_dim` en
+> el manifest y lo usa al importar (antes hardcodeaba 384 → habría corrompido el blob con bge-m3;
+> verificado round-trip en lab). **La migración en sí es una tarea de ops bloqueada por el modelo**, no se
+> ejecutó por seguridad de datos. Runbook:
+>
+> 1. Descargar el ONNX de bge-m3 (1024-d) a `ONNX_MODEL_PATH`. **Prerequisito** — sin él, el paso 3
+>    dejaría el corpus sin vectores y sin poder recomputarlos.
+> 2. Migración destructiva-de-vectores (el contenido se conserva): `UPDATE brain_observations SET
+>    embedding=NULL; ALTER TABLE brain_observations ALTER COLUMN embedding TYPE vector(1024); ` + recrear
+>    el índice HNSW; ídem `brain_episodes`. **Hacer backup antes** (`scripts/backup-db.sh`).
+> 3. `cuba_zafra action=reembed` para recodificar las 1420 observaciones con bge-m3.
+> 4. Verificar `vector_dims(embedding)=1024` y correr `cuba-memorys eval` para confirmar que la calidad no
+>    bajó. Para español debería subir.
 
 `multilingual-e5-small` (384-d) es débil para español. Tanto `germaniu/mcp-memory` como el propio Engram
 recomiendan **bge-m3** (1024-d) para contenido no inglés. El código de cuba ya anticipa la migración a
