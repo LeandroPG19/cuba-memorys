@@ -64,6 +64,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     // V0.6: Tag filter
     let tag_filter = args.get("tags").and_then(|v| v.as_str());
 
+    // The Testing Effect write (dual_strength::on_search_match) boosts the
+    // importance/access of matched observations. Callers that must NOT mutate —
+    // the eval harness above all, which would otherwise skew the very rankings
+    // it measures — pass track_access=false. Default true (normal search).
+    let track_access = args
+        .get("track_access")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     // Temporal filters (ISO8601 strings)
     let before = args.get("before").and_then(|v| v.as_str());
     let after = args.get("after").and_then(|v| v.as_str());
@@ -132,6 +141,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         mmr_lambda,
         enable_bm25,
         enable_rerank,
+        track_access,
     };
 
     match mode {
@@ -182,6 +192,8 @@ struct SearchOpts<'a> {
     /// V0.9.2: cross-encoder rerank top-N pre-MMR. Identity when reranker
     /// asset (CUBA_RERANKER_PATH) is missing — production transparent.
     enable_rerank: bool,
+    /// When false, skip the Testing Effect write (eval harness). Default true.
+    track_access: bool,
 }
 
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
@@ -430,7 +442,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         })
         .collect();
 
-    if !matched_obs_ids.is_empty()
+    if opts.track_access
+        && !matched_obs_ids.is_empty()
         && let Err(e) = dual_strength::on_search_match(pool, &matched_obs_ids).await
     {
         tracing::warn!(error = %e, "failed to apply Testing Effect boost");
