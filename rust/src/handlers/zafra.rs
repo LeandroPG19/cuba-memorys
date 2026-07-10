@@ -293,7 +293,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .get("batch_size")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(500);
-            let current_model = crate::embeddings::onnx::CURRENT_MODEL;
+            let current_model = crate::embeddings::onnx::current_model();
             // V0.6: Only re-encode observations with stale/missing model or embedding
             let obs: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                 "SELECT id, content FROM brain_observations
@@ -303,7 +303,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  LIMIT $1",
             )
             .bind(batch_size)
-            .bind(current_model)
+            .bind(&current_model)
             .fetch_all(pool)
             .await?;
 
@@ -327,7 +327,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                             "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                         )
                         .bind(pgvector::Vector::from(emb))
-                        .bind(current_model)
+                        .bind(&current_model)
                         .bind(obs_id)
                         .execute(pool)
                         .await
@@ -354,7 +354,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 "action": "reembed",
                 "total_fetched": total,
                 "updated": updated,
-                "model": "multilingual-e5-small (passage: prefix)",
+                "model": current_model,
+                "dim": crate::embeddings::onnx::embedding_dim(),
                 "note": "Run after switching embedding models to ensure vector search consistency"
             }))
         }
