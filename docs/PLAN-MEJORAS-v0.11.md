@@ -189,14 +189,16 @@ Las tres últimas mapean directo a features de cuba (bitemporal, supersedes, OOD
 probaría si sirven. **Coste:** medio (portar el dataset + un runner). **Impacto:** altísimo — convierte
 "algoritmos que suenan bien" en "mejoras medidas", y da una cifra defendible para el README.
 
-### 2.2 Retrieval asociativo multi-hop con Personalized PageRank (HippoRAG 2)
+### 2.2 Retrieval asociativo multi-hop (HippoRAG 2) — ✅ Fase 2 hecha (opt-in)
 
-cuba ya tiene PageRank global y `spreading_activation`, pero no PPR **sembrado desde las entidades del
-query** para recuperación asociativa. HippoRAG 2 ([arxiv 2502.14802](https://arxiv.org/abs/2502.14802))
-reporta **+7 puntos F1** sobre retrievers de embeddings en tareas multi-hop, con indexado más barato que
-GraphRAG/RAPTOR/LightRAG. **Aplicar:** en `cuba_faro`, sembrar PPR desde los nodos que matchean el query
-y mezclar ese score en la fusión RRF. Reusa la maquinaria de `graph/pagerank.rs` y `graph/activation.rs`.
-**Coste:** medio. **Impacto:** alto en preguntas que requieren conectar hechos.
+> **Estado (Fase 2, hecha):** implementado en `cuba_faro` como `associative` (opt-in, default off).
+> Siembra `graph::activation::spread_from_entities` desde las entidades que matchean el query y añade
+> observaciones de entidades conectadas por grafo que ninguna señal léxica/vectorial encontró. Es
+> **estrictamente aditivo** (nunca baja una señal base) y **acotado** (≤5 semillas, 2 hops, top-8
+> entidades, 2 obs c/u). Medido no-mutante sobre el corpus real: **recall@10 0.83 → 0.93 (+10pts)**,
+> nDCG plano. Expuesto en el schema y en `cuba-memorys eval --associative`.
+> **Falta:** un dataset multi-hop real (Fase 2.1b) para un veredicto de calidad concluyente y decidir
+> si se activa por defecto. Refinamiento futuro: PPR propio (teleport+suma) en vez de spreading-max.
 
 ### 2.3 Índice BM25 real (ParadeDB/pg_search) en vez de `ts_rank_cd`
 
