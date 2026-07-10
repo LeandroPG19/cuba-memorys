@@ -391,7 +391,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "items": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?} objects (for ingest action, max 200)"},
                     "entity_name": {"type": "string", "description": "Entity to attach parsed observations to (for parse action)"},
                     "text": {"type": "string", "description": "Raw text: paragraphs to split (parse) or a turn/conversation to extract facts from (auto_extract)"},
-                    "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"}
+                    "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"},
+                    "supersede_conflicts": {"type": "boolean", "description": "v0.11 (auto_extract): when a new fact replaces/contradicts an existing related one, ask the judge and mark the old observation superseded (knowledge-update; never deletes). Default false."}
                 },
                 "required": ["action"]
             }),
