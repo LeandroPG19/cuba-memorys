@@ -170,7 +170,16 @@ bajo verbos, mover analytics raras a `cuba_vigia`). **Coste:** bajo (es API surf
 
 ## 4. Tier 2 — Alto impacto, coste medio
 
-### 2.1 ⭐ Adoptar LongMemEval como harness de evaluación real
+### 2.1 ⭐ Adoptar LongMemEval como harness de evaluación real — ✅ Fase 1 hecha (harness ejecutable)
+
+> **Estado (Fase 1, hecha):** el harness `rust/src/eval/` ya es ejecutable vía
+> `cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--json]`. Es **no-mutante**
+> (flag `track_access=false` en `cuba_faro`, verificado por hash antes/después).
+> Línea base sobre el corpus real (1420 obs): nDCG@10=0.79, MRR=0.73, R@10=0.83.
+> **Falta (Fase 2.1b):** portar el dataset LongMemEval real (500 preguntas) con
+> sus 5 habilidades (extracción, multi-sesión, temporal, knowledge-update,
+> abstención) — el smoke actual solo mide retrieval sobre 5 queries.
+
 
 **El problema de fondo:** el eval de cuba (`rust/src/eval/`) mide nDCG/MRR pero **no tiene callers** y no
 prueba ninguna habilidad de memoria. LongMemEval ([arxiv 2410.10813](https://arxiv.org/abs/2410.10813))
