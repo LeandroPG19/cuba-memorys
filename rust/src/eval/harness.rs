@@ -35,15 +35,19 @@ impl BenchmarkHarness {
     }
 
     pub async fn run(&self, pool: &PgPool) -> Result<EvalReport> {
-        run_faro_eval(pool, &self.dataset, self.k).await
+        run_faro_eval(pool, &self.dataset, self.k, false).await
     }
 }
 
 /// Run hybrid `cuba_faro` per sample and aggregate IR metrics.
+///
+/// `associative` toggles the v0.11 multi-hop expansion so the two configs can
+/// be compared on the same dataset.
 pub async fn run_faro_eval(
     pool: &PgPool,
     samples: &[EvaluationSample],
     k: usize,
+    associative: bool,
 ) -> Result<EvalReport> {
     let k = k.clamp(1, 50);
     if samples.is_empty() {
@@ -74,6 +78,7 @@ pub async fn run_faro_eval(
             "enable_bm25": true,
             "rerank": false,
             "diversify": false,
+            "associative": associative,
             // Do not apply the Testing Effect boost — the benchmark must not
             // mutate the corpus it is measuring.
             "track_access": false

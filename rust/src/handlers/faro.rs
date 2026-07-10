@@ -73,6 +73,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
+    // v0.11: associative multi-hop expansion (opt-in; default off).
+    let associative = args
+        .get("associative")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Temporal filters (ISO8601 strings)
     let before = args.get("before").and_then(|v| v.as_str());
     let after = args.get("after").and_then(|v| v.as_str());
@@ -142,6 +148,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         enable_bm25,
         enable_rerank,
         track_access,
+        associative,
     };
 
     match mode {
@@ -194,6 +201,12 @@ struct SearchOpts<'a> {
     enable_rerank: bool,
     /// When false, skip the Testing Effect write (eval harness). Default true.
     track_access: bool,
+    /// v0.11: associative expansion. Seeds spreading activation from
+    /// query-matched entities and pulls in observations on graph-connected
+    /// entities that no lexical/vector signal surfaced (multi-hop recall,
+    /// HippoRAG-style). Additive and opt-in — default false leaves the
+    /// production ranking untouched.
+    associative: bool,
 }
 
 /// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
@@ -357,6 +370,14 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     data: result.clone(),
                 });
         }
+    }
+
+    // v0.11: associative expansion (opt-in). Seed spreading activation from the
+    // entities that match the query, then pull in observations on graph-connected
+    // entities that no lexical/vector/bm25 signal surfaced. Strictly additive:
+    // only inserts ids not already present, so the base ranking cannot regress.
+    if opts.associative {
+        associative_expand(pool, query, opts.project_id, &mut fused_scores).await;
     }
 
     // Sort by fused score
@@ -1092,6 +1113,127 @@ fn entropy_weights(entropy: f64) -> (f64, f64) {
     let text_w = 0.7 - 0.4 * t; // 0.7 → 0.3
     let vector_w = 0.3 + 0.4 * t; // 0.3 → 0.7
     (text_w, vector_w)
+}
+
+/// v0.11: associative multi-hop expansion (HippoRAG-style).
+///
+/// 1. Seed = entities whose name/text matches the query (the query-linked nodes).
+/// 2. Spread activation 2 hops over `brain_relations` (reuses graph::activation).
+/// 3. For the top activated non-seed entities, add their highest-importance
+///    observations that no base signal already surfaced, scored by
+///    activation × importance.
+///
+/// Additive only: it inserts ids absent from `fused_scores`, never lowers an
+/// existing score, so enabling it cannot regress the base ranking. Best-effort:
+/// any DB error is logged and skipped rather than failing the search.
+async fn associative_expand(
+    pool: &PgPool,
+    query: &str,
+    project_id: Option<uuid::Uuid>,
+    fused: &mut HashMap<String, FusedResult>,
+) {
+    const SEED_K: i64 = 5;
+    const EXPAND_ENTITIES: usize = 8;
+    const OBS_PER_ENTITY: i64 = 2;
+    const MAX_HOPS: usize = 2;
+    // Scaled so a strongly-activated, high-importance associative hit lands
+    // around a mid-rank RRF score (~1/60) — present in the pool, never
+    // dominating an exact lexical/vector match.
+    const ASSOC_WEIGHT: f64 = 0.02;
+
+    // 1. Seed entities matching the query.
+    let seeds: Vec<(uuid::Uuid,)> = match sqlx::query_as(
+        "SELECT id FROM brain_entities
+         WHERE (search_vector @@ cuba_or_tsquery($1) OR similarity(name, $1) > 0.3)
+           AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)
+         ORDER BY importance DESC
+         LIMIT $3",
+    )
+    .bind(query)
+    .bind(project_id)
+    .bind(SEED_K)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "associative: seed query failed — skipping");
+            return;
+        }
+    };
+    if seeds.is_empty() {
+        return;
+    }
+    let seed_ids: Vec<uuid::Uuid> = seeds.iter().map(|(id,)| *id).collect();
+    let seed_set: std::collections::HashSet<uuid::Uuid> = seed_ids.iter().copied().collect();
+
+    // 2. Spread activation from the seeds.
+    let activated =
+        match crate::graph::activation::spread_from_entities(pool, &seed_ids, MAX_HOPS).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "associative: activation spread failed — skipping");
+                return;
+            }
+        };
+
+    // 3. For the top activated NON-seed entities, add their top observations.
+    for (entity_id, activation) in activated
+        .into_iter()
+        .filter(|(id, _)| !seed_set.contains(id))
+        .take(EXPAND_ENTITIES)
+    {
+        let obs: Vec<(uuid::Uuid, String, String, String, f64)> = match sqlx::query_as(
+            "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8
+             FROM brain_observations o
+             JOIN brain_entities e ON e.id = o.entity_id
+             WHERE o.entity_id = $1
+               AND o.observation_type != 'superseded'
+               AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
+             ORDER BY o.importance DESC
+             LIMIT $3",
+        )
+        .bind(entity_id)
+        .bind(project_id)
+        .bind(OBS_PER_ENTITY)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "associative: obs fetch failed — skipping entity");
+                continue;
+            }
+        };
+
+        for (id, entity_name, content, obs_type, importance) in obs {
+            let id_str = id.to_string();
+            if fused.contains_key(&id_str) {
+                continue; // never override a base-signal hit
+            }
+            let assoc_score = ASSOC_WEIGHT * activation as f64 * importance;
+            fused.insert(
+                id_str.clone(),
+                FusedResult {
+                    text_score: 0.0,
+                    vector_score: 0.0,
+                    bm25_score: 0.0,
+                    session_boosted: false,
+                    total: assoc_score,
+                    data: serde_json::json!({
+                        "id": id_str,
+                        "type": "observation",
+                        "entity_name": entity_name,
+                        "content": content,
+                        "observation_type": obs_type,
+                        "importance": importance,
+                        "score": assoc_score,
+                        "associative": true
+                    }),
+                },
+            );
+        }
+    }
 }
 
 // V3 adaptive_rrf_k REMOVED — k=60 constant per Gemini Deep Research audit 2026-03-14.

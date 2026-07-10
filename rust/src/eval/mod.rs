@@ -22,6 +22,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut dataset_path: Option<String> = None;
     let mut k: usize = 10;
     let mut json = false;
+    let mut associative = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -34,9 +35,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     .context("--k needs an integer")?
             }
             "--json" => json = true,
+            "--associative" => associative = true,
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--json]\n\
+                    "usage: cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--associative] [--json]\n\
+                     --associative enables the v0.11 multi-hop expansion (compare vs without)\n\
                      JSONL row: {{\"query\": \"...\", \"relevant_markers\": [\"...\"], \"expected_answer\": \"...\"?}}"
                 );
                 return Ok(());
@@ -60,7 +63,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .await
         .context("connecting to database for eval")?;
 
-    let report = harness::run_faro_eval(&pool, &samples, k).await?;
+    let report = harness::run_faro_eval(&pool, &samples, k, associative).await?;
 
     if json {
         println!(
@@ -69,10 +72,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         );
     } else {
         eprintln!(
-            "eval dataset={} samples={} k={}",
+            "eval dataset={} samples={} k={} associative={}",
             dataset_path.as_deref().unwrap_or("<builtin>"),
             samples.len(),
-            k
+            k,
+            associative
         );
         println!("{}", reporters::summary_line(&report));
     }
