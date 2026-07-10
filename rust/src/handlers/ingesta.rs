@@ -13,8 +13,146 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     match action {
         "ingest" => ingest(pool, &args).await,
         "parse" => parse(pool, &args).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use ingest/parse"),
+        "auto_extract" => auto_extract(pool, &args).await,
+        _ => anyhow::bail!("Invalid action: {action}. Use ingest/parse/auto_extract"),
     }
+}
+
+/// v0.11: LLM-powered fact extraction (closes the extraction gap; mem0/Zep have
+/// it, cuba did not). Instead of the heuristic paragraph split of `parse`, it
+/// asks the *calling client's* LLM — via MCP Sampling, so $0 and no API key — to
+/// distill the salient, durable facts from a turn/conversation as structured
+/// items, then feeds them through the same dedup + PE-gating + embedding
+/// pipeline as `ingest`. Additive only: it never deletes.
+///
+/// Degrades honestly: if the client did not advertise `sampling`, it says so and
+/// points at `parse` (the heuristic fallback) rather than silently doing nothing.
+async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
+    let text = args
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        anyhow::bail!("text is required for auto_extract action");
+    }
+
+    if !crate::protocol::client_supports_sampling() {
+        return Ok(serde_json::json!({
+            "action": "auto_extract",
+            "extracted": 0,
+            "added": 0,
+            "degraded": true,
+            "note": "client did not advertise MCP sampling capability — cannot call an LLM \
+                     to extract. Use action='parse' (heuristic paragraph split) instead, or \
+                     connect from a sampling-capable client."
+        }));
+    }
+
+    let hint = args
+        .get("entity_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let prompt = build_extraction_prompt(text, hint);
+
+    // Larger reply budget than the judge — a turn can yield several facts.
+    let reply = crate::protocol::request_sampling_max(&prompt, 1024)
+        .await
+        .context("MCP sampling for auto_extract failed")?;
+
+    let items = parse_extracted_items(&reply);
+    let extracted = items.len();
+    if extracted == 0 {
+        return Ok(serde_json::json!({
+            "action": "auto_extract",
+            "extracted": 0,
+            "added": 0,
+            "note": "the model returned no durable facts worth remembering from this text"
+        }));
+    }
+
+    // Reuse the ingest path: validation + dedup + PE-gating + embedding.
+    let ingest_args = serde_json::json!({ "action": "ingest", "items": items });
+    let result = ingest(pool, &ingest_args).await?;
+
+    let mut response = result;
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("action".to_string(), serde_json::json!("auto_extract"));
+        obj.insert("extracted".to_string(), serde_json::json!(extracted));
+    }
+    Ok(response)
+}
+
+/// Build the extraction instruction for the client LLM. Asks for STRICT JSON so
+/// `parse_extracted_items` can recover it even if the model adds prose/fences.
+fn build_extraction_prompt(text: &str, hint: &str) -> String {
+    let hint_line = if hint.is_empty() {
+        String::new()
+    } else {
+        format!("\nThe main subject is likely: \"{hint}\". Prefer it as entity_name when it fits.")
+    };
+    format!(
+        "You extract durable, reusable memories from an AI coding agent's work log.\n\
+         From the text below, extract only facts worth remembering across sessions — \
+         decisions made, lessons learned, errors and their fixes, stable preferences, \
+         key technical facts. Ignore chit-chat, transient state, and anything that will \
+         not matter next week.{hint_line}\n\n\
+         Return STRICT JSON: an array of objects, each\n\
+         {{\"entity_name\": <the project/technology/concept the fact is about>, \
+         \"content\": <one self-contained sentence>, \
+         \"observation_type\": one of [fact, decision, lesson, preference, error, solution, context, tool_usage]}}\n\
+         Return [] if nothing is worth remembering. No prose, no markdown — just the JSON array.\n\n\
+         TEXT:\n{text}"
+    )
+}
+
+/// Recover the JSON array from an LLM reply that may wrap it in ```json fences
+/// or surrounding prose. Returns ingest-ready items (invalid rows dropped).
+fn parse_extracted_items(reply: &str) -> Vec<Value> {
+    // Isolate the outermost [...] span so stray prose/fences don't break parsing.
+    let slice = match (reply.find('['), reply.rfind(']')) {
+        (Some(a), Some(b)) if b > a => &reply[a..=b],
+        _ => return Vec::new(),
+    };
+    let parsed: Value = match serde_json::from_str(slice) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(arr) = parsed.as_array() else {
+        return Vec::new();
+    };
+
+    const VALID_TYPES: &[&str] = &[
+        "fact",
+        "decision",
+        "lesson",
+        "preference",
+        "error",
+        "solution",
+        "context",
+        "tool_usage",
+    ];
+
+    arr.iter()
+        .filter_map(|item| {
+            let entity_name = item.get("entity_name").and_then(|v| v.as_str())?.trim();
+            let content = item.get("content").and_then(|v| v.as_str())?.trim();
+            if entity_name.is_empty() || content.is_empty() {
+                return None;
+            }
+            let obs_type = item
+                .get("observation_type")
+                .and_then(|v| v.as_str())
+                .filter(|t| VALID_TYPES.contains(t))
+                .unwrap_or("fact");
+            Some(serde_json::json!({
+                "entity_name": entity_name,
+                "content": content,
+                "observation_type": obs_type,
+                "source": "inference"
+            }))
+        })
+        .collect()
 }
 
 /// Ingest an array of structured items.
@@ -166,5 +304,51 @@ fn classify_paragraph(text: &str) -> &'static str {
         "preference"
     } else {
         "fact"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_extracted_items;
+
+    #[test]
+    fn parses_clean_json_array() {
+        let reply = r#"[{"entity_name":"cuba-memorys","content":"uses pgvector","observation_type":"fact"}]"#;
+        let items = parse_extracted_items(reply);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["entity_name"], "cuba-memorys");
+        assert_eq!(items[0]["observation_type"], "fact");
+        assert_eq!(items[0]["source"], "inference");
+    }
+
+    #[test]
+    fn recovers_json_from_markdown_fences_and_prose() {
+        let reply = "Sure! Here are the facts:\n```json\n[{\"entity_name\":\"X\",\"content\":\"did Y\",\"observation_type\":\"decision\"}]\n```\nHope that helps.";
+        let items = parse_extracted_items(reply);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["observation_type"], "decision");
+    }
+
+    #[test]
+    fn drops_invalid_rows_and_normalizes_bad_type() {
+        let reply = r#"[
+            {"entity_name":"","content":"no entity","observation_type":"fact"},
+            {"entity_name":"A","content":"","observation_type":"fact"},
+            {"entity_name":"B","content":"good","observation_type":"nonsense"}
+        ]"#;
+        let items = parse_extracted_items(reply);
+        assert_eq!(items.len(), 1, "only the one with entity+content survives");
+        assert_eq!(items[0]["entity_name"], "B");
+        assert_eq!(
+            items[0]["observation_type"], "fact",
+            "unknown type falls back to fact"
+        );
+    }
+
+    #[test]
+    fn empty_or_no_array_yields_nothing() {
+        assert!(parse_extracted_items("[]").is_empty());
+        assert!(parse_extracted_items("I couldn't find any facts.").is_empty());
+        assert!(parse_extracted_items("").is_empty());
     }
 }

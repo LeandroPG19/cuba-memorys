@@ -117,6 +117,12 @@ fn cancel_tokens() -> &'static Mutex<std::collections::HashMap<String, CancelTok
 /// outbound channel and awaits the matching response on a oneshot. Falls
 /// back to a structured error if the client did not advertise `sampling`.
 pub async fn request_sampling(prompt: &str) -> anyhow::Result<String> {
+    request_sampling_max(prompt, 256).await
+}
+
+/// Like [`request_sampling`] but with a caller-chosen `max_tokens` budget.
+/// Fact extraction needs a larger reply than the judge's 256-token verdict.
+pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
     if !client_supports_sampling() {
         anyhow::bail!(
             "client does not advertise capabilities.sampling — \
@@ -139,7 +145,7 @@ pub async fn request_sampling(prompt: &str) -> anyhow::Result<String> {
                     "content": { "type": "text", "text": prompt }
                 }
             ],
-            "maxTokens": 256,
+            "maxTokens": max_tokens,
             "modelPreferences": {
                 "intelligencePriority": 0.6,
                 "speedPriority": 0.4
