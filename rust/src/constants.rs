@@ -160,7 +160,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "abstain_ood": {"type": "boolean", "description": "v0.9: abstain (return empty results with abstain_reason) when query is out-of-distribution via Mahalanobis distance. Default false."},
                     "ood_threshold": {"type": "number", "description": "v0.9: Mahalanobis distance threshold for abstention. Defaults to sqrt(chi2_0.99(d)), which scales with the embedding dimension (~21.25 for d=384). Override only if you calibrated on your own corpus."},
                     "enable_bm25": {"type": "boolean", "description": "v0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector. Catches queries with rare terms that dense embeddings miss. Default true."},
-                    "rerank": {"type": "boolean", "description": "v0.9.2: cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3 (Xiao 2023). Auto-enabled when CUBA_RERANKER_PATH points to a valid ONNX. Identity fallback otherwise."}
+                    "rerank": {"type": "boolean", "description": "v0.9.2: cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3 (Xiao 2023). Auto-enabled when CUBA_RERANKER_PATH points to a valid ONNX. Identity fallback otherwise."},
+                    "associative": {"type": "boolean", "description": "v0.11: multi-hop expansion (HippoRAG-style). Seeds spreading activation from query-matched entities and pulls in observations on graph-connected entities that no lexical/vector signal surfaced. Additive — never lowers a base hit. Measured +10pts recall@10 on the smoke set. Default false."}
                 },
                 "required": ["query"]
             }),
