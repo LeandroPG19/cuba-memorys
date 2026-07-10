@@ -100,11 +100,11 @@ No tiene sentido optimizar retrieval sobre un motor roto. Estado tras la sesión
 | 0.3 | OOD invertido (τ=5.0 → 100% abstención) | ✅ **arreglado** (Wilson-Hilferty + `embed_passage`) | `search/ood.rs` |
 | 0.4 | Sesión/proyecto globales entre procesos | ✅ **arreglado** (`session.rs`) | `project.rs`, 8 handlers |
 | 0.5 | Embeddings perdidos al cerrar (fire-and-forget) | ✅ **arreglado** (`tasks.rs` + drain) | `main.rs`, `cronica.rs` |
-| 0.6 | **Decay recompone 10-80× (REM cada 4h)** | ⏳ **PENDIENTE** | `handlers/zafra.rs:69`, `protocol.rs:591` |
-| 0.7 | `cuba` es superuser → RLS y audit inertes | ⏳ pendiente (operativo) | migración 0017 |
-| 0.8 | Leiden es Louvain 1-nivel, ΔQ partido a la mitad | ⏳ pendiente (bajo) | `graph/community.rs:210` |
-| 0.9 | Sin CHECK del invariante bitemporal | ⏳ pendiente (bajo) | migración 0018 |
-| 0.10 | Índices ausentes en `created_at` | ⏳ pendiente (bajo, a escala) | varias tablas |
+| 0.6 | Decay recompone 10-80× (REM cada 4h) | ✅ **arreglado** (migración 0028, ancla `last_decayed_at`) | `zafra.rs`, `protocol.rs` |
+| 0.7 | `cuba` es superuser → RLS y audit inertes | ⏳ **pendiente (operativo, no ejecutado por seguridad de datos)** | migración 0017 |
+| 0.8 | Leiden es Louvain 1-nivel, ΔQ partido a la mitad | ✅ **arreglado** (ΔQ ×2, renombrado honesto) | `graph/community.rs` |
+| 0.9 | Sin CHECK del invariante bitemporal | ✅ **arreglado** (migración 0029) | `brain_facts` |
+| 0.10 | Índices ausentes en `created_at` | ✅ **arreglado** (migración 0030) | varias tablas |
 
 **Prioridad inmediata: 0.6 (decay).** Es el que más degrada la calidad hoy: hunde la importancia de todo
 lo no accedido en una semana, y la importancia pesa en el ranking (`score·0.7 + importance·0.3`). Fix:
