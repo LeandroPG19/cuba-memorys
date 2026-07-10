@@ -73,7 +73,10 @@ pub async fn run_faro_eval(
             "limit": k,
             "enable_bm25": true,
             "rerank": false,
-            "diversify": false
+            "diversify": false,
+            // Do not apply the Testing Effect boost — the benchmark must not
+            // mutate the corpus it is measuring.
+            "track_access": false
         });
         let response = crate::handlers::faro::handle(pool, args)
             .await

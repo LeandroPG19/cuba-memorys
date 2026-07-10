@@ -38,5 +38,8 @@ python3 tests/e2e_all_tools.py
 echo "=== MCP live session (single process, initialize + tools/list + calls) ==="
 python3 "$ROOT/scripts/mcp_live_session_test.py"
 
+echo "=== eval harness smoke (non-mutating; verifies it runs end-to-end) ==="
+"$RUST_DIR/target/release/cuba-memorys" eval --dataset "$RUST_DIR/eval-datasets/smoke.jsonl" --k 10
+
 echo ""
 echo "All tests passed."

@@ -42,6 +42,19 @@ async fn main() {
         )
         .init();
 
+    // Subcommand dispatch. `eval` runs the read-only retrieval benchmark and
+    // exits; anything else falls through to the MCP stdio server. Kept before
+    // the server setup so eval never touches stdout's protocol channel.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("eval") {
+        if let Err(e) = cuba_memorys::eval::run_cli(&argv[2..]).await {
+            tracing::error!(error = %format!("{e:#}"), "eval failed");
+            eprintln!("eval error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
 
     // V0.9: optional Prometheus /metrics endpoint (no-op without `observability` feature).
