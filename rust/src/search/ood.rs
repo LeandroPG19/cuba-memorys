@@ -13,8 +13,9 @@
 //!
 //! Mahalanobis(x, μ, Σ) = sqrt((x - μ)ᵀ Σ⁻¹ (x - μ))
 //!
-//! Thresholds typically calibrated on a validation set. Default τ = 5.0
-//! corresponds to ~5σ in 384-dim space, conservative.
+//! The threshold scales with dimensionality — see [`default_threshold`]. A
+//! typical in-distribution point lies at `M ≈ sqrt(d)` (χ² with d dof), so a
+//! fixed small τ abstains on everything.
 //!
 //! ## Caching
 //!
@@ -111,9 +112,44 @@ impl OodStats {
     }
 }
 
-/// Default OOD threshold (Mahalanobis distance). Calibrated for 384-dim
-/// e5-small embeddings; revisit when migrating to 1024-dim BGE-M3 in v1.0.
-pub const DEFAULT_OOD_THRESHOLD: f64 = 5.0;
+/// z-score for the 99th percentile of the standard normal. Used by
+/// [`default_threshold`] to pick the chi-squared quantile.
+const Z_99: f64 = 2.326_347_9;
+
+/// Default OOD threshold for a `dim`-dimensional embedding space.
+///
+/// # Why this is not a constant
+///
+/// For data drawn from a `d`-dimensional Gaussian, the *squared* Mahalanobis
+/// distance follows a chi-squared distribution with `d` degrees of freedom.
+/// A **typical, in-distribution** point therefore sits at `M ≈ sqrt(d)`, not
+/// near zero: for `d = 384` that is `19.6`.
+///
+/// The previous hard-coded `5.0` — documented as "~5σ in 384-dim space" —
+/// misread Mahalanobis as if it were a per-axis z-score. Measured against the
+/// live corpus (n=1215, d=384), it flagged **100% of in-distribution
+/// observations as OOD**: median distance 19.60, min 10.69. Abstention was
+/// unconditional.
+///
+/// We instead return `sqrt(χ²_{0.99}(d))`, the radius enclosing 99% of the
+/// distribution, via the Wilson–Hilferty cube-root approximation:
+///
+/// ```text
+/// χ²_p(d) ≈ d · (1 − 2/(9d) + z_p · sqrt(2/(9d)))³
+/// ```
+///
+/// It is accurate to <0.1% for `d ≥ 30`. For `d = 384` it yields `τ ≈ 21.25`,
+/// matching `scipy.stats.chi2.ppf(0.99, 384)` and leaving the empirical corpus
+/// with a ~10% abstention rate at the tail — the intended behavior.
+pub fn default_threshold(dim: usize) -> f64 {
+    if dim == 0 {
+        return 0.0;
+    }
+    let d = dim as f64;
+    let a = 2.0 / (9.0 * d);
+    let chi2 = d * (1.0 - a + Z_99 * a.sqrt()).powi(3);
+    chi2.max(0.0).sqrt()
+}
 
 /// Minimum samples required before OOD detection is meaningful. Below this,
 /// the covariance estimate is too noisy and we skip the check entirely.
@@ -151,28 +187,64 @@ mod tests {
     }
 
     #[test]
-    fn in_distribution_query_below_threshold() {
-        let center = vec![0.5_f32; 16];
-        let samples = random_around(&center, 200, 0.05);
-        let stats = OodStats::fit(&samples).expect("fit");
-        let in_dist = vec![0.5_f32; 16];
-        let dist = stats.mahalanobis(&in_dist).expect("mahalanobis");
+    fn threshold_tracks_sqrt_of_dimension() {
+        // Wilson–Hilferty must agree with scipy.stats.chi2.ppf(0.99, df).
+        // Reference values: chi2.ppf(0.99, 384) = 451.4 -> sqrt = 21.25
+        //                   chi2.ppf(0.99, 1024) = 1131.2 -> sqrt = 33.63
+        let t384 = default_threshold(384);
         assert!(
-            dist < DEFAULT_OOD_THRESHOLD,
-            "in-distribution query should be below threshold, got {dist}"
+            (t384 - 21.25).abs() < 0.1,
+            "tau(384) should be ~21.25, got {t384}"
+        );
+        let t1024 = default_threshold(1024);
+        assert!(
+            (t1024 - 33.63).abs() < 0.15,
+            "tau(1024) should be ~33.63, got {t1024}"
+        );
+        assert_eq!(default_threshold(0), 0.0);
+    }
+
+    /// Regression: the old fixed tau = 5.0 flagged 100% of the live corpus as
+    /// OOD, because a typical point sits at M ~ sqrt(d), not near zero. The
+    /// previous test only probed the mean itself (distance ~0) and so never
+    /// caught it.
+    #[test]
+    fn typical_in_distribution_point_is_not_ood() {
+        let d = 64;
+        let center = vec![0.5_f32; d];
+        let samples = random_around(&center, 400, 0.05);
+        let stats = OodStats::fit(&samples).expect("fit");
+        let tau = default_threshold(d);
+
+        // Probe actual samples, not the centroid.
+        let flagged = samples.iter().filter(|s| stats.is_ood(s, tau)).count();
+        let rate = flagged as f64 / samples.len() as f64;
+        assert!(
+            rate < 0.05,
+            "at most ~1% of in-distribution samples should be OOD at p=0.99, got {:.1}%",
+            rate * 100.0
+        );
+
+        // And the old constant must reject essentially everything, which is
+        // exactly why it was wrong.
+        let flagged_old = samples.iter().filter(|s| stats.is_ood(s, 5.0)).count();
+        assert!(
+            flagged_old > samples.len() / 2,
+            "sanity: the legacy tau=5.0 over-abstains (that was the bug)"
         );
     }
 
     #[test]
     fn out_of_distribution_query_above_threshold() {
-        let center = vec![0.0_f32; 16];
+        let d = 16;
+        let center = vec![0.0_f32; d];
         let samples = random_around(&center, 200, 0.01);
         let stats = OodStats::fit(&samples).expect("fit");
-        // Far from the cluster: every dim shifted by 5σ
-        let ood = vec![10.0_f32; 16];
+        // Far from the cluster: every dim shifted well beyond the spread.
+        let ood = vec![10.0_f32; d];
         let dist = stats.mahalanobis(&ood).expect("mahalanobis");
         assert!(
-            dist > DEFAULT_OOD_THRESHOLD,
+            dist > default_threshold(d),
             "OOD query should exceed threshold, got {dist}"
         );
     }

@@ -36,8 +36,14 @@ jobs:
       - name: cargo check
         run: cargo check
 
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      # --all-targets lints tests/ and examples/ too; -D promotes warnings to
+      # errors. The old `-W clippy::all` only warned, and without --all-targets
+      # clippy never even compiled rust/tests/.
       - name: cargo clippy
-        run: cargo clippy -- -W clippy::all
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test

@@ -114,16 +114,28 @@ async fn current(pool: &PgPool) -> Result<Value> {
 async fn switch(pool: &PgPool, name: &str) -> Result<Value> {
     let pid = project::upsert_project(pool, name).await?;
 
-    // Bind the project to the most recent active session, if any.
-    let updated: Option<(Uuid,)> = sqlx::query_as(
-        "UPDATE brain_sessions SET project_id = $1
-         WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL
-                     ORDER BY started_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
-         RETURNING id",
-    )
-    .bind(pid)
-    .fetch_optional(pool)
-    .await?;
+    // Bind the project to *this process's* session. Targeting the newest open
+    // session in the database meant switching project here could re-tag another
+    // MCP client's session.
+    let updated: Option<(Uuid,)> = match crate::session::session_id() {
+        Some(sid) => {
+            let row: Option<(Uuid,)> = sqlx::query_as(
+                "UPDATE brain_sessions SET project_id = $1
+                 WHERE id = $2 AND ended_at IS NULL
+                 RETURNING id",
+            )
+            .bind(pid)
+            .bind(sid)
+            .fetch_optional(pool)
+            .await?;
+            // Keep the in-memory scope in sync with what we just persisted.
+            if row.is_some() {
+                crate::session::set(sid, Some(pid));
+            }
+            row
+        }
+        None => None,
+    };
 
     Ok(serde_json::json!({
         "action": "switch",

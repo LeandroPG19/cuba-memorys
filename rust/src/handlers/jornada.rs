@@ -34,6 +34,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             .await
             .context("failed to start session")?;
 
+            // Bind the session to *this* process. Everything downstream
+            // (project scoping, session boost, `end`) reads it from here
+            // instead of asking the database who started a session last.
+            crate::session::set(row.0, project_id);
+
             let mut response = serde_json::json!({
                 "action": "started",
                 "session": {
@@ -82,15 +87,32 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Atomic UPDATE RETURNING — eliminates TOCTOU race between SELECT and UPDATE.
-            // A concurrent `end` call on the same session cannot both succeed.
+            // Close only the session this process opened. The previous query
+            // targeted the newest open session in the whole database, so with
+            // concurrent MCP clients it could end somebody else's session.
+            let Some(own_session) = crate::session::session_id() else {
+                return Ok(serde_json::json!({
+                    "action": "ended",
+                    "updated": false,
+                    "reason": "no session was started by this process — nothing to end",
+                }));
+            };
+
+            // Atomic UPDATE RETURNING — a concurrent `end` on the same session
+            // cannot succeed twice (ended_at IS NULL guards it).
             let active_session: Option<(uuid::Uuid,)> = sqlx::query_as(
                 "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2
-                 WHERE id = (SELECT id FROM brain_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1 FOR UPDATE SKIP LOCKED)
-                 RETURNING id"
-            ).bind(outcome).bind(summary).fetch_optional(pool).await?;
+                 WHERE id = $3 AND ended_at IS NULL
+                 RETURNING id",
+            )
+            .bind(outcome)
+            .bind(summary)
+            .bind(own_session)
+            .fetch_optional(pool)
+            .await?;
 
             let updated = active_session.is_some();
+            crate::session::clear();
 
             let mut response = serde_json::json!({
                 "action": "ended",
@@ -136,12 +158,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 Value,
                 chrono::DateTime<chrono::Utc>,
             );
-            let session: Option<SessionRow> = sqlx::query_as(
-                "SELECT id, session_name, goals, started_at FROM brain_sessions
-                 WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-            )
-            .fetch_optional(pool)
-            .await?;
+            // This process's session — not whichever client opened one last.
+            let session: Option<SessionRow> = match crate::session::session_id() {
+                Some(sid) => {
+                    sqlx::query_as(
+                        "SELECT id, session_name, goals, started_at FROM brain_sessions
+                         WHERE id = $1 AND ended_at IS NULL",
+                    )
+                    .bind(sid)
+                    .fetch_optional(pool)
+                    .await?
+                }
+                None => None,
+            };
             match session {
                 Some((id, name, goals, started_at)) => {
                     // Count observations created in this session
@@ -210,14 +239,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// V0.8: helper for handlers that need the active session id (e.g. pre_compact).
-/// Returns None if no session is open.
-pub async fn current_session_id(pool: &sqlx::PgPool) -> Result<Option<uuid::Uuid>> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM brain_sessions WHERE ended_at IS NULL
-         ORDER BY started_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(id,)| id))
-}
+// `current_session_id` was removed: it asked the database for the newest open
+// session anywhere, which is not this process's session. Callers now use
+// `crate::session::session_id()`.

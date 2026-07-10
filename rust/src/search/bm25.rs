@@ -41,10 +41,10 @@ pub async fn bm25_search(
         // the array is symbolic; the meaningful signal is cover density.
         let rows: Vec<(Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
-                    ts_rank_cd(o.search_vector, plainto_tsquery('simple', $1))::float8 AS bm25
+                    ts_rank_cd(o.search_vector, cuba_or_tsquery($1))::float8 AS bm25
              FROM brain_observations o
              JOIN brain_entities e ON o.entity_id = e.id
-             WHERE o.search_vector @@ plainto_tsquery('simple', $1)
+             WHERE o.search_vector @@ cuba_or_tsquery($1)
                AND o.observation_type != 'superseded'
                AND ($3::uuid IS NULL OR o.project_id = $3 OR o.project_id IS NULL)
              ORDER BY bm25 DESC
@@ -74,9 +74,9 @@ pub async fn bm25_search(
     if scope == "all" || scope == "entities" {
         let rows: Vec<(Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT id, name, entity_type, importance::float8,
-                    ts_rank_cd(search_vector, plainto_tsquery('simple', $1))::float8 AS bm25
+                    ts_rank_cd(search_vector, cuba_or_tsquery($1))::float8 AS bm25
              FROM brain_entities
-             WHERE search_vector @@ plainto_tsquery('simple', $1)
+             WHERE search_vector @@ cuba_or_tsquery($1)
                AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
              ORDER BY bm25 DESC
              LIMIT $2",
@@ -105,9 +105,9 @@ pub async fn bm25_search(
     if scope == "all" || scope == "errors" {
         let rows: Vec<(Uuid, String, String, bool, f64)> = sqlx::query_as(
             "SELECT id, error_type, error_message, resolved,
-                    ts_rank_cd(search_vector, plainto_tsquery('simple', $1))::float8 AS bm25
+                    ts_rank_cd(search_vector, cuba_or_tsquery($1))::float8 AS bm25
              FROM brain_errors
-             WHERE search_vector @@ plainto_tsquery('simple', $1)
+             WHERE search_vector @@ cuba_or_tsquery($1)
                AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
              ORDER BY bm25 DESC
              LIMIT $2",

@@ -15,5 +15,7 @@ pub mod observability;
 pub mod project;
 pub mod protocol;
 pub mod search;
+pub mod session;
 pub mod setup;
 pub mod sync;
+pub mod tasks;

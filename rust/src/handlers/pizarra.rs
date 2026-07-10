@@ -48,7 +48,7 @@ async fn write(pool: &PgPool, args: &Value) -> Result<Value> {
     }
 
     let project_id = crate::project::current_project_id(pool).await?;
-    let session_id = crate::handlers::jornada::current_session_id(pool).await?;
+    let session_id = crate::session::session_id();
 
     // expires_at computed in SQL with make_interval to avoid the GENERATED
     // ALWAYS … STORED limitation (interval coercion is not IMMUTABLE).
@@ -77,7 +77,7 @@ async fn write(pool: &PgPool, args: &Value) -> Result<Value> {
 
 async fn read(pool: &PgPool, args: &Value) -> Result<Value> {
     let tag = args.get("tag").and_then(|v| v.as_str());
-    let session_id = crate::handlers::jornada::current_session_id(pool).await?;
+    let session_id = crate::session::session_id();
     let project_id = crate::project::current_project_id(pool).await?;
 
     type Row = (
@@ -125,7 +125,7 @@ async fn read(pool: &PgPool, args: &Value) -> Result<Value> {
 
 async fn clear(pool: &PgPool, args: &Value) -> Result<Value> {
     let tag = args.get("tag").and_then(|v| v.as_str());
-    let session_id = crate::handlers::jornada::current_session_id(pool).await?;
+    let session_id = crate::session::session_id();
 
     let result = sqlx::query(
         "DELETE FROM brain_wm

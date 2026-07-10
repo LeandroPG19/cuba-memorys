@@ -8,6 +8,9 @@ license = "CC-BY-NC-4.0"
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# TaskTracker: lets shutdown drain in-flight background writes (see src/tasks.rs).
+# Already in the tree as a transitive dep of sqlx — no new build cost.
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # PostgreSQL (compile-time checked, async, built-in pool retry)
 # V0.9: feature `migrate` enables sqlx::migrate! macro that bakes
