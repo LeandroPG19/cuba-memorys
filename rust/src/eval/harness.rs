@@ -17,6 +17,23 @@ pub struct EvalReport {
     pub recall_at_k: f64,
     pub mean_exact_match: f32,
     pub mean_f1: f32,
+    /// Per-ability breakdown (LongMemEval-style question types). Empty when the
+    /// dataset carries no ability labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_ability: Vec<AbilityScore>,
+    /// Fraction of abstention samples where the system correctly retrieved
+    /// nothing relevant. None when the dataset has no abstention samples.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abstention_accuracy: Option<f64>,
+}
+
+/// Retrieval quality for one LongMemEval ability (question type).
+#[derive(Debug, Clone, Serialize)]
+pub struct AbilityScore {
+    pub ability: String,
+    pub count: usize,
+    pub ndcg_at_k: f64,
+    pub recall_at_k: f64,
 }
 
 pub struct BenchmarkHarness {
@@ -60,6 +77,8 @@ pub async fn run_faro_eval(
             recall_at_k: 0.0,
             mean_exact_match: 0.0,
             mean_f1: 0.0,
+            per_ability: Vec::new(),
+            abstention_accuracy: None,
         });
     }
 
@@ -69,6 +88,13 @@ pub async fn run_faro_eval(
     let mut recall_sum = 0.0;
     let mut em_sum = 0.0_f32;
     let mut f1_sum = 0.0_f32;
+
+    // Per-ability accumulators: (count, ndcg_sum, recall_sum).
+    use std::collections::BTreeMap;
+    let mut per_ability: BTreeMap<String, (usize, f64, f64)> = BTreeMap::new();
+    // Abstention: count samples and how many correctly retrieved nothing relevant.
+    let mut abstain_total = 0usize;
+    let mut abstain_correct = 0usize;
 
     for sample in samples {
         let args = serde_json::json!({
@@ -91,11 +117,37 @@ pub async fn run_faro_eval(
             .iter()
             .map(|content| is_relevant(content, &sample.relevant_markers))
             .collect();
+
+        // Abstention samples are scored differently: success = the system returned
+        // NOTHING for an out-of-domain query (OOD gate / empty result), rather than
+        // fabricating a top-k of loosely-related rows. Measures whether cuba
+        // actually declines instead of always emitting k hits.
+        if sample.abstain {
+            abstain_total += 1;
+            if ranked.is_empty() {
+                abstain_correct += 1;
+            }
+            let e = per_ability
+                .entry(sample.ability.clone().unwrap_or_else(|| "abstention".into()))
+                .or_insert((0, 0.0, 0.0));
+            e.0 += 1; // count only; ndcg/recall undefined for abstention
+            continue;
+        }
+
         let total_rel = sample.relevant_markers.len().max(1);
-        ndcg_sum += ndcg_at_k(&rels, k);
+        let s_ndcg = ndcg_at_k(&rels, k);
+        let s_recall = recall_at_k(&rels, total_rel, k);
+        ndcg_sum += s_ndcg;
         prec_sum += precision_at_k(&rels, k);
-        recall_sum += recall_at_k(&rels, total_rel, k);
+        recall_sum += s_recall;
         relevance_lists.push(rels);
+
+        if let Some(ability) = &sample.ability {
+            let e = per_ability.entry(ability.clone()).or_insert((0, 0.0, 0.0));
+            e.0 += 1;
+            e.1 += s_ndcg;
+            e.2 += s_recall;
+        }
 
         if let Some(expected) = &sample.expected_answer {
             let top = ranked.first().map(String::as_str).unwrap_or("");
@@ -104,19 +156,37 @@ pub async fn run_faro_eval(
         }
     }
 
+    // Denominator for corpus-wide IR means excludes abstention samples (they have
+    // no relevant docs to rank).
+    let scored = (samples.len() - abstain_total).max(1);
+
     let n = samples.len();
     let qa_count = samples
         .iter()
         .filter(|s| s.expected_answer.is_some())
         .count();
 
+    let ability_scores: Vec<AbilityScore> = per_ability
+        .into_iter()
+        .map(|(ability, (count, nd, rc))| {
+            // Abstention rows contribute count only; guard the divisor.
+            let denom = count.max(1) as f64;
+            AbilityScore {
+                ability,
+                count,
+                ndcg_at_k: nd / denom,
+                recall_at_k: rc / denom,
+            }
+        })
+        .collect();
+
     Ok(EvalReport {
         sample_count: n,
         k,
-        ndcg_at_k: ndcg_sum / n as f64,
+        ndcg_at_k: ndcg_sum / scored as f64,
         mrr: mrr(&relevance_lists),
-        precision_at_k: prec_sum / n as f64,
-        recall_at_k: recall_sum / n as f64,
+        precision_at_k: prec_sum / scored as f64,
+        recall_at_k: recall_sum / scored as f64,
         mean_exact_match: if qa_count > 0 {
             em_sum / qa_count as f32
         } else {
@@ -126,6 +196,12 @@ pub async fn run_faro_eval(
             f1_sum / qa_count as f32
         } else {
             0.0
+        },
+        per_ability: ability_scores,
+        abstention_accuracy: if abstain_total > 0 {
+            Some(abstain_correct as f64 / abstain_total as f64)
+        } else {
+            None
         },
     })
 }

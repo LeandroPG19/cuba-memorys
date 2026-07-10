@@ -21,7 +21,7 @@ pub fn generate_json_report(report: &EvalReport, samples: usize, k: usize) -> St
 }
 
 pub fn summary_line(report: &EvalReport) -> String {
-    format!(
+    let mut s = format!(
         "nDCG@{}={:.4} MRR={:.4} P@{}={:.4} R@{}={:.4} (n={})",
         report.k,
         report.ndcg_at_k,
@@ -31,5 +31,15 @@ pub fn summary_line(report: &EvalReport) -> String {
         report.k,
         report.recall_at_k,
         report.sample_count
-    )
+    );
+    if let Some(abst) = report.abstention_accuracy {
+        s.push_str(&format!(" | abstention={:.0}%", abst * 100.0));
+    }
+    for a in &report.per_ability {
+        s.push_str(&format!(
+            "\n  [{}] n={} nDCG@{}={:.4} R@{}={:.4}",
+            a.ability, a.count, report.k, a.ndcg_at_k, report.k, a.recall_at_k
+        ));
+    }
+    s
 }

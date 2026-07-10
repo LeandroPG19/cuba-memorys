@@ -9,6 +9,14 @@ pub struct EvaluationSample {
     /// Substrings that identify a retrieved doc as relevant (matched against content).
     pub relevant_markers: Vec<String>,
     pub expected_answer: Option<String>,
+    /// LongMemEval-style ability/question_type this sample exercises
+    /// (information-extraction, multi-session, knowledge-update, temporal-reasoning,
+    /// abstention). Used to break metrics down per ability.
+    pub ability: Option<String>,
+    /// True when the correct behavior is to ABSTAIN: no stored fact answers the
+    /// query, so a good system retrieves nothing relevant. Success = zero relevant
+    /// hits in the top-k.
+    pub abstain: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,6 +28,13 @@ struct JsonlRow {
     relevant: Vec<String>,
     #[serde(default)]
     expected_answer: Option<String>,
+    /// Alias `question_type` accepted for LongMemEval parity.
+    #[serde(default)]
+    ability: Option<String>,
+    #[serde(default)]
+    question_type: Option<String>,
+    #[serde(default)]
+    abstain: bool,
 }
 
 /// Built-in mini corpus for unit tests and smoke benchmarks (no external files).
@@ -29,11 +44,15 @@ pub fn builtin_retrieval_set() -> Vec<EvaluationSample> {
             query: "error conexión postgres".into(),
             relevant_markers: vec!["postgres".into(), "conexión".into()],
             expected_answer: None,
+            ability: Some("information-extraction".into()),
+            abstain: false,
         },
         EvaluationSample {
             query: "decisión arquitectura MCP".into(),
             relevant_markers: vec!["MCP".into(), "arquitectura".into()],
             expected_answer: None,
+            ability: Some("information-extraction".into()),
+            abstain: false,
         },
     ]
 }
@@ -67,13 +86,17 @@ pub fn load_jsonl_dataset(path: &str) -> Result<Vec<EvaluationSample>, io::Error
         } else {
             row.relevant
         };
-        if markers.is_empty() {
+        // Abstention samples legitimately have no relevant markers (nothing should
+        // match); all other samples need at least one marker to be scorable.
+        if markers.is_empty() && !row.abstain {
             continue;
         }
         out.push(EvaluationSample {
             query: row.query,
             relevant_markers: markers,
             expected_answer: row.expected_answer,
+            ability: row.ability.or(row.question_type),
+            abstain: row.abstain,
         });
     }
     Ok(out)
