@@ -21,8 +21,10 @@
 //! which makes re-imports safe (idempotent). Tracking lives in
 //! `brain_sync_state` (manifest_hash PK).
 
+pub mod cas;
 pub mod chunk;
 pub mod compressor;
+pub mod transport;
 pub mod paths;
 
 pub use chunk::Manifest;

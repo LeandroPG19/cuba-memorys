@@ -54,19 +54,58 @@ pub fn slug(name: &str) -> String {
 /// from manifest/import, so a malicious manifest cannot cause writes outside
 /// the sync dir).
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<()> {
-    let canonical = candidate.canonicalize().or_else(|_| {
-        // path may not exist yet (we're about to create it) — check parent
-        let parent = candidate
-            .parent()
-            .context("no parent")?
-            .canonicalize()
-            .with_context(|| format!("canonicalize parent of {candidate:?}"))?;
-        Ok::<PathBuf, anyhow::Error>(parent)
-    })?;
-    if !canonical.starts_with(root) {
+    // Lexical check first, and it must come first: a content-addressed write
+    // targets `chunks/ab/<hash>.json`, whose parent directory does not exist yet.
+    // The previous version canonicalized the parent, which fails with NotFound on
+    // any path more than one level deep — so every nested write was rejected as a
+    // traversal attempt. Creating the directory before validating is not an option
+    // either: that is exactly how `../../etc/x` gets a directory made for it.
+    //
+    // Resolving `..` on the string cannot be fooled by a non-existent path.
+    let normalized = lexical_join(root, candidate);
+    if !normalized.starts_with(root) {
         anyhow::bail!("path traversal blocked: {candidate:?} escapes root {root:?}");
     }
+
+    // Then, if the path (or an existing ancestor) is really there, canonicalize
+    // it too. Lexical normalization cannot see a symlink pointing out of the
+    // root; this catches that.
+    let existing = candidate
+        .ancestors()
+        .find(|p| p.exists())
+        .unwrap_or(candidate);
+    if let Ok(real) = existing.canonicalize()
+        && let Ok(real_root) = root.canonicalize()
+        && !real.starts_with(&real_root)
+    {
+        anyhow::bail!("path traversal blocked: {candidate:?} resolves outside {root:?}");
+    }
     Ok(())
+}
+
+/// Resolve `.` and `..` against `root` without touching the filesystem.
+///
+/// A `..` that would climb above the root is not clamped — it is allowed to walk
+/// off, so the caller's `starts_with` check sees it and rejects the path.
+fn lexical_join(root: &Path, candidate: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = if candidate.is_absolute() {
+        PathBuf::new()
+    } else {
+        root.to_path_buf()
+    };
+
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
