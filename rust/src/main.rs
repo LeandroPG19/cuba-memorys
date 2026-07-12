@@ -65,12 +65,13 @@ async fn main() {
             return;
         }
         // The human surface: query and write the brain without an LLM in between.
-        Some(cmd @ ("search" | "save" | "delete" | "export")) => {
+        Some(cmd @ ("search" | "save" | "delete" | "export" | "dashboard")) => {
             let rest = &argv[2..];
             let result = match cmd {
                 "search" => cuba_memorys::cli::run_search(rest).await,
                 "save" => cuba_memorys::cli::run_save(rest).await,
                 "delete" => cuba_memorys::cli::run_delete(rest).await,
+                "dashboard" => cuba_memorys::dashboard::run_cli(rest).await,
                 _ => cuba_memorys::export::run_cli(rest).await,
             };
             if let Err(e) = result {

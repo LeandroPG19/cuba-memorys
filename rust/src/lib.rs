@@ -7,6 +7,7 @@ pub mod cli;
 pub mod cognitive;
 pub mod constants;
 pub mod core;
+pub mod dashboard;
 pub mod db;
 pub mod doctor;
 pub mod embeddings;
