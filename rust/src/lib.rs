@@ -7,6 +7,7 @@ pub mod cognitive;
 pub mod constants;
 pub mod core;
 pub mod db;
+pub mod doctor;
 pub mod embeddings;
 pub mod eval;
 pub mod graph;
