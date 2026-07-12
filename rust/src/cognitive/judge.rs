@@ -274,11 +274,124 @@ impl ContradictionJudge for HeuristicJudge {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// Longest observation slice sent to the judge. Two observations plus the frame
+/// stay well inside any model's context, and a runaway 50 KB memory cannot turn
+/// one dedup check into an expensive call.
+const MAX_CONTENT_CHARS: usize = 2_000;
+
+/// Truncate on a char boundary. Content is Spanish — byte slicing panics on `ó`.
+fn truncate_for_prompt(s: &str) -> String {
+    if s.chars().count() <= MAX_CONTENT_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX_CONTENT_CHARS).collect();
+    format!("{head}… [truncado]")
+}
+
+/// Strip credentials before they reach an LLM.
+///
+/// The judge ships observation text to a third party — the `claude` CLI, the
+/// client's sampling endpoint, or the API. Observations are written by agents
+/// about real work, and real work contains connection strings and tokens. The
+/// project's own security rules say secrets are never logged or leaked; sending
+/// them to an external model is a leak with extra steps.
+///
+/// This is a coarse net, not a vault: it catches the shapes that actually show
+/// up in these memories (Postgres URLs, provider tokens, JWTs, `key=value`
+/// secrets). Redaction costs the judge nothing — a password is never the reason
+/// two observations contradict.
+pub fn redact_secrets(s: &str) -> String {
+    /// Key names whose value is a secret, whatever the separator.
+    const SECRET_KEYS: [&str; 7] =
+        ["password", "passwd", "pwd", "token", "secret", "api_key", "apikey"];
+
+    fn names_a_secret(key: &str) -> bool {
+        let key = key.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        let lower = key.to_lowercase();
+        SECRET_KEYS.iter().any(|k| lower.ends_with(k))
+    }
+
+    let mut out = String::with_capacity(s.len());
+    // `password: hunter2` puts the secret in the *next* token. Without this,
+    // the most common shape in a YAML snippet or a log line walks straight out.
+    let mut redact_next = false;
+
+    for token in s.split_inclusive(char::is_whitespace) {
+        let trimmed = token.trim_end();
+        let trailing = &token[trimmed.len()..];
+
+        if trimmed.is_empty() {
+            out.push_str(token);
+            continue;
+        }
+
+        if redact_next {
+            out.push_str("***");
+            out.push_str(trailing);
+            redact_next = false;
+            continue;
+        }
+
+        // scheme://user:password@host  → keep the shape, drop the password
+        if let Some(at) = trimmed.find('@')
+            && let Some(scheme_end) = trimmed.find("://")
+            && at > scheme_end
+        {
+            let creds = &trimmed[scheme_end + 3..at];
+            if let Some(colon) = creds.find(':') {
+                out.push_str(&trimmed[..scheme_end + 3 + colon + 1]);
+                out.push_str("***");
+                out.push_str(&trimmed[at..]);
+                out.push_str(trailing);
+                continue;
+            }
+        }
+
+        // key=secret, key:secret, or a bare `key:` whose value is the next token.
+        if let Some(sep) = trimmed.find(['=', ':'])
+            && sep > 0
+            && names_a_secret(&trimmed[..sep])
+        {
+            out.push_str(&trimmed[..=sep]);
+            if sep + 1 < trimmed.len() {
+                out.push_str("***"); // value is inline
+            } else {
+                redact_next = true; // value follows the whitespace
+            }
+            out.push_str(trailing);
+            continue;
+        }
+
+        // Provider tokens and JWTs, by prefix.
+        let is_provider_token = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA"]
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+            && trimmed.len() > 12;
+        let is_jwt = trimmed.starts_with("eyJ") && trimmed.matches('.').count() == 2;
+        if is_provider_token || is_jwt {
+            out.push_str("***");
+            out.push_str(trailing);
+            continue;
+        }
+
+        out.push_str(token);
+    }
+    out
+}
+
+/// Sanitize one observation for the judge: secrets out, then size capped.
+fn prepare(content: &str) -> String {
+    truncate_for_prompt(&redact_secrets(content))
+}
+
 /// V0.9: Spotlighting (Hines et al. 2024 — "Defending Against Indirect Prompt
 /// Injection Attacks With Spotlighting"). User-supplied content is wrapped in
 /// per-call unique markers so the judge cannot mistake observation text for
 /// instructions. The nonce changes every call, so a poisoned observation can
 /// never reliably guess the marker syntax.
+///
+/// Spotlighting stops the content from *acting*. It does nothing to stop the
+/// content from *leaking* — hence [`redact_secrets`] before it goes out.
 fn build_prompt(a: &str, b: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     // Nonce: 32-bit counter mixed with epoch nanos. Not cryptographic — just
@@ -290,6 +403,8 @@ fn build_prompt(a: &str, b: &str) -> String {
         .wrapping_mul(2_654_435_761);
     let begin = format!("<USER_DATA_BEGIN_{nonce:08x}>");
     let end = format!("<USER_DATA_END_{nonce:08x}>");
+
+    let (a, b) = (prepare(a), prepare(b));
 
     format!(
         "You are evaluating whether two memory observations stored about the same entity \
@@ -370,6 +485,55 @@ mod tests {
         assert_eq!(j.verdict, "contradicts");
         assert_eq!(j.confidence, 0.9);
         assert_eq!(j.reason.as_deref(), Some("X"));
+    }
+
+    #[test]
+    fn credentials_never_reach_the_llm() {
+        let dirty = "la app conecta a postgresql://cuba:memorys2026@127.0.0.1:5488/brain";
+        let clean = redact_secrets(dirty);
+        assert!(!clean.contains("memorys2026"), "la contraseña salió al prompt: {clean}");
+        // The shape survives — the judge still sees "this is a Postgres URL".
+        assert!(clean.contains("postgresql://cuba:***@127.0.0.1:5488/brain"));
+    }
+
+    #[test]
+    fn provider_tokens_and_jwts_are_stripped() {
+        assert_eq!(redact_secrets("token ghp_abcdefghijklmnop fin"), "token *** fin");
+        assert_eq!(redact_secrets("bearer eyJhbG.eyJzdWI.SflKxw"), "bearer ***");
+        assert!(!redact_secrets("key sk-ant-api03-XXXXXXXXXXXX").contains("sk-ant"));
+        // A short word that merely starts with a prefix is not a token.
+        assert_eq!(redact_secrets("sk-1"), "sk-1");
+    }
+
+    #[test]
+    fn key_value_secrets_are_stripped_but_the_key_stays() {
+        assert_eq!(redact_secrets("DISCORD_TOKEN=abc123xyz"), "DISCORD_TOKEN=***");
+        // The value lives in the NEXT token — the shape every YAML snippet and
+        // log line uses, and the one that leaked before this test existed.
+        assert_eq!(redact_secrets("password: hunter2"), "password: ***");
+        assert_eq!(redact_secrets("api_key: sk-live-1234 fin"), "api_key: *** fin");
+        // Ordinary text with '=' or ':' is untouched.
+        assert_eq!(redact_secrets("x=1 nota: todo bien"), "x=1 nota: todo bien");
+        assert_eq!(redact_secrets("ratio 3:1 y listo"), "ratio 3:1 y listo");
+    }
+
+    #[test]
+    fn oversized_observations_cannot_inflate_the_call() {
+        let huge = "ó".repeat(MAX_CONTENT_CHARS + 500); // multi-byte: byte slicing would panic
+        let cut = truncate_for_prompt(&huge);
+        assert!(cut.chars().count() <= MAX_CONTENT_CHARS + 12);
+        assert!(cut.ends_with("… [truncado]"));
+        assert_eq!(truncate_for_prompt("corta"), "corta");
+    }
+
+    #[test]
+    fn the_prompt_itself_carries_no_secret() {
+        let prompt = build_prompt(
+            "DB en postgresql://cuba:memorys2026@127.0.0.1:5488/brain",
+            "el token es ghp_abcdefghijklmnop",
+        );
+        assert!(!prompt.contains("memorys2026"));
+        assert!(!prompt.contains("ghp_abcdefghijklmnop"));
     }
 
     #[test]
