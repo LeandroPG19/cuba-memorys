@@ -48,7 +48,7 @@ de IA**. No hay forma de ver qué sabe el sistema sobre vos sin pedirle a un LLM
 
 ### Diagnóstico y mutaciones seguras
 
-- [ ] **A1 · `cuba doctor` — chequeo de salud de solo lectura.**
+- [x] **A1 · `cuba doctor` — chequeo de salud de solo lectura.**
   La idea más portátil de toda la investigación (tres agentes la señalaron por separado).
   Verifica: conexión a la DB, migraciones aplicadas, extensiones (`vector`, `pg_trgm`), modelo ONNX
   cargable, dimensión del embedding vs. la de la columna, observaciones sin vector, invariante
@@ -57,65 +57,65 @@ de IA**. No hay forma de ver qué sabe el sistema sobre vos sin pedirle a un LLM
   vectorial muerta sin ONNX, OOD invertido, sesión global entre procesos) eran **todos silenciosos**.
   Un `doctor` los habría cazado el primer día.
 
-- [ ] **A2 · Reparaciones en tres niveles: `plan` → `dry-run` → `apply`, con backup automático.**
+- [x] **A2 · Reparaciones en tres niveles: `plan` → `dry-run` → `apply`, con backup automático.**
   Toda mutación destructiva (reembed, dedup, consolidación, purga) primero muestra qué haría,
   luego lo simula, y solo entonces lo aplica — tomando un backup antes.
 
-- [ ] **A3 · Aviso de versión nueva, sin auto-update.** Compara la versión del binario contra la
+- [x] **A3 · Aviso de versión nueva, sin auto-update.** Compara la versión del binario contra la
   última publicada y avisa. Nunca se actualiza solo.
 
 ### Superficie humana
 
-- [ ] **A4 · CLI directo: `search` / `save` / `delete`.** Poder consultar y escribir memoria desde
+- [x] **A4 · CLI directo: `search` / `save` / `delete`.** Poder consultar y escribir memoria desde
   la terminal, sin un agente de por medio. El patrón ya existe: `main.rs` despacha el subcomando `eval`.
 
-- [ ] **A5 · Exportador a Obsidian (markdown + wikilinks).** Visualización gratis del grafo que
+- [x] **A5 · Exportador a Obsidian (markdown + wikilinks).** Visualización gratis del grafo que
   cuba **ya calcula** (Louvain + PageRank), sin infraestructura nueva. Engram exporta un grafo que
   no tiene; cuba tiene un grafo que no exporta.
 
-- [ ] **A6 · Dashboard web local read-only, o TUI.** El más ambicioso del bloque. Ver entidades,
+- [x] **A6 · Dashboard web local read-only, o TUI.** El más ambicioso del bloque. Ver entidades,
   observaciones, comunidades y salud sin escribir una query.
 
 ### Onboarding multi-agente
 
-- [ ] **A7 · `cuba setup <agente>` — registro declarativo.** Escribe la config del MCP en el cliente
+- [x] **A7 · `cuba setup <agente>` — registro declarativo.** Escribe la config del MCP en el cliente
   que toque (Claude Code, Codex, Cursor…) resolviendo la ruta absoluta del binario.
-- [ ] **A8 · Regla escrita: "adaptador delgado, núcleo gordo".** La lógica vive en el núcleo; cada
+- [x] **A8 · Regla escrita: "adaptador delgado, núcleo gordo".** La lógica vive en el núcleo; cada
   cliente solo aporta un adaptador fino. Documento, no código.
 
 ### Sync entre máquinas
 
-- [ ] **A9 · Chunks inmutables con ID por contenido.** Sin conflictos de merge. Relevante: Leandro
+- [x] **A9 · Chunks inmutables con ID por contenido.** Sin conflictos de merge. Relevante: Leandro
   trabaja desde 3+ máquinas. `cuba_sync` ya existe y ya es dimension-aware (Fase 5).
-- [ ] **A10 · Abstracción de `Transport`, desacoplada del backend.**
+- [x] **A10 · Abstracción de `Transport`, desacoplada del backend.**
 
 ### Equipo (opcional, a futuro)
 
-- [ ] **A11 · RBAC mínimo real: principals × rol × grant por proyecto.**
-- [ ] **A12 · Lección de diseño: "scope" no es una frontera de privacidad si es solo un filtro de
+- [x] **A11 · RBAC mínimo real: principals × rol × grant por proyecto.**
+- [x] **A12 · Lección de diseño: "scope" no es una frontera de privacidad si es solo un filtro de
   búsqueda.** Documento. Importa antes de compartir con nadie.
 
 ### Higiene
 
-- [ ] **A13 · Borrar el Python huérfano.** `src/cuba_memorys/` es la implementación previa a la
+- [x] **A13 · Borrar el Python huérfano.** `src/cuba_memorys/` es la implementación previa a la
   reescritura a Rust (marzo 2026): sin entry point en `pyproject.toml`, maturin nunca la empaqueta.
   **Ya hecho** en `chore/remove-dead-python-legacy` (commit `43888b1`) — falta mergear.
-- [ ] **A14 · Perfiles de tools: agente vs. admin.** Enlaza con B3 (reducir la superficie de 25 tools).
-- [ ] **A15 · Confirmar la higiene del pipeline LLM-judge de `cuba_juez`.**
-- [ ] **A16 · Documentar el "por qué" del stack más pesado.** Postgres+pgvector+ONNX contra el
+- [x] **A14 · Perfiles de tools: agente vs. admin.** Enlaza con B3 (reducir la superficie de 25 tools).
+- [x] **A15 · Confirmar la higiene del pipeline LLM-judge de `cuba_juez`.**
+- [x] **A16 · Documentar el "por qué" del stack más pesado.** Postgres+pgvector+ONNX contra el
   binario+SQLite de Engram: la decisión es correcta, pero no está escrita en ningún lado.
 
 ---
 
 ## Plan B — pendientes de retrieval / evidencia
 
-- [ ] **B1 · Mergear `lab/full-integration`** (5 commits, verificados en aislamiento, sin mergear):
+- [x] **B1 · Mergear `lab/full-integration`** (5 commits, verificados en aislamiento, sin mergear):
   bug 0.7 (rol no-superuser: RLS y audit-log hoy son inertes porque la app corre como superuser),
   Fase 1.2 (ADD/UPDATE/DELETE/NOOP explícito estilo mem0), Fase 5 (embeddings model-agnostic + bge-m3),
   Fase 2.1b (taxonomía LongMemEval en el harness de eval).
   Medido en el lab: **nDCG@10 0.7344 (e5) → 0.9292 (bge-m3), +19.5 puntos**.
 - [ ] **B2 · Contextual Retrieval completo** (Tier 1.3 de v0.11).
-- [ ] **B3 · Reducir la superficie de 25 tools** (Tier 1.5). Enlaza con A14.
+- [x] **B3 · Reducir la superficie de 25 tools** (Tier 1.5). Enlaza con A14.
 - [ ] **B4 · BM25 real** (ParadeDB/pg_search) en vez de `ts_rank_cd` (Tier 2.3).
 - [ ] **B5 · Query rewriting / HyDE por sampling** (Tier 2.4).
 - [ ] **B6 · Migrar `brain` viva a bge-m3.** Es **ops** y toca datos: cambiar `~/.mcp.json`, correr
@@ -130,3 +130,47 @@ de IA**. No hay forma de ver qué sabe el sistema sobre vos sin pedirle a un LLM
 Hebbian/BCM, Louvain, OOD, energy_score suenan sofisticados pero **ninguno tiene evidencia medida**
 de que mejore el retrieval. El harness (`cuba-memorys eval`) ya es ejecutable y no muta la base:
 toda mejora de este plan que toque retrieval se mide antes y después, o no entra.
+
+
+---
+
+## Estado final (2026-07-12)
+
+**Hechos y verificados en el sandbox — 16/16 del Plan A, más B1/B2/B3.**
+Rama `sandbox/all-improvements`, 8 commits. 159 tests, clippy limpio.
+`brain` viva jamás tocada (1435/259/563, verificado tras cada paso).
+
+`B2` (Contextual Retrieval) resultó **ya implementado**: `embed_passage_contextual`
+se usa en tres puntos de `cronica.rs`. No hacía falta escribirlo, hacía falta mirarlo.
+
+### Retrieval medido (dataset español curado, n=10, e5-small)
+
+| habilidad | nDCG@10 |
+|---|---|
+| multi-session | 0.829 |
+| temporal-reasoning | 0.810 |
+| information-extraction | 0.661 |
+| knowledge-update | 0.631 |
+| **abstention** | **0.000** |
+| **global** | **0.7389** |
+
+Coincide con el 0.7344 medido en el lab con e5 → los cambios de este sandbox **no
+degradaron el retrieval**. La abstención puntúa 0: el sistema no se calla cuando
+debería (`abstain_ood` es opt-in y está apagado).
+
+### Lo que queda, y por qué
+
+- **B6 · Migrar `brain` viva a bge-m3.** El salto más grande que hay disponible:
+  medido en el lab, **0.7344 → 0.9292 (+19.5 puntos)**, y +36.9 en knowledge-update.
+  Es **ops y toca datos vivos**: cambiar `~/.mcp.json`, parar los 3 procesos MCP,
+  correr `scripts/migrate-embedding-dim.sh`, reembeber 1435 observaciones.
+  **No se ejecuta sin autorización explícita.**
+- **B4 · BM25 real (ParadeDB).** Exige cambiar la imagen de Postgres por una con
+  `pg_search`. Hoy `enable_bm25` usa `ts_rank_cd`, que funciona. Por la regla del
+  proyecto ("se gana su sitio en el eval o se corta"), esto se mide **después** de
+  bge-m3: cambiar dos cosas a la vez impide saber cuál sirvió.
+- **B5 · Query rewriting / HyDE.** Necesita sampling del cliente para verificarse
+  end-to-end. El andamiaje existe (`MCPSamplingJudge`); falta el eval que lo justifique.
+- **Aplicar el rol no-superuser en producción.** El RBAC, el RLS y el audit log
+  están escritos, probados… e inertes mientras la app conecte como `cuba`.
+  `scripts/create-app-role.sql` existe. Es un cambio de ops sobre la base viva.
