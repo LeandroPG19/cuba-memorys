@@ -101,6 +101,72 @@ fn parse_vector_dim(col_type: &str) -> Option<i64> {
         .ok()
 }
 
+/// Live MCP processes still executing a binary older than the one on disk.
+///
+/// You rebuild, the tests pass, and nothing changes — because the MCP client
+/// spawned its server hours ago and holds the old image in memory. This is not
+/// hypothetical: it is a documented pending item in this repo's own notes
+/// ("reiniciar el cliente MCP para cargar el binario nuevo; los procesos vivos
+/// son viejos").
+///
+/// Linux-only: it reads `/proc`. Elsewhere it returns empty and the check is skipped.
+fn stale_processes() -> Vec<u32> {
+    let mut stale = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return stale; // not Linux, or /proc not mounted
+    };
+
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let exe_link = entry.path().join("exe");
+        let Ok(exe) = std::fs::read_link(&exe_link) else {
+            continue; // not ours, or no permission
+        };
+        if exe.file_name().and_then(|n| n.to_str()) != Some("cuba-memorys") {
+            continue;
+        }
+
+        // The binary was replaced out from under a running process.
+        if exe.to_string_lossy().ends_with(" (deleted)") {
+            stale.push(pid);
+            continue;
+        }
+
+        // mtime of /proc/<pid> approximates when the process started.
+        let (Ok(bin_meta), Ok(proc_meta)) =
+            (std::fs::metadata(&exe), std::fs::metadata(entry.path()))
+        else {
+            continue;
+        };
+        let (Ok(built), Ok(started)) = (bin_meta.modified(), proc_meta.modified()) else {
+            continue;
+        };
+        if built > started {
+            stale.push(pid);
+        }
+    }
+    stale
+}
+
+/// Latest version published to the npm registry. `None` on any failure — a
+/// version check must never be the reason `doctor` cannot run.
+///
+/// Shells out to curl instead of pulling in an HTTP client: this is one GET,
+/// behind an opt-in flag, and it is not worth a dependency.
+fn latest_published_version() -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "5", "https://registry.npmjs.org/cuba-memorys/latest"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    json.get("version")?.as_str().map(String::from)
+}
+
 /// Run every check. Read-only: issues `SELECT`s and nothing else.
 pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     let mut checks = Vec::new();
@@ -394,18 +460,71 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         Err(e) => checks.push(Check::warn("corpus", format!("no verificable: {e}"), "revisar esquema")),
     }
 
+    // --- Isolated entities: unreachable by multi-hop and by PageRank --------
+    match sqlx::query(
+        "SELECT count(*)::bigint AS isolated, (SELECT count(*) FROM brain_entities)::bigint AS total
+         FROM brain_entities e
+         WHERE NOT EXISTS (SELECT 1 FROM brain_relations r
+                           WHERE r.from_entity = e.id OR r.to_entity = e.id)",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(row) => {
+            let isolated: i64 = row.try_get("isolated").unwrap_or(0);
+            let total: i64 = row.try_get("total").unwrap_or(0);
+            let pct = if total > 0 { isolated * 100 / total } else { 0 };
+            if pct >= 50 {
+                checks.push(Check::warn(
+                    "graph_connectivity",
+                    format!("{isolated} de {total} entidades ({pct}%) no tienen ninguna relación"),
+                    "el retrieval asociativo multi-hop y PageRank no las alcanzan: para el grafo \
+                     no existen. cuba_reflexion las lista; cuba_puente las conecta.",
+                ));
+            } else {
+                checks.push(Check::ok(
+                    "graph_connectivity",
+                    format!("{isolated} de {total} entidades aisladas ({pct}%)"),
+                ));
+            }
+        }
+        Err(e) => checks.push(Check::warn(
+            "graph_connectivity",
+            format!("no verificable: {e}"),
+            "revisar esquema",
+        )),
+    }
+
+    // --- Live processes running yesterday's binary --------------------------
+    let stale = stale_processes();
+    if stale.is_empty() {
+        checks.push(Check::ok("binary_freshness", "ningún proceso MCP corre un binario obsoleto"));
+    } else {
+        let pids: Vec<String> = stale.iter().map(u32::to_string).collect();
+        checks.push(Check::warn(
+            "binary_freshness",
+            format!("{} proceso(s) MCP corren un binario más viejo que el de disco (pid {})",
+                    stale.len(), pids.join(", ")),
+            "recompilaste pero el cliente MCP sigue sirviendo la imagen vieja en memoria: \
+             reiniciá el cliente para que tome el binario nuevo",
+        ));
+    }
+
     checks
 }
 
 /// CLI entry point. Exits non-zero when any check fails.
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let json = args.iter().any(|a| a == "--json");
+    let check_updates = args.iter().any(|a| a == "--check-updates");
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: cuba-memorys doctor [--json]\n\n\
+            "usage: cuba-memorys doctor [--json] [--check-updates]\n\n\
              Read-only health check: asserts the invariants whose violation is silent\n\
-             (zero recall, dead vector branch, dimension drift, inert RLS, decay anchor).\n\
-             Exits 1 if any check fails."
+             (zero recall, dead vector branch, dimension drift, inert RLS, decay anchor,\n\
+             stale binary in a live MCP process). Exits 1 if any check fails.\n\n\
+             --check-updates  compara con la última versión publicada en npm. Nunca actualiza\n\
+                              solo, y no corre salvo que lo pidas: es la única red que toca."
         );
         return Ok(());
     }
@@ -415,7 +534,27 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .await
         .context("connecting to database for doctor")?;
 
-    let checks = run_checks(&pool, &url).await;
+    let mut checks = run_checks(&pool, &url).await;
+
+    // Opt-in, and deliberately never automatic: an update check that installs
+    // things is a supply chain, not a diagnostic.
+    if check_updates {
+        let current = env!("CARGO_PKG_VERSION");
+        match latest_published_version() {
+            Some(latest) if latest != current => checks.push(Check::warn(
+                "version",
+                format!("corriendo v{current}; la última publicada es v{latest}"),
+                "actualizá cuando quieras — doctor nunca lo hace por vos",
+            )),
+            Some(latest) => checks.push(Check::ok("version", format!("v{latest}, al día"))),
+            None => checks.push(Check::warn(
+                "version",
+                "no se pudo consultar el registro de npm".to_string(),
+                "sin red, o curl no está disponible — no afecta a nada más",
+            )),
+        }
+    }
+    let checks = checks;
     let failed = checks.iter().filter(|c| c.status == Status::Fail).count();
     let warned = checks.iter().filter(|c| c.status == Status::Warn).count();
 

@@ -13,7 +13,7 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
 pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-// Below PRED_ERROR_UPDATE → create new observation
+                                         // Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
@@ -489,4 +489,128 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
         "description": description,
         "inputSchema": input_schema
     })
+}
+
+// ── Tool Profiles ────────────────────────────────────────────────
+//
+// All 25 schemas are injected into the agent's context on every session. That
+// is a real tax — in tokens, and in the model's ability to pick the right tool
+// when two dozen are on the table. Most of them (REM cycles, audit log, GDPR
+// erasure, Bayesian calibration) are maintenance surfaces an agent almost never
+// needs mid-task.
+//
+// `full` stays the default: no existing setup changes behaviour by upgrading.
+// The narrower profiles are opt-in via `CUBA_TOOL_PROFILE`.
+
+/// Day-to-day agent flow: search, write, relate, errors, sessions, decisions.
+const PROFILE_AGENT: [&str; 13] = [
+    "cuba_faro",
+    "cuba_cronica",
+    "cuba_alma",
+    "cuba_puente",
+    "cuba_alarma",
+    "cuba_remedio",
+    "cuba_expediente",
+    "cuba_jornada",
+    "cuba_decreto",
+    "cuba_ingesta",
+    "cuba_proyecto",
+    "cuba_pre_compact",
+    "cuba_pizarra",
+];
+
+/// Agent flow + the cognitive tools worth reaching for mid-task.
+const PROFILE_STANDARD_EXTRA: [&str; 6] = [
+    "cuba_eco",
+    "cuba_reflexion",
+    "cuba_hipotesis",
+    "cuba_contradiccion",
+    "cuba_centinela",
+    "cuba_calibrar",
+];
+
+/// Which tools this process exposes on `tools/list`, per `CUBA_TOOL_PROFILE`.
+pub fn tools_for_profile() -> Vec<Value> {
+    tools_for(&std::env::var("CUBA_TOOL_PROFILE").unwrap_or_else(|_| "full".to_string()))
+}
+
+/// Filter the tool set by profile name.
+///
+/// `full` (default, all 25) | `standard` (19) | `agent` (13). An unknown value
+/// falls back to `full`: a typo in an env var must never silently hide tools.
+///
+/// Takes the profile as an argument rather than reading the environment, so the
+/// tests can exercise it without mutating process-global state under a parallel
+/// test runner.
+pub fn tools_for(profile: &str) -> Vec<Value> {
+    let all = tool_definitions();
+
+    let allowed: Vec<&str> = match profile.to_lowercase().as_str() {
+        "agent" => PROFILE_AGENT.to_vec(),
+        "standard" => PROFILE_AGENT
+            .iter()
+            .chain(PROFILE_STANDARD_EXTRA.iter())
+            .copied()
+            .collect(),
+        _ => return all.clone(),
+    };
+
+    all.iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| allowed.contains(&n))
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    /// Guard against a rename silently dropping a tool from a profile.
+    #[test]
+    fn every_profiled_tool_actually_exists() {
+        let names: Vec<&str> = tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        for t in PROFILE_AGENT.iter().chain(PROFILE_STANDARD_EXTRA.iter()) {
+            assert!(
+                names.contains(t),
+                "el perfil nombra una tool inexistente: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_hides_nothing() {
+        // The whole point: upgrading must not shrink anyone's toolset.
+        assert_eq!(tools_for("full").len(), tool_definitions().len());
+    }
+
+    #[test]
+    fn an_unknown_profile_falls_back_to_full() {
+        assert_eq!(tools_for("typo-de-dedo").len(), tool_definitions().len());
+        assert_eq!(tools_for("").len(), tool_definitions().len());
+    }
+
+    #[test]
+    fn narrow_profiles_are_strict_subsets() {
+        assert_eq!(tools_for("agent").len(), PROFILE_AGENT.len());
+        assert_eq!(
+            tools_for("standard").len(),
+            PROFILE_AGENT.len() + PROFILE_STANDARD_EXTRA.len()
+        );
+        // A narrow profile must never invent a tool that `full` does not have.
+        let full: Vec<String> = tools_for("full")
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        for t in tools_for("agent") {
+            let name = t.get("name").and_then(Value::as_str).unwrap_or_default();
+            assert!(full.contains(&name.to_string()), "{name} no está en full");
+        }
+    }
 }

@@ -81,6 +81,15 @@ async fn main() {
             drain_background_tasks().await;
             return;
         }
+        // Client wiring. Touches no database, so it runs even when the brain is down.
+        Some("setup") => {
+            if let Err(e) = cuba_memorys::setup_agent::run_cli(&argv[2..]) {
+                tracing::error!(error = %format!("{e:#}"), "setup failed");
+                eprintln!("setup: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {}
     }
 

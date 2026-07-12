@@ -464,9 +464,11 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
         }
         "ping" => Ok(serde_json::json!({})),
 
-        // Tool listing
+        // Tool listing. Honours CUBA_TOOL_PROFILE: all 25 schemas ride in the
+        // agent's context every session, and most are maintenance surfaces it
+        // never calls mid-task. Defaults to `full`, so nothing shrinks on upgrade.
         "tools/list" => Ok(serde_json::json!({
-            "tools": crate::constants::tool_definitions()
+            "tools": crate::constants::tools_for_profile()
         })),
 
         // V0.9: MCP Resources — read-only URI scheme cuba://
