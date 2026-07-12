@@ -3,6 +3,7 @@
 //! Exposes modules for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod cli;
 pub mod cognitive;
 pub mod constants;
 pub mod core;
@@ -10,6 +11,7 @@ pub mod db;
 pub mod doctor;
 pub mod embeddings;
 pub mod eval;
+pub mod export;
 pub mod graph;
 pub mod handlers;
 pub mod observability;

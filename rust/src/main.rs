@@ -64,6 +64,23 @@ async fn main() {
             }
             return;
         }
+        // The human surface: query and write the brain without an LLM in between.
+        Some(cmd @ ("search" | "save" | "delete" | "export")) => {
+            let rest = &argv[2..];
+            let result = match cmd {
+                "search" => cuba_memorys::cli::run_search(rest).await,
+                "save" => cuba_memorys::cli::run_save(rest).await,
+                "delete" => cuba_memorys::cli::run_delete(rest).await,
+                _ => cuba_memorys::export::run_cli(rest).await,
+            };
+            if let Err(e) = result {
+                tracing::error!(error = %format!("{e:#}"), command = cmd, "command failed");
+                eprintln!("{cmd}: {e:#}");
+                std::process::exit(1);
+            }
+            drain_background_tasks().await;
+            return;
+        }
         _ => {}
     }
 
