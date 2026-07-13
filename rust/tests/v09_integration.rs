@@ -259,6 +259,62 @@ async fn test_v09_all() {
     );
     println!("  ✓ source credibility table seeded with standard sources");
 
+    // ── v0.11: a written embedding is tagged with the model that MADE it ─
+    //
+    // `embeddings::onnx` exposed a `pub const CURRENT_MODEL` next to a
+    // `current_model()` that reads CUBA_EMBED_MODEL. Every site that COMPARED used
+    // the function; every site that WROTE used the constant. So on the live bge-m3
+    // brain, each new observation got a correct bge-m3 vector stamped
+    // "multilingual-e5-small" — permanently stale to `doctor`, and to `zafra
+    // reembed`, which could never converge: it re-encoded the row, and the next
+    // write re-mislabelled it.
+    //
+    // The constant is private now, so the compiler forbids the mistake. This asserts
+    // the behaviour anyway, because privacy stops the OUTSIDE and the bug was one
+    // import away from coming back.
+    println!("  [9/9] v0.11: embeddings are tagged with the model that produced them");
+    {
+        let tag = unique("test-model-tag");
+        // SAFETY: single-threaded point in a single-#[test] binary; nothing else
+        // reads CUBA_EMBED_MODEL concurrently here.
+        unsafe { std::env::set_var("CUBA_EMBED_MODEL", &tag) };
+
+        cuba_memorys::handlers::dispatch(
+            &pool,
+            "cuba_cronica",
+            json!({
+                "action": "add",
+                "entity_name": entity_a,
+                "content": "An observation written while CUBA_EMBED_MODEL says something specific",
+                "observation_type": "fact"
+            }),
+        )
+        .await
+        .expect("cronica add under a custom model tag");
+
+        // The embedding lands fire-and-forget.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let tagged: Option<(String,)> = sqlx::query_as(
+            "SELECT embedding_model FROM brain_observations
+             WHERE embedding_model = $1 AND embedding IS NOT NULL LIMIT 1",
+        )
+        .bind(&tag)
+        .fetch_optional(&pool)
+        .await
+        .expect("query the tag back");
+
+        unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
+
+        assert!(
+            tagged.is_some(),
+            "an observation embedded while CUBA_EMBED_MODEL={tag} must be stored with that \
+             tag — not with the hardcoded default. Stamping the wrong model name makes every \
+             new row look stale forever."
+        );
+        println!("  ✓ the stored tag follows CUBA_EMBED_MODEL, not a constant");
+    }
+
     // ── Cleanup ──────────────────────────────────────────────────
     cuba_memorys::handlers::dispatch(
         &pool,

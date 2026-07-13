@@ -312,11 +312,31 @@ fn test_importance_priors() {
     assert!(importance_prior("context", 0.0) >= 0.1);
 }
 
-/// V0.6: Verify embedding model constant is set.
+/// The model tag follows the environment, because the environment is what decides
+/// which model actually runs.
+///
+/// This test used to assert `CURRENT_MODEL == "multilingual-e5-small"` — it pinned
+/// the constant, and in doing so pinned the bug: four write sites reached for that
+/// constant while every read site called `current_model()`, so a bge-m3 corpus
+/// stamped every new row "multilingual-e5-small" and made it permanently, silently
+/// stale. A test that asserts a constant exists proves nothing about the value that
+/// reaches the database.
 #[test]
-fn test_embedding_model_constant() {
+fn model_tag_follows_the_environment() {
+    // SAFETY: the only test in this binary that touches CUBA_EMBED_MODEL.
+    unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
     assert_eq!(
-        cuba_memorys::embeddings::onnx::CURRENT_MODEL,
-        "multilingual-e5-small"
+        cuba_memorys::embeddings::onnx::current_model(),
+        "multilingual-e5-small",
+        "with nothing set, the default stands"
     );
+
+    unsafe { std::env::set_var("CUBA_EMBED_MODEL", "bge-m3") };
+    assert_eq!(
+        cuba_memorys::embeddings::onnx::current_model(),
+        "bge-m3",
+        "CUBA_EMBED_MODEL must win — it is the only thing that knows which model ran"
+    );
+
+    unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
 }

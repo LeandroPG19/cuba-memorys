@@ -238,7 +238,7 @@ async fn health(pool: &PgPool) -> Result<Value> {
             "brain_observations": obs_table_size.0,
             "brain_entities": entities_table_size.0
         },
-        "embedding_model": crate::embeddings::onnx::CURRENT_MODEL,
+        "embedding_model": crate::embeddings::onnx::current_model(),
         "entropy": {
             "entity_types": (entity_entropy * 1000.0).round() / 1000.0,
             "observation_types": (obs_entropy * 1000.0).round() / 1000.0,

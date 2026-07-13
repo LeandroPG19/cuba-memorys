@@ -55,14 +55,28 @@ fn use_cls_pooling() -> bool {
         .unwrap_or(false)
 }
 
-/// Current embedding model identifier — stored alongside embeddings for versioning.
-/// Used by zafra::reembed to detect stale embeddings needing re-encoding.
-/// Overridable with `CUBA_EMBED_MODEL` so a bge-m3 corpus is tagged correctly.
-pub const CURRENT_MODEL: &str = "multilingual-e5-small";
+/// The model tag when `CUBA_EMBED_MODEL` says nothing. Private on purpose.
+///
+/// It used to be `pub const CURRENT_MODEL`, and a name like that is an invitation:
+/// four call sites took it up, and every one of them was a site that WROTE. The
+/// sites that COMPARED used [`current_model()`]. So on a bge-m3 corpus, each new
+/// observation was written with a bge-m3 vector and stamped "multilingual-e5-small"
+/// — permanently, silently stale to `doctor` and to `zafra reembed`, which could
+/// never converge because the thing it re-encoded was re-mislabelled on the next
+/// write.
+///
+/// The vectors were always fine (measured: cross-model cosine on same-topic pairs
+/// sits in the same range as within-model, so it is one vector space, not two). Only
+/// the label lied. But a label that lies about which model produced a vector is the
+/// one piece of metadata you cannot afford to lose — it is what tells you, after the
+/// next model change, which rows still need re-encoding.
+const DEFAULT_MODEL: &str = "multilingual-e5-small";
 
-/// Runtime model tag (defaults to [`CURRENT_MODEL`]).
+/// The model tag to store alongside an embedding. **Always use this** — never a
+/// constant. It reads `CUBA_EMBED_MODEL`, which is the only thing that knows what
+/// model actually produced the vector you are about to persist.
 pub fn current_model() -> String {
-    std::env::var("CUBA_EMBED_MODEL").unwrap_or_else(|_| CURRENT_MODEL.to_string())
+    std::env::var("CUBA_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
 /// Global embedding cache (LRU with TTL — FIX B6, V7).

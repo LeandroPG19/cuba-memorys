@@ -181,7 +181,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
             .await
             {
                 Ok(emb) => {
-                    let model = crate::embeddings::onnx::CURRENT_MODEL;
+                    let model = crate::embeddings::onnx::current_model();
                     let result = sqlx::query(
                         "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                     )
@@ -527,7 +527,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                         "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                     )
                     .bind(pgvector::Vector::from(emb))
-                    .bind(crate::embeddings::onnx::CURRENT_MODEL)
+                    .bind(crate::embeddings::onnx::current_model())
                     .bind(obs_id)
                     .execute(&embed_pool)
                     .await;
@@ -874,7 +874,7 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
             )
             .await
         {
-            let model = crate::embeddings::onnx::CURRENT_MODEL;
+            let model = crate::embeddings::onnx::current_model();
             let _ = sqlx::query(
                 "UPDATE brain_episodes SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
             )
