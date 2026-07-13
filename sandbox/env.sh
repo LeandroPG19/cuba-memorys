@@ -17,8 +17,12 @@ export CUBA_SANDBOX_VOLUME="${CUBA_SANDBOX_VOLUME:-cuba_sandbox_data}"
 # Puerto de producción — prohibido. La guarda de abajo aborta si aparece.
 CUBA_PROD_PORT=5488
 
-export DATABASE_URL="postgresql://cuba:memorys2026@127.0.0.1:${CUBA_SANDBOX_PORT}/brain"
-export PGPASSWORD="memorys2026"
+# Password from the environment, with the docker-compose default as fallback.
+# Not a secret (local container, bound to 127.0.0.1) but there is no reason to
+# hardcode one more copy of it.
+export CUBA_SANDBOX_PASSWORD="${CUBA_SANDBOX_PASSWORD:-memorys2026}"
+export DATABASE_URL="postgresql://cuba:${CUBA_SANDBOX_PASSWORD}@127.0.0.1:${CUBA_SANDBOX_PORT}/brain"
+export PGPASSWORD="$CUBA_SANDBOX_PASSWORD"
 
 # Modelo de embeddings: e5-small 384-d (baseline, read-only, compartido).
 # Para probar bge-m3 1024-d: source sandbox/env.bge-m3.sh

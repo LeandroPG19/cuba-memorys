@@ -489,9 +489,11 @@ mod tests {
 
     #[test]
     fn credentials_never_reach_the_llm() {
-        let dirty = "la app conecta a postgresql://cuba:memorys2026@127.0.0.1:5488/brain";
+        // Fixture with a FAKE password. A test that proves credentials are redacted
+        // has no business shipping a real one to a public repo.
+        let dirty = "la app conecta a postgresql://cuba:hunter2-fake@127.0.0.1:5488/brain";
         let clean = redact_secrets(dirty);
-        assert!(!clean.contains("memorys2026"), "la contraseña salió al prompt: {clean}");
+        assert!(!clean.contains("hunter2-fake"), "la contraseña salió al prompt: {clean}");
         // The shape survives — the judge still sees "this is a Postgres URL".
         assert!(clean.contains("postgresql://cuba:***@127.0.0.1:5488/brain"));
     }
@@ -529,10 +531,10 @@ mod tests {
     #[test]
     fn the_prompt_itself_carries_no_secret() {
         let prompt = build_prompt(
-            "DB en postgresql://cuba:memorys2026@127.0.0.1:5488/brain",
+            "DB en postgresql://cuba:hunter2-fake@127.0.0.1:5488/brain",
             "el token es ghp_abcdefghijklmnop",
         );
-        assert!(!prompt.contains("memorys2026"));
+        assert!(!prompt.contains("hunter2-fake"));
         assert!(!prompt.contains("ghp_abcdefghijklmnop"));
     }
 
