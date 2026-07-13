@@ -312,7 +312,32 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         );
     }
 
-    // Add vector results (V8: only if available)
+    // A failure in the vector branch is NOT cosmetic. When it fails, the hybrid
+    // search quietly becomes a lexical search: every query still returns ten
+    // confident-looking rows, recall collapses, and nothing in the response says
+    // a word about it.
+    //
+    // This `if let Ok` used to discard the error outright — no log, no flag. That
+    // is precisely how the v0.10 "dead vector branch" bug survived in production:
+    // the answers looked normal. It resurfaced the moment the embedding dimension
+    // changed under a running server (384-d model, 1024-d column): pgvector
+    // rejected every comparison, the error was swallowed here, and the MCP served
+    // lexical-only results while the CLI — same code, right dimension — was fine.
+    //
+    // Now it is loud, and the caller is told.
+    let vector_failed = match &vector_results {
+        Ok(_) => false,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "VECTOR SEARCH FAILED — hybrid retrieval degraded to lexical only. \
+                 Run `cuba-memorys doctor`: this is usually the embedding dimension \
+                 disagreeing with the column."
+            );
+            true
+        }
+    };
+
     if let Ok(vec_results) = vector_results {
         for (rank, result) in vec_results.iter().enumerate() {
             let id = result
@@ -680,13 +705,27 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         final_results.push(r);
     }
 
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "mode": "hybrid",
         "query": query,
         "results": final_results,
         "count": final_results.len(),
         "graphrag_context": graphrag_context
-    }))
+    });
+
+    // Tell the caller when the answer is worse than it looks. An agent that knows
+    // its memory is degraded can say so, or retry; an agent handed a silently
+    // lexical-only top-10 will simply trust it. Silence is the bug.
+    if vector_failed {
+        response["degraded"] = serde_json::json!(true);
+        response["degraded_reason"] = serde_json::json!(
+            "La búsqueda vectorial falló: estos resultados son SOLO léxicos y el recall \
+             está degradado. Causa habitual: la dimensión del embedding no coincide con la \
+             de la columna. Diagnosticá con `cuba-memorys doctor`."
+        );
+    }
+
+    Ok(response)
 }
 
 /// How much of an observation the compact shape keeps.

@@ -137,6 +137,26 @@ async fn main() {
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
 
+    // Fail loudly, at startup, rather than silently on every query. A dimension
+    // mismatch turns hybrid search into lexical search with no visible symptom.
+    {
+        let url = cuba_memorys::setup::resolve_database_url().await;
+        match cuba_memorys::db::create_pool(&url).await {
+            Ok(pool) => {
+                if let Err(e) = cuba_memorys::db::assert_embedding_dim(&pool).await {
+                    tracing::error!(error = %format!("{e:#}"), "arranque abortado");
+                    eprintln!("\ncuba-memorys NO puede arrancar:\n\n{e:#}\n");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                // Not fatal here: the existing startup path has its own retry and
+                // setup logic, and duplicating that decision would be worse.
+                tracing::warn!(error = %e, "no se pudo verificar la dimensión del embedding al arrancar");
+            }
+        }
+    }
+
     // V0.9: optional Prometheus /metrics endpoint (no-op without `observability` feature).
     if let Err(e) = cuba_memorys::observability::init() {
         tracing::warn!(error = %e, "observability init failed — continuing without /metrics");

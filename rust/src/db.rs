@@ -142,6 +142,51 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to serve with a model whose dimension disagrees with the column.
+///
+/// The server used to start happily in this state. It would answer every query,
+/// return ten confident rows, and be silently wrong: pgvector rejects a
+/// comparison between a 384-d query and a 1024-d column, the vector branch fails,
+/// and the hybrid search collapses into a lexical one. Nothing in any response
+/// said so — which is the same failure mode as the original "dead vector branch"
+/// bug, arriving by a different road.
+///
+/// A server that cannot do its job must say so at startup, not degrade quietly
+/// for weeks. Only enforced when a real ONNX model is loaded: with no model there
+/// is no vector branch to break, and a lexical-only server is a legitimate (if
+/// diminished) thing to be.
+pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
+    if !crate::embeddings::onnx::is_model_loaded() {
+        return Ok(());
+    }
+    let runtime_dim = crate::embeddings::onnx::embedding_dim();
+
+    let column: Option<String> = sqlx::query_scalar(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+         WHERE attrelid = 'brain_observations'::regclass AND attname = 'embedding'",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("reading the embedding column type")?;
+
+    // No column yet (fresh database, migrations about to run) — nothing to check.
+    let Some(column) = column else {
+        return Ok(());
+    };
+
+    let expected = format!("vector({runtime_dim})");
+    if column != expected {
+        anyhow::bail!(
+            "el modelo de embeddings produce {expected} pero la columna es {column}.\n\
+             El servidor NO arranca así: cada búsqueda vectorial fallaría y la búsqueda \n\
+             híbrida devolvería resultados solo léxicos sin avisar de nada.\n\n\
+             Si cambiaste de modelo:  scripts/migrate-embedding-dim.sh {runtime_dim}  y después  cuba-memorys reembed\n\
+             Si no querías cambiarlo: revisá CUBA_EMBEDDING_DIM y ONNX_MODEL_PATH en la config del cliente MCP."
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
