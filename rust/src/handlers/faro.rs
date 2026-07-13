@@ -384,12 +384,25 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         associative_expand(pool, query, opts.project_id, &mut fused_scores).await;
     }
 
-    // Sort by fused score
+    // Sort by fused score, breaking ties by id.
+    //
+    // The tie-break is not cosmetic. `fused_scores` is a HashMap, and Rust
+    // randomizes its iteration order per process; `sort_by` is stable, so
+    // equal-scoring rows kept whatever order the HashMap happened to produce.
+    // Two runs of the same query therefore returned the same documents in a
+    // different order, and the benchmark scored 0.7389 / 0.7344 / 0.7389 on
+    // three identical runs. A benchmark that cannot reproduce itself cannot
+    // measure an improvement smaller than its own noise — every number in this
+    // repo's optimization history was resting on that.
+    //
+    // rrf::fuse already did this correctly. This pipeline is a second, parallel
+    // fusion path that never got the fix.
     let mut results: Vec<(String, FusedResult)> = fused_scores.into_iter().collect();
     results.sort_by(|a, b| {
         b.1.total
             .partial_cmp(&a.1.total)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
     });
 
     // Post-fusion dedup (Cormack RRF + lexical overlap — same as rrf::fuse).
@@ -507,11 +520,12 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                 }
             }
         }
-        // Re-sort after session boost
+        // Re-sort after session boost — same deterministic tie-break as above.
         results.sort_by(|a, b| {
             b.1.total
                 .partial_cmp(&a.1.total)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
         });
     }
 
@@ -1362,6 +1376,28 @@ async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k
     serde_json::json!(context)
 }
 
+/// Explicit environment override, for experiments and for the threshold sweep.
+fn env_threshold() -> Option<f64> {
+    std::env::var("CUBA_OOD_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|t| t.is_finite() && *t > 0.0)
+}
+
+/// The threshold measured by `cuba-memorys calibrate`, cached per process.
+///
+/// Read once and held: the value changes only when someone re-calibrates, and a
+/// database round-trip on the OOD path would undo the point of caching μ and Σ⁻¹
+/// in the first place.
+async fn calibrated_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
+    static CACHE: tokio::sync::OnceCell<Option<f64>> = tokio::sync::OnceCell::const_new();
+    *CACHE
+        .get_or_init(|| async {
+            crate::search::calibrate::load_ood_threshold(pool, dim).await
+        })
+        .await
+}
+
 fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
     if dist <= threshold {
         return None;
@@ -1410,8 +1446,35 @@ async fn check_ood(
     // never in, inflating every distance and abstaining on in-corpus queries.
     // For density estimation both sides must share the prefix.
     let query_emb = crate::embeddings::onnx::embed_passage(query).await.ok()?;
-    // Caller may override; otherwise scale the cutoff to the embedding space.
-    let tau = threshold.unwrap_or_else(|| default_threshold(query_emb.len()));
+    // Explicit argument → calibrated threshold → theory, in that order.
+    //
+    // The theoretical cutoff stays as a last resort, but it is known to be wrong
+    // on this corpus and the fix above (passage-prefixing both sides) was not
+    // enough. Measured with `cuba-memorys calibrate`, d=384:
+    //
+    //   theory (χ², Wilson-Hilferty)  τ = 21.25
+    //   corpus distances              p50 = 19.5, p99 = 23.5  → τ rejects 14.4%
+    //                                 of the corpus against its OWN distribution
+    //   answerable query distances    min = 23.8, p50 = 27.2  → τ rejects 100%
+    //
+    // Two things break the derivation. Σ is fitted from ~500 embeddings in 384
+    // dimensions (n/d ≈ 1.3), so its inverse amplifies estimation noise; and e5
+    // L2-normalizes, so the vectors live on the unit sphere, where Σ is singular
+    // in the radial direction and the ridge's 1/ε blows up. On top of that,
+    // queries and passages simply occupy different regions — the classic dense
+    // retrieval query-document gap — so a density fitted on passages scores every
+    // query as an outlier.
+    //
+    // `cuba-memorys calibrate` computes a conformal threshold from real
+    // answerable queries: distribution-free, finite-sample, and it holds even
+    // when the underlying Mahalanobis is badly estimated, because it adapts to
+    // whatever scale the score actually produces.
+    let tau = match threshold.or_else(env_threshold) {
+        Some(t) => t,
+        None => calibrated_threshold(pool, query_emb.len())
+            .await
+            .unwrap_or_else(|| default_threshold(query_emb.len())),
+    };
 
     // Cache hit: skip the 500-row fetch entirely. (Previously the SELECT ran
     // before this check, so the cache saved the fit but never the query.)
@@ -1421,14 +1484,26 @@ async fn check_ood(
         return ood_abstain_json(query, tau, dist);
     }
 
-    // Sample up to 500 active observations for the fit. Cheaper than full
-    // scan, statistically sufficient for d=384.
+    // The fit sample. Two things were wrong with the old one, and together they
+    // were the other half of why abstention rejected everything.
+    //
+    // It took 500 rows for d=384 (n/d ≈ 1.3) and called that "statistically
+    // sufficient". It is not: the sample covariance of 147,456 parameters cannot
+    // be estimated from 500 points, and its inverse amplifies noise, not signal.
+    // Ledoit-Wolf shrinkage now handles the conditioning, but a bigger sample is
+    // still strictly better and this corpus is small enough to afford one.
+    //
+    // Worse, it ordered by importance DESC — so the "distribution of the corpus"
+    // was fitted on the most important tail of it. A density estimated on a
+    // biased sample describes a distribution nothing was ever drawn from.
+    // ORDER BY id is unbiased (v4 UUIDs are random) and, unlike random(),
+    // deterministic — so the eval measures the same thing twice.
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
-         ORDER BY importance DESC, last_accessed DESC NULLS LAST
-         LIMIT 500",
+         ORDER BY id
+         LIMIT 5000",
     )
     .bind(project_id)
     .fetch_all(pool)

@@ -34,6 +34,12 @@ pub struct OodStats {
     /// Number of samples used to fit μ and Σ. Caller can decide to skip
     /// OOD if too few samples (high variance estimate).
     pub n_samples: usize,
+    /// Ledoit-Wolf shrinkage intensity actually applied, in [0, 1]. Reported so
+    /// `doctor` and `calibrate` can show how much of the fitted covariance is
+    /// real signal and how much is the identity target propping it up: near 1
+    /// means the sample was far too small to say anything about the shape of the
+    /// distribution.
+    pub shrinkage: f64,
 }
 
 impl OodStats {
@@ -63,24 +69,92 @@ impl OodStats {
         }
         mean /= n as f64;
 
-        // Compute covariance Σ with shrinkage (Ledoit-Wolf style ridge)
-        // to prevent singular Σ when d > n or when features are highly correlated.
+        // Sample covariance.
         let mut cov = DMatrix::<f64>::zeros(d, d);
+        let mut centered: Vec<DVector<f64>> = Vec::with_capacity(n);
         for e in embeddings {
             let mut diff = DVector::<f64>::zeros(d);
             for (i, &v) in e.iter().enumerate() {
                 diff[i] = v as f64 - mean[i];
             }
             cov += &diff * diff.transpose();
+            centered.push(diff);
         }
         cov /= (n - 1).max(1) as f64;
 
-        // Ridge regularization: Σ + ε·I. ε scaled to trace so it survives
-        // dimension changes (384 → 1024 with BGE-M3 in v1.0).
-        let trace = (0..d).map(|i| cov[(i, i)]).sum::<f64>();
-        let epsilon = (trace / d as f64) * 1e-3;
+        // Ledoit-Wolf shrinkage toward the scaled identity.
+        //
+        // The previous code applied a FIXED ridge of ε = (tr(S)/d) · 1e-3 while
+        // its comment claimed "Ledoit-Wolf style". It is not: Ledoit-Wolf derives
+        // the shrinkage intensity from the data, and the difference is not
+        // cosmetic here. This corpus fits Σ from ~500–1400 embeddings in 384
+        // dimensions — n/d between 1.3 and 3.7 — where the sample covariance is
+        // catastrophically ill-conditioned and a 0.1% ridge is nowhere near
+        // enough to fix it. Inverting it amplified estimation noise until every
+        // query looked like an outlier: abstention rejected 100% of answerable
+        // queries, and the theoretical cutoff rejected 14.4% of the corpus
+        // against its own distribution.
+        //
+        // Ledoit & Wolf (2004), "A well-conditioned estimator for
+        // large-dimensional covariance matrices", J. Multivariate Analysis 88(2):
+        //
+        //     Σ* = (b²/d²)·μ·I + ((d²−b²)/d²)·S
+        //
+        // with μ = tr(S)/d the average eigenvalue, d² = ‖S − μI‖²_F / d the
+        // distance from the target, and b² an estimate of the sample covariance's
+        // own variance. The ratio b²/d² is the optimal intensity in the sense of
+        // minimizing expected squared Frobenius error: it shrinks hard when the
+        // sample is small relative to d, and vanishes as n → ∞, recovering S.
+        let mu = (0..d).map(|i| cov[(i, i)]).sum::<f64>() / d as f64;
+
+        // d² = ‖S − μI‖²_F / d
+        let mut target_dist = 0.0;
         for i in 0..d {
-            cov[(i, i)] += epsilon;
+            for j in 0..d {
+                let t = if i == j { mu } else { 0.0 };
+                let diff = cov[(i, j)] - t;
+                target_dist += diff * diff;
+            }
+        }
+        target_dist /= d as f64;
+
+        // b̄² = (1/n²) Σₖ ‖xₖxₖᵀ − S‖²_F / d, then b² = min(b̄², d²).
+        let mut b_bar = 0.0;
+        for x in &centered {
+            let mut acc = 0.0;
+            for i in 0..d {
+                for j in 0..d {
+                    let outer = x[i] * x[j];
+                    let diff = outer - cov[(i, j)];
+                    acc += diff * diff;
+                }
+            }
+            b_bar += acc / d as f64;
+        }
+        b_bar /= (n * n) as f64;
+        let b2 = b_bar.min(target_dist);
+
+        // Intensity in [0, 1]. A degenerate target (target_dist ≈ 0) means S is
+        // already essentially μI, so there is nothing to shrink toward.
+        let intensity = if target_dist > f64::EPSILON {
+            (b2 / target_dist).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        for i in 0..d {
+            for j in 0..d {
+                let target = if i == j { mu } else { 0.0 };
+                cov[(i, j)] = intensity * target + (1.0 - intensity) * cov[(i, j)];
+            }
+        }
+
+        // A floor on the diagonal survives the pathological case the sphere
+        // creates: e5 L2-normalizes, so the radial direction carries no variance
+        // at all and Σ is singular there by construction, whatever the shrinkage.
+        let floor = (mu * 1e-6).max(f64::MIN_POSITIVE);
+        for i in 0..d {
+            cov[(i, i)] += floor;
         }
 
         let inverse_covariance = cov.try_inverse()?;
@@ -89,6 +163,7 @@ impl OodStats {
             mean,
             inverse_covariance,
             n_samples: n,
+            shrinkage: intensity,
         })
     }
 

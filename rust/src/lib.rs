@@ -3,6 +3,7 @@
 //! Exposes modules for integration testing.
 //! The binary entry point is in `main.rs`.
 
+pub mod calibrate_cli;
 pub mod cli;
 pub mod cognitive;
 pub mod constants;

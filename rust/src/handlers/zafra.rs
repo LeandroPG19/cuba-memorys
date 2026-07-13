@@ -12,10 +12,13 @@ use sqlx::PgPool;
 async fn refresh_ood_cache(pool: &PgPool, project_id: Option<uuid::Uuid>) -> Result<()> {
     use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats};
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
+        // Unbiased and deterministic — see the note in faro::check_ood. Fitting
+        // the corpus distribution on its most-important 500 rows described a
+        // distribution the queries were never drawn from.
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
-         ORDER BY importance DESC LIMIT 500",
+         ORDER BY id LIMIT 5000",
     )
     .bind(project_id)
     .fetch_all(pool)

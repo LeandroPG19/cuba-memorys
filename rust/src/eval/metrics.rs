@@ -79,13 +79,21 @@ pub fn mrr(relevance_lists: &[Vec<bool>]) -> f64 {
 }
 
 pub fn precision_at_k(relevances: &[bool], k: usize) -> f64 {
-    let k = k.min(relevances.len()).max(1);
+    // An empty result list is not a hypothetical: it is exactly what an
+    // abstaining system returns. The previous `.max(1)` — added to dodge a
+    // division by zero — turned that case into `relevances[..1]` on a
+    // zero-length slice, i.e. a panic. It never fired only because nothing ever
+    // abstained.
+    if relevances.is_empty() || k == 0 {
+        return 0.0; // retrieved nothing, so nothing retrieved was correct
+    }
+    let k = k.min(relevances.len());
     let hits = relevances[..k].iter().filter(|&&r| r).count();
     hits as f64 / k as f64
 }
 
 pub fn recall_at_k(relevances: &[bool], total_relevant: usize, k: usize) -> f64 {
-    if total_relevant == 0 {
+    if total_relevant == 0 || relevances.is_empty() {
         return 0.0;
     }
     let k = k.min(relevances.len());
@@ -96,6 +104,20 @@ pub fn recall_at_k(relevances: &[bool], total_relevant: usize, k: usize) -> f64 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The abstention case: the system correctly returned nothing. Every metric
+    /// must yield a number instead of panicking — this suite passed for months
+    /// only because abstention was never switched on.
+    #[test]
+    fn an_empty_result_list_is_scored_not_a_crash() {
+        let empty: Vec<bool> = vec![];
+        assert_eq!(precision_at_k(&empty, 10), 0.0);
+        assert_eq!(recall_at_k(&empty, 3, 10), 0.0);
+        assert_eq!(ndcg_at_k(&empty, 10), 0.0);
+        assert_eq!(mrr(std::slice::from_ref(&empty)), 0.0);
+        // k=0 is degenerate but must not panic either.
+        assert_eq!(precision_at_k(&[true, false], 0), 0.0);
+    }
 
     #[test]
     fn ndcg_perfect_ranking() {
