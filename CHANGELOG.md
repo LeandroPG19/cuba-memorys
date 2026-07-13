@@ -83,6 +83,27 @@ neither can drift again.
   redacted (Postgres URLs, provider tokens, JWTs) and length-capped.
 - **`doctor` could not see a stale process** — Linux appends `" (deleted)"` to
   the exe name, and the filter dropped exactly the processes it existed to find.
+- **`cuba-memorys --version` connected to your database and ran migrations.**
+  Argument parsing had a catch-all that fell through to the MCP server, so the one
+  command a person runs *because they do not yet trust what they installed* was the
+  one that quietly reshaped their schema. `--version` is now inert — it prints and
+  exits, with a test that pins it by pointing `DATABASE_URL` at a closed port.
+- **`--help` did not exist**, for the same reason, which is why nothing ever
+  documented the 13 subcommands. And a typo (`doctro`) launched the server on a
+  stdio socket nobody was speaking to — indistinguishable from a hang. An
+  unrecognised argument is now a usage error (exit 2). The server is what you get
+  with *no* arguments, which is how MCP clients launch it.
+- **npm could silently run a different version than the one you installed.**
+  `bin.js` fell back to any `cuba-memorys` on the `PATH` when the postinstall
+  binary was missing — and postinstall does not run under `--ignore-scripts`,
+  standard practice in hardened CI. Installing 0.11.0 and getting an 0.6.0 left
+  over from an old pip install is not a fallback; here it is a *migration* run by
+  the wrong binary. The `PATH` binary must now prove its version matches, or the
+  launcher refuses and says why.
+- A test now pins `Cargo.toml` and `package.json` to the same version. npm's
+  postinstall downloads from `releases/download/v{package.json.version}/`, an asset
+  the release workflow only builds for the *Cargo* version — nothing connected
+  those two numbers, and a drift would have 404'd every install.
 - Zero `unwrap()` in production code; zero clippy warnings.
 
 ### Changed

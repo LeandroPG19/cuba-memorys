@@ -1,10 +1,15 @@
 //! Cuba-Memorys MCP Server
 //!
-//! Knowledge Graph MCP server: 25 tools, Hebbian/BCM learning, RRF hybrid
-//! search, episodic memory, contradiction detection, Bayesian calibration,
+//! Knowledge Graph MCP server: Hebbian/BCM learning, RRF hybrid search, episodic
+//! and procedural memory, contradiction detection, Bayesian calibration,
 //! bitemporal facts, contextual retrieval, and autonomous REM sleep
-//! consolidation. Version comes from `CARGO_PKG_VERSION` — do not restate it
-//! here; this docstring spent four releases claiming v0.6.0 / 19 tools.
+//! consolidation.
+//!
+//! No version, no tool count. Both live in exactly one place each —
+//! `CARGO_PKG_VERSION` and `constants::tools_for_profile()` — and both were
+//! wrong here for four releases running (v0.6.0, 19 tools; then 25, when there
+//! were 28). A number copied into a docstring is a number that will drift, and
+//! a comment that lies is worse than no comment. Ask `tools/list`.
 
 use std::time::Duration;
 
@@ -15,6 +20,45 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 /// How long shutdown waits for detached writes (embeddings) to land.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The command surface, printed on `--help` and on an unrecognised argument.
+///
+/// Goes to stdout only from paths that return immediately — stdout is the MCP
+/// protocol channel once the server is up, and a stray byte there desyncs the
+/// client's JSON-RPC framing.
+fn print_help() {
+    println!(
+        "cuba-memorys {version} — knowledge-graph memory server (MCP)
+
+USAGE:
+  cuba-memorys                  run the MCP server on stdio (how an MCP client launches it)
+  cuba-memorys <command> [args]
+
+THE BRAIN, WITHOUT AN LLM IN BETWEEN:
+  search <query>    hybrid search (use --format verbose for the score breakdown)
+  save <content>    write an observation
+  delete <id>       remove an observation
+  export            dump the graph (json | markdown)
+  dashboard         what is in there, at a glance
+
+OPERATIONS:
+  doctor            health check: schema, embedding dim, config coherence, stale processes
+  recall            the session-start context injection (wire it with `setup hook`)
+  reembed           recompute every embedding — after changing model or dimension
+  calibrate         recompute the abstention threshold from the live corpus
+  link              auto-link entities by NPMI co-occurrence
+  skills <dir>      export procedures as Claude Code skills
+  eval              retrieval benchmark (nDCG@10, MRR, recall) — read-only
+  setup             wire this server into your MCP clients; `setup check` audits them
+
+  -h, --help        this
+  -V, --version     print the version and exit — touches no database
+
+DATABASE_URL points at the brain. `doctor` will tell you if anything is off.
+Docs: https://github.com/LeandroPG19/cuba-memorys",
+        version = env!("CARGO_PKG_VERSION")
+    );
+}
 
 /// Wait for tracked background tasks. Must run before any `process::exit`,
 /// which skips destructors and would abort them mid-write.
@@ -132,7 +176,34 @@ async fn main() {
             }
             return;
         }
-        _ => {}
+
+        // `--version` must be inert. It fell through to the server before, which
+        // means asking this binary what version it was CONNECTED TO A DATABASE AND
+        // RAN MIGRATIONS — the one command a person types precisely because they do
+        // not yet trust what they have installed. It returns before any of that now.
+        Some("--version" | "-V" | "version") => {
+            println!("cuba-memorys {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("--help" | "-h" | "help") => {
+            print_help();
+            return;
+        }
+
+        // An argument we do not recognise is a mistake, not a server launch.
+        //
+        // The old catch-all sent `doctro`, `--verison`, and every other typo straight
+        // into the MCP server, where it sat silent on a stdio socket nobody was
+        // speaking to — looking, to the person who typed it, exactly like a hang.
+        // The server is what you get with NO arguments; that is how MCP clients
+        // launch it, and it is the only way to get it.
+        Some(unknown) => {
+            eprintln!("cuba-memorys: unknown command '{unknown}'\n");
+            print_help();
+            std::process::exit(2);
+        }
+
+        None => {}
     }
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
