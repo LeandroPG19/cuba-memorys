@@ -273,33 +273,6 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_config_carries_the_vars_whose_absence_is_silent() {
-        let cfg = desired_config().expect("current_exe resolves under test");
-        let env = cfg.get("env").and_then(Value::as_object).expect("env block");
-        for key in REQUIRED_ENV {
-            assert!(env.contains_key(key), "falta {key} en el bloque generado");
-        }
-        // An absolute path: a client resolving `cuba-memorys` off $PATH is how
-        // you silently run yesterday's binary.
-        let command = cfg.get("command").and_then(Value::as_str).unwrap_or("");
-        assert!(Path::new(command).is_absolute(), "el command debe ser absoluto");
-    }
-
-    #[test]
-    fn finds_the_cuba_block_only_when_present() {
-        let with = json!({"mcpServers": {"cuba-memorys": {"command": "/bin/x"}}});
-        let without = json!({"mcpServers": {"otro": {"command": "/bin/y"}}});
-        assert!(cuba_block(&with).is_some());
-        assert!(cuba_block(&without).is_none());
-        assert!(cuba_block(&json!({})).is_none());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // hook — make the memory load itself
 // ---------------------------------------------------------------------------
@@ -385,4 +358,31 @@ fn run_hook(apply: bool) -> Result<()> {
     println!("Instalado. La próxima sesión arrancará con la memoria ya cargada,");
     println!("obedezca el modelo su CLAUDE.md o no.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_config_carries_the_vars_whose_absence_is_silent() {
+        let cfg = desired_config().expect("current_exe resolves under test");
+        let env = cfg.get("env").and_then(Value::as_object).expect("env block");
+        for key in REQUIRED_ENV {
+            assert!(env.contains_key(key), "falta {key} en el bloque generado");
+        }
+        // An absolute path: a client resolving `cuba-memorys` off $PATH is how
+        // you silently run yesterday's binary.
+        let command = cfg.get("command").and_then(Value::as_str).unwrap_or("");
+        assert!(Path::new(command).is_absolute(), "el command debe ser absoluto");
+    }
+
+    #[test]
+    fn finds_the_cuba_block_only_when_present() {
+        let with = json!({"mcpServers": {"cuba-memorys": {"command": "/bin/x"}}});
+        let without = json!({"mcpServers": {"otro": {"command": "/bin/y"}}});
+        assert!(cuba_block(&with).is_some());
+        assert!(cuba_block(&without).is_none());
+        assert!(cuba_block(&json!({})).is_none());
+    }
 }
