@@ -80,10 +80,14 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         .get("supersede_conflicts")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let superseded = if supersede_conflicts {
+    // Phase 1.2: the judge classifies each candidate vs its most similar existing
+    // fact into an explicit ADD/UPDATE/DELETE/NOOP operation (the LLM decides, not
+    // a cosine threshold). UPDATE supersedes the old row; the new fact is ingested
+    // by the pipeline below regardless (Add/Update both keep the new fact).
+    let ops = if supersede_conflicts {
         resolve_conflicts(pool, &items).await
     } else {
-        0
+        crate::cognitive::memory_op::OpBreakdown::default()
     };
 
     // Reuse the ingest path: validation + dedup + PE-gating + embedding.
@@ -95,27 +99,37 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         obj.insert("action".to_string(), serde_json::json!("auto_extract"));
         obj.insert("extracted".to_string(), serde_json::json!(extracted));
         if supersede_conflicts {
-            obj.insert("superseded".to_string(), serde_json::json!(superseded));
+            // Back-compat: `superseded` is the UPDATE count; `operations` is the
+            // full ADD/UPDATE/DELETE/NOOP breakdown of the judge's decisions.
+            obj.insert("superseded".to_string(), serde_json::json!(ops.update));
+            obj.insert("operations".to_string(), ops.to_json());
         }
     }
     Ok(response)
 }
 
-/// Phase 4: for each candidate fact, find the most similar existing observation
-/// of the same entity in the "related but not a duplicate" band, ask the judge
-/// whether the new fact replaces it, and if so mark the old one superseded.
+/// Phase 1.2 (builds on Phase 4): for each candidate fact, find the most similar
+/// existing observation of the same entity in the "related but not a duplicate"
+/// band, ask the LLM judge to classify the relationship, and map it to an
+/// explicit ADD/UPDATE/DELETE/NOOP operation ([`crate::cognitive::memory_op`]).
+/// An UPDATE supersedes the old row (data-safe: only ever sets
+/// observation_type='superseded' — the row is retained, never deleted).
 ///
-/// Data-safe: only ever sets observation_type='superseded' (the row is retained,
-/// just excluded from active search) — never deletes. Best-effort per item.
-/// Returns how many observations were superseded.
-async fn resolve_conflicts(pool: &PgPool, items: &[Value]) -> u32 {
+/// The candidate is always ingested afterwards by the pipeline, so ADD and UPDATE
+/// both keep the new fact; the difference is whether the old one is superseded.
+/// Best-effort per item. Returns the operation breakdown.
+async fn resolve_conflicts(pool: &PgPool, items: &[Value]) -> crate::cognitive::memory_op::OpBreakdown {
+    use crate::cognitive::memory_op::{MemoryOp, OpBreakdown};
+
     // Below the dup threshold (0.85, already blocked) but related enough to
     // possibly conflict. Unrelated facts never reach the judge.
     const REL_LO: f64 = 0.30;
     const REL_HI: f64 = 0.85;
+    // Minimum judge confidence to act on (supersede). Below this → Noop.
+    const CONF_FLOOR: f64 = 0.5;
 
     let judge = crate::cognitive::judge::resolve_judge();
-    let mut superseded = 0u32;
+    let mut ops = OpBreakdown::default();
 
     for item in items {
         let (Some(entity_name), Some(content)) = (
@@ -141,40 +155,52 @@ async fn resolve_conflicts(pool: &PgPool, items: &[Value]) -> u32 {
         .ok()
         .flatten();
 
+        // No related prior fact (or out of band) → this is a free ADD.
         let Some((old_id, old_content, sim)) = candidate else {
+            ops.record(MemoryOp::Add);
             continue;
         };
         if !(REL_LO..REL_HI).contains(&sim) {
+            ops.record(MemoryOp::Add);
             continue; // unrelated, or a near-duplicate the dedup gate handles
         }
 
-        // Judge: does the new fact supersede/contradict the old one?
-        match judge.judge(content, &old_content).await {
-            Ok(j)
-                if (j.verdict == "supersedes" || j.verdict == "contradicts")
-                    && j.confidence >= 0.5 =>
-            {
-                let done = sqlx::query(
-                    "UPDATE brain_observations SET observation_type = 'superseded', updated_at = NOW()
-                     WHERE id = $1 AND observation_type != 'superseded'",
-                )
-                .bind(old_id)
-                .execute(pool)
-                .await;
-                if let Ok(r) = done
-                    && r.rows_affected() > 0
-                {
-                    superseded += 1;
-                    tracing::info!(old_id = %old_id, verdict = %j.verdict, "auto_extract superseded a stale observation");
+        // The LLM judge — not a cosine threshold — decides the operation.
+        let op = match judge.judge(content, &old_content).await {
+            Ok(j) => MemoryOp::from_judgment(&j.verdict, j.confidence, CONF_FLOOR),
+            Err(e) => {
+                tracing::warn!(error = %e, "auto_extract: judge failed — treating as NOOP");
+                MemoryOp::Noop
+            }
+        };
+
+        if op.supersedes_old() {
+            let done = sqlx::query(
+                "UPDATE brain_observations SET observation_type = 'superseded', updated_at = NOW()
+                 WHERE id = $1 AND observation_type != 'superseded'",
+            )
+            .bind(old_id)
+            .execute(pool)
+            .await;
+            match done {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::info!(old_id = %old_id, op = op.as_str(), "auto_extract superseded a stale observation");
+                }
+                // Row already superseded by a concurrent op → downgrade to Noop.
+                Ok(_) => {
+                    ops.record(MemoryOp::Noop);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "auto_extract: supersede failed — treating as NOOP");
+                    ops.record(MemoryOp::Noop);
+                    continue;
                 }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "auto_extract: judge failed — leaving observation as-is");
-            }
         }
+        ops.record(op);
     }
-    superseded
+    ops
 }
 
 /// Build the extraction instruction for the client LLM. Asks for STRICT JSON so

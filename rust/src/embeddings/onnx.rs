@@ -21,12 +21,49 @@ use ort::session::builder::GraphOptimizationLevel;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// Embedding dimension (multilingual-e5-small uses 384-d vectors, same as BGE-small).
+/// Default embedding dimension (multilingual-e5-small: 384-d, same as BGE-small).
 pub const EMBEDDING_DIM: usize = 384;
+
+/// Runtime embedding dimension. Defaults to [`EMBEDDING_DIM`] but can be overridden
+/// with `CUBA_EMBEDDING_DIM` (Phase 5) to run a different model — e.g. bge-m3
+/// (1024-d) for stronger Spanish — without a recompile. The column type and the
+/// loaded ONNX model must agree with this value.
+pub fn embedding_dim() -> usize {
+    std::env::var("CUBA_EMBEDDING_DIM")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(EMBEDDING_DIM)
+}
+
+/// Query instruction prefix. E5 uses "query: "; bge-m3 uses none (set
+/// `CUBA_QUERY_PREFIX=""`). Kept model-agnostic so a model swap is config-only.
+fn query_prefix() -> String {
+    std::env::var("CUBA_QUERY_PREFIX").unwrap_or_else(|_| "query: ".to_string())
+}
+
+/// Passage instruction prefix. E5 uses "passage: "; bge-m3 uses none.
+fn passage_prefix() -> String {
+    std::env::var("CUBA_PASSAGE_PREFIX").unwrap_or_else(|_| "passage: ".to_string())
+}
+
+/// Pooling strategy over token embeddings: mean (E5, default) or CLS (bge-m3).
+/// Set `CUBA_POOLING=cls` for bge-m3.
+fn use_cls_pooling() -> bool {
+    std::env::var("CUBA_POOLING")
+        .map(|v| v.eq_ignore_ascii_case("cls"))
+        .unwrap_or(false)
+}
 
 /// Current embedding model identifier — stored alongside embeddings for versioning.
 /// Used by zafra::reembed to detect stale embeddings needing re-encoding.
+/// Overridable with `CUBA_EMBED_MODEL` so a bge-m3 corpus is tagged correctly.
 pub const CURRENT_MODEL: &str = "multilingual-e5-small";
+
+/// Runtime model tag (defaults to [`CURRENT_MODEL`]).
+pub fn current_model() -> String {
+    std::env::var("CUBA_EMBED_MODEL").unwrap_or_else(|_| CURRENT_MODEL.to_string())
+}
 
 /// Global embedding cache (LRU with TTL — FIX B6, V7).
 static CACHE: OnceLock<std::sync::Mutex<TtlLruCache<Vec<f32>>>> = OnceLock::new();
@@ -161,7 +198,7 @@ fn init_onnx_session(model_file: &std::path::Path, model_dir: &std::path::Path) 
 ///
 /// Returns 384-dimensional f32 vector.
 pub async fn embed(text: &str) -> Result<Vec<f32>> {
-    embed_with_prefix(text, "query: ").await
+    embed_with_prefix(text, &query_prefix()).await
 }
 
 /// Generate embedding for a PASSAGE (adds "passage: " prefix for E5 models).
@@ -172,7 +209,7 @@ pub async fn embed(text: &str) -> Result<Vec<f32>> {
 ///
 /// Returns 384-dimensional f32 vector.
 pub async fn embed_passage(text: &str) -> Result<Vec<f32>> {
-    embed_with_prefix(text, "passage: ").await
+    embed_with_prefix(text, &passage_prefix()).await
 }
 
 /// Embed passage with entity context prepended (Contextual Retrieval).
@@ -186,7 +223,7 @@ pub async fn embed_passage_contextual(
     entity_name: &str,
 ) -> Result<Vec<f32>> {
     let contextualized = format!("[{}:{}] {}", entity_type, entity_name, text);
-    embed_with_prefix(&contextualized, "passage: ").await
+    embed_with_prefix(&contextualized, &passage_prefix()).await
 }
 
 /// Internal: generate embedding with a given instruction prefix.
@@ -269,18 +306,30 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
     let attn_mask_tensor = ort::value::Tensor::from_array((shape.clone(), attn_mask.clone()))
         .context("failed to create attention_mask tensor")?;
 
-    let type_ids_tensor = ort::value::Tensor::from_array((shape, type_ids))
-        .context("failed to create token_type_ids tensor")?;
+    // Some models take token_type_ids (BERT-family, e5); others don't
+    // (XLM-RoBERTa / bge-m3). Passing an input the model doesn't declare makes
+    // ORT fail with "Invalid input name", so gate it on the model's own inputs.
+    let wants_token_type = session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids");
 
     // 3. Run inference — inputs! returns Vec, not Result
-    let inputs = ort::inputs! {
-        "input_ids" => input_ids_tensor,
-        "attention_mask" => attn_mask_tensor,
-        "token_type_ids" => type_ids_tensor,
-    };
-    let outputs = session
-        .run(inputs)
-        .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
+    let outputs = if wants_token_type {
+        let type_ids_tensor = ort::value::Tensor::from_array((shape, type_ids))
+            .context("failed to create token_type_ids tensor")?;
+        session.run(ort::inputs! {
+            "input_ids" => input_ids_tensor,
+            "attention_mask" => attn_mask_tensor,
+            "token_type_ids" => type_ids_tensor,
+        })
+    } else {
+        session.run(ort::inputs! {
+            "input_ids" => input_ids_tensor,
+            "attention_mask" => attn_mask_tensor,
+        })
+    }
+    .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
 
     // 4. Extract token embeddings (shape: [1, seq_len, 384])
     // ort outputs support index access; check non-empty first to avoid panic
@@ -291,34 +340,39 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
         .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("extract tensor: {e}"))?;
 
-    // Validate shape: [1, seq_len, EMBEDDING_DIM]
-    // Shape implements Deref<Target=[i64]>
-    if shape.len() != 3 || shape[2] as usize != EMBEDDING_DIM {
+    // Validate shape: [1, seq_len, dim] where dim is the runtime model dimension
+    // (384 for e5-small, 1024 for bge-m3). Shape implements Deref<Target=[i64]>.
+    let dim = embedding_dim();
+    if shape.len() != 3 || shape[2] as usize != dim {
         return Err(anyhow::anyhow!(
-            "unexpected output shape: {:?}, expected [1, {}, {}]",
+            "unexpected output shape: {:?}, expected [1, {}, {}] — check CUBA_EMBEDDING_DIM matches the loaded model",
             shape,
             seq_len,
-            EMBEDDING_DIM
+            dim
         ));
     }
 
-    // 5. Mean pooling with attention mask (parity with Python)
-    let mut sum_embedding = vec![0.0f32; EMBEDDING_DIM];
-    let mut sum_mask = 0.0f32;
-
-    for (t, &mask_raw) in attn_mask.iter().enumerate().take(seq_len) {
-        let mask_val = mask_raw as f32;
-        sum_mask += mask_val;
-        let offset = t * EMBEDDING_DIM;
-        for d in 0..EMBEDDING_DIM {
-            sum_embedding[d] += data[offset + d] * mask_val;
+    // 5. Pool token embeddings → sentence embedding.
+    //    - CLS pooling (bge-m3): take token 0's vector.
+    //    - Mean pooling (E5, default): attention-masked mean (parity with Python).
+    let mut sum_embedding = vec![0.0f32; dim];
+    if use_cls_pooling() {
+        sum_embedding.copy_from_slice(&data[0..dim]);
+    } else {
+        let mut sum_mask = 0.0f32;
+        for (t, &mask_raw) in attn_mask.iter().enumerate().take(seq_len) {
+            let mask_val = mask_raw as f32;
+            sum_mask += mask_val;
+            let offset = t * dim;
+            for d in 0..dim {
+                sum_embedding[d] += data[offset + d] * mask_val;
+            }
         }
-    }
-
-    // Avoid division by zero
-    let sum_mask = sum_mask.max(1e-9);
-    for v in sum_embedding.iter_mut() {
-        *v /= sum_mask;
+        // Avoid division by zero
+        let sum_mask = sum_mask.max(1e-9);
+        for v in sum_embedding.iter_mut() {
+            *v /= sum_mask;
+        }
     }
 
     // 6. L2 normalize
@@ -340,7 +394,8 @@ fn compute_onnx_embedding(text: &str) -> Result<Vec<f32>> {
 /// Produces consistent 384-d vectors from text content.
 /// NOT suitable for production — use ONNX model instead.
 fn compute_hash_embedding(text: &str) -> Result<Vec<f32>> {
-    let mut embedding = vec![0.0f32; EMBEDDING_DIM];
+    let dim = embedding_dim();
+    let mut embedding = vec![0.0f32; dim];
 
     let text_lower = text.to_lowercase();
     let words: Vec<&str> = text_lower.split_whitespace().collect();
@@ -349,7 +404,7 @@ fn compute_hash_embedding(text: &str) -> Result<Vec<f32>> {
         let hash = word
             .bytes()
             .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-        let idx = (hash as usize) % EMBEDDING_DIM;
+        let idx = (hash as usize) % dim;
         embedding[idx] += 1.0 / (1.0 + i as f32);
     }
 

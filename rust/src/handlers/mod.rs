@@ -30,6 +30,7 @@ pub mod puente;
 pub mod reflexion;
 pub mod remedio;
 pub mod sync;
+pub mod tools;
 pub mod vigia;
 pub mod zafra;
 
@@ -50,6 +51,8 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
             "cuba_alma" => alma::handle(pool, args).await,
             "cuba_cronica" => cronica::handle(pool, args).await,
             "cuba_faro" => faro::handle(pool, args).await,
+            "cuba_tools" => tools::handle_tools(pool, args).await,
+            "cuba_call" => tools::handle_call(pool, args).await,
             "cuba_forget" => forget::handle(pool, args).await,
             "cuba_hipotesis" => hipotesis::handle(pool, args).await,
             "cuba_puente" => puente::handle(pool, args).await,
@@ -100,4 +103,20 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
             "text": serde_json::to_string(&result)?
         }]
     }))
+}
+
+/// Whether `dispatch` has an arm for this tool.
+///
+/// Kept next to the dispatcher so a new tool added to one and forgotten in the
+/// other is caught by a test rather than by an agent at runtime.
+pub fn is_known_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "cuba_alma" | "cuba_cronica" | "cuba_faro" | "cuba_forget" | "cuba_hipotesis"
+            | "cuba_puente" | "cuba_reflexion" | "cuba_eco" | "cuba_alarma" | "cuba_remedio"
+            | "cuba_expediente" | "cuba_jornada" | "cuba_decreto" | "cuba_vigia" | "cuba_zafra"
+            | "cuba_contradiccion" | "cuba_centinela" | "cuba_calibrar" | "cuba_ingesta"
+            | "cuba_proyecto" | "cuba_pre_compact" | "cuba_sync" | "cuba_archivo"
+            | "cuba_pizarra" | "cuba_juez" | "cuba_tools" | "cuba_call"
+    )
 }

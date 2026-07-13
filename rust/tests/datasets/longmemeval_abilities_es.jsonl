@@ -1,0 +1,10 @@
+{"query": "decisión de arquitectura sobre FastAPI y el commit de la base de datos", "relevant_markers": ["FastAPI", "commit"], "ability": "information-extraction"}
+{"query": "qué lenguaje se usa por seguridad y rendimiento", "relevant_markers": ["Rust"], "ability": "information-extraction"}
+{"query": "modo de taladro con ciclos enlatados en la CNC", "relevant_markers": ["G81", "taladro"], "ability": "information-extraction"}
+{"query": "sistema de inventario con QR de Mapupita Web", "relevant_markers": ["inventario", "QR"], "ability": "multi-session"}
+{"query": "infraestructura y despliegue de Mapupita Web en producción", "relevant_markers": ["Mapupita", "prod"], "ability": "multi-session"}
+{"query": "validación web de los datos de la máquina", "relevant_markers": ["validación", "máquina"], "ability": "temporal-reasoning"}
+{"query": "cómo cuba-memorys refleja las observaciones en brain_facts", "relevant_markers": ["brain_facts"], "ability": "knowledge-update"}
+{"query": "independencia de GitHub con CI replicado en local", "relevant_markers": ["CI", "local"], "ability": "multi-session"}
+{"query": "receta de paella valenciana con azafrán y mariscos", "relevant_markers": [], "ability": "abstention", "abstain": true}
+{"query": "resultado del partido de fútbol de la copa del mundo 2014", "relevant_markers": [], "ability": "abstention", "abstain": true}

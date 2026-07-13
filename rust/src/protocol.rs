@@ -13,8 +13,17 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// MCP protocol timeout per handler request.
-const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+/// MCP protocol timeout per handler request. Default 30s; override with
+/// `CUBA_HANDLER_TIMEOUT_SECS` for long maintenance ops (e.g. a full bge-m3
+/// reembed of the corpus, which exceeds 30s).
+fn handler_timeout() -> Duration {
+    std::env::var("CUBA_HANDLER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30))
+}
 
 /// REM sleep interval (4 hours).
 const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
@@ -157,7 +166,7 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
         .map_err(|_| anyhow::anyhow!("outbound channel closed"))?;
 
     // 30s ceiling to match HANDLER_TIMEOUT — no judge call should hang the agent.
-    let response = match tokio::time::timeout(HANDLER_TIMEOUT, rx).await {
+    let response = match tokio::time::timeout(handler_timeout(), rx).await {
         Ok(Ok(v)) => v,
         Ok(Err(_)) => anyhow::bail!("sampling response channel dropped"),
         Err(_) => {
@@ -401,7 +410,7 @@ pub async fn run_mcp() -> Result<()> {
         in_flight.len()
     );
     let drain = async { while in_flight.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(HANDLER_TIMEOUT * 2, drain).await;
+    let _ = tokio::time::timeout(handler_timeout() * 2, drain).await;
 
     // Close the outbound channel by dropping the cached sender so the writer
     // task observes channel-empty and exits naturally.
@@ -455,9 +464,11 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
         }
         "ping" => Ok(serde_json::json!({})),
 
-        // Tool listing
+        // Tool listing. Honours CUBA_TOOL_PROFILE: all 25 schemas ride in the
+        // agent's context every session, and most are maintenance surfaces it
+        // never calls mid-task. Defaults to `full`, so nothing shrinks on upgrade.
         "tools/list" => Ok(serde_json::json!({
-            "tools": crate::constants::tool_definitions()
+            "tools": crate::constants::tools_for_profile()
         })),
 
         // V0.9: MCP Resources — read-only URI scheme cuba://
@@ -498,7 +509,7 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
 
             let outcome = tokio::select! {
                 result = tokio::time::timeout(
-                    HANDLER_TIMEOUT,
+                    handler_timeout(),
                     handlers::dispatch(pool, &tool_name, arguments),
                 ) => match result {
                     Ok(r) => r,

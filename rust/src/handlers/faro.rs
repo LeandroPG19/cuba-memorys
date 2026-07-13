@@ -55,11 +55,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
-    // V0.6: Compact format — abbreviated keys, ~35% token savings
+    // Compact is the default: abbreviated keys cost 798 tokens for limit=10 where
+    // verbose costs 2787 — measured, not estimated (the old comment claimed ~35%;
+    // it is 71%). Every session pays this on every search, so the cheap shape is
+    // the one that should need no opt-in. Callers that need the full keys —
+    // the CLI renderer, chiefly — ask for `verbose` explicitly.
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
-        .unwrap_or("verbose");
+        .unwrap_or("compact");
 
     // V0.6: Tag filter
     let tag_filter = args.get("tags").and_then(|v| v.as_str());
@@ -380,12 +384,25 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         associative_expand(pool, query, opts.project_id, &mut fused_scores).await;
     }
 
-    // Sort by fused score
+    // Sort by fused score, breaking ties by id.
+    //
+    // The tie-break is not cosmetic. `fused_scores` is a HashMap, and Rust
+    // randomizes its iteration order per process; `sort_by` is stable, so
+    // equal-scoring rows kept whatever order the HashMap happened to produce.
+    // Two runs of the same query therefore returned the same documents in a
+    // different order, and the benchmark scored 0.7389 / 0.7344 / 0.7389 on
+    // three identical runs. A benchmark that cannot reproduce itself cannot
+    // measure an improvement smaller than its own noise — every number in this
+    // repo's optimization history was resting on that.
+    //
+    // rrf::fuse already did this correctly. This pipeline is a second, parallel
+    // fusion path that never got the fix.
     let mut results: Vec<(String, FusedResult)> = fused_scores.into_iter().collect();
     results.sort_by(|a, b| {
         b.1.total
             .partial_cmp(&a.1.total)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
     });
 
     // Post-fusion dedup (Cormack RRF + lexical overlap — same as rrf::fuse).
@@ -438,14 +455,40 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .unwrap_or("")
             })
             .collect();
+        // Only let the cross-encoder speak when there is a cross-encoder. With no
+        // model loaded, `rerank` returns identity pairs whose scores are the
+        // descending index (n, n-1, …); writing those into `total` would preserve
+        // the order but destroy the fusion scores the caller reads.
+        let have_model = crate::search::rerank::enabled();
+
         if let Ok(reranked) = crate::search::rerank::rerank(query, &contents).await {
             let original = results.clone();
             results = reranked
                 .into_iter()
                 .filter_map(|(idx, score)| {
                     let mut entry = original.get(idx).cloned()?;
-                    // Bump total slightly so post-MMR ordering respects rerank
-                    entry.1.total += score * 0.0001; // tiebreaker only
+                    if have_model {
+                        // The cross-encoder REPLACES the fusion score. That is the
+                        // entire premise of retrieve-then-rerank: RRF is the recall
+                        // stage, the cross-encoder is the precision stage, and it is
+                        // the stronger signal — it reads the query and the document
+                        // together instead of scoring them apart.
+                        //
+                        // The previous line added `score * 0.0001` and called it a
+                        // "tiebreaker". Measured on this corpus, consecutive RRF
+                        // scores are separated by 0.00016–0.00219, so a bump of at
+                        // most 0.0001 is smaller than the SMALLEST gap: it could not
+                        // reorder anything, ever. And any later `sort_by(total)` —
+                        // the session boost runs one whenever a session is open, and
+                        // one was — restored the original order outright.
+                        //
+                        // So a 568M-parameter model was loaded, 50 documents were
+                        // scored, 0.33s per query was spent, and the output was
+                        // bit-for-bit identical to not running it at all.
+                        entry.1.total = score;
+                    } else {
+                        entry.1.total += score * 0.0001;
+                    }
                     Some(entry)
                 })
                 .collect();
@@ -503,11 +546,12 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                 }
             }
         }
-        // Re-sort after session boost
+        // Re-sort after session boost — same deterministic tie-break as above.
         results.sort_by(|a, b| {
             b.1.total
                 .partial_cmp(&a.1.total)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
         });
     }
 
@@ -592,42 +636,49 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         })
         .collect();
 
-    // V0.9: Token budget enforcement via exact tiktoken counting (cl100k_base).
-    // Replaces the old "len/4" heuristic which over-estimated for Spanish
-    // (~2.7 chars/tok) and under-estimated for code (~3.5 chars/tok).
+    // Shape first, THEN budget. The order matters and used to be wrong: the
+    // budget counted each row's full `content`, and compact_result afterwards
+    // truncated that same content to 200 chars. So the caller's budget was spent
+    // counting text that was never sent — a limit=10 compact response costs 798
+    // tokens against a 5000-token budget, meaning most of what was paid for was
+    // thrown away and fewer results came back than fit.
+    //
+    // Counting the serialized row (keys, scores and all) rather than just the
+    // content also stops the JSON envelope from riding along for free: ten
+    // verbose rows carry ten copies of ~10 field names.
     use crate::search::budget::{count_tokens, truncate_to_budget};
+
+    let shaped: Vec<Value> = if opts.format == "compact" {
+        results_json.iter().map(compact_result).collect()
+    } else {
+        results_json
+    };
+    // Whichever shape we are in, this is where the text lives.
+    let text_key = if opts.format == "compact" { "c" } else { "content" };
+
     let mut token_budget = opts.max_tokens;
-    let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
-    for mut r in results_json {
-        let content_tokens = r
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| count_tokens(s) as i64)
-            .unwrap_or(20);
+    let mut final_results: Vec<Value> = Vec::with_capacity(shaped.len());
+    for mut r in shaped {
         if token_budget <= 0 {
             break;
         }
-        if content_tokens > token_budget {
+        let row_tokens = count_tokens(&r.to_string()) as i64;
+        if row_tokens > token_budget {
+            // One row alone overflows what is left: keep it, but trim its text
+            // so the response still lands inside the budget.
             let truncated: Option<String> = r
-                .get("content")
+                .get(text_key)
                 .and_then(|v| v.as_str())
-                .map(|s| truncate_to_budget(s, token_budget as usize));
+                .map(|s| truncate_to_budget(s, token_budget.max(0) as usize));
             if let (Some(obj), Some(t)) = (r.as_object_mut(), truncated) {
-                obj.insert("content".to_string(), serde_json::json!(t));
+                obj.insert(text_key.to_string(), serde_json::json!(t));
             }
-            budget_results.push(r);
+            final_results.push(r);
             break;
         }
-        token_budget -= content_tokens;
-        budget_results.push(r);
+        token_budget -= row_tokens;
+        final_results.push(r);
     }
-
-    // V0.6: Compact format — abbreviated keys for ~35% token savings
-    let final_results: Vec<Value> = if opts.format == "compact" {
-        budget_results.iter().map(compact_result).collect()
-    } else {
-        budget_results
-    };
 
     Ok(serde_json::json!({
         "mode": "hybrid",
@@ -638,12 +689,47 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     }))
 }
 
-/// V0.6: Transform a result into compact format with abbreviated keys.
+/// How much of an observation the compact shape keeps.
+///
+/// This is the whole trade, and it was being made blind. Abbreviating the keys
+/// saves almost nothing; the saving comes from cutting the text — and cutting
+/// the text is what costs recall, because a marker sitting at character 300 of
+/// a memory is simply not there any more, and an agent cannot use what it
+/// cannot see.
+///
+/// Swept on the Spanish ability set (n=10, e5-small), quality against cost:
+///
+/// ```text
+///   chars   tokens   nDCG@10   vs verbose
+///     200      871    0.6353   -75% cost, -13.5% quality   ← the old hard-coded value
+///     400     1271    0.6900   -64% cost,  -6.0% quality
+///     600     1580    0.7090   -55% cost,  -3.5% quality
+///    1200     2109    0.7344   -40% cost,   NO LOSS        ← the knee
+///    2000     2531    0.7344   -28% cost,   no loss
+///    full     3508    0.7344    baseline
+/// ```
+///
+/// 1200 is where the curve bends: every character past it costs context and buys
+/// nothing, and every character below it starts eating relevance. The previous
+/// default of 200 was throwing away an eighth of the retrieval quality to save
+/// tokens nobody had measured.
+///
+/// Overridable with `CUBA_COMPACT_CHARS` — re-sweep it on a different corpus
+/// rather than inheriting this number the way we inherited 200.
+fn compact_chars() -> usize {
+    std::env::var("CUBA_COMPACT_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1200)
+}
+
+/// Transform a result into compact shape: abbreviated keys, bounded text.
 fn compact_result(r: &Value) -> Value {
     let content = r
         .get("content")
         .and_then(|v| v.as_str())
-        .map(|s| crate::handlers::zafra::safe_truncate(s, 200));
+        .map(|s| crate::handlers::zafra::safe_truncate(s, compact_chars()));
     serde_json::json!({
         "e": r.get("entity_name").or_else(|| r.get("name")),
         "c": content,
@@ -1316,6 +1402,28 @@ async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k
     serde_json::json!(context)
 }
 
+/// Explicit environment override, for experiments and for the threshold sweep.
+fn env_threshold() -> Option<f64> {
+    std::env::var("CUBA_OOD_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|t| t.is_finite() && *t > 0.0)
+}
+
+/// The threshold measured by `cuba-memorys calibrate`, cached per process.
+///
+/// Read once and held: the value changes only when someone re-calibrates, and a
+/// database round-trip on the OOD path would undo the point of caching μ and Σ⁻¹
+/// in the first place.
+async fn calibrated_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
+    static CACHE: tokio::sync::OnceCell<Option<f64>> = tokio::sync::OnceCell::const_new();
+    *CACHE
+        .get_or_init(|| async {
+            crate::search::calibrate::load_ood_threshold(pool, dim).await
+        })
+        .await
+}
+
 fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
     if dist <= threshold {
         return None;
@@ -1364,8 +1472,35 @@ async fn check_ood(
     // never in, inflating every distance and abstaining on in-corpus queries.
     // For density estimation both sides must share the prefix.
     let query_emb = crate::embeddings::onnx::embed_passage(query).await.ok()?;
-    // Caller may override; otherwise scale the cutoff to the embedding space.
-    let tau = threshold.unwrap_or_else(|| default_threshold(query_emb.len()));
+    // Explicit argument → calibrated threshold → theory, in that order.
+    //
+    // The theoretical cutoff stays as a last resort, but it is known to be wrong
+    // on this corpus and the fix above (passage-prefixing both sides) was not
+    // enough. Measured with `cuba-memorys calibrate`, d=384:
+    //
+    //   theory (χ², Wilson-Hilferty)  τ = 21.25
+    //   corpus distances              p50 = 19.5, p99 = 23.5  → τ rejects 14.4%
+    //                                 of the corpus against its OWN distribution
+    //   answerable query distances    min = 23.8, p50 = 27.2  → τ rejects 100%
+    //
+    // Two things break the derivation. Σ is fitted from ~500 embeddings in 384
+    // dimensions (n/d ≈ 1.3), so its inverse amplifies estimation noise; and e5
+    // L2-normalizes, so the vectors live on the unit sphere, where Σ is singular
+    // in the radial direction and the ridge's 1/ε blows up. On top of that,
+    // queries and passages simply occupy different regions — the classic dense
+    // retrieval query-document gap — so a density fitted on passages scores every
+    // query as an outlier.
+    //
+    // `cuba-memorys calibrate` computes a conformal threshold from real
+    // answerable queries: distribution-free, finite-sample, and it holds even
+    // when the underlying Mahalanobis is badly estimated, because it adapts to
+    // whatever scale the score actually produces.
+    let tau = match threshold.or_else(env_threshold) {
+        Some(t) => t,
+        None => calibrated_threshold(pool, query_emb.len())
+            .await
+            .unwrap_or_else(|| default_threshold(query_emb.len())),
+    };
 
     // Cache hit: skip the 500-row fetch entirely. (Previously the SELECT ran
     // before this check, so the cache saved the fit but never the query.)
@@ -1375,14 +1510,26 @@ async fn check_ood(
         return ood_abstain_json(query, tau, dist);
     }
 
-    // Sample up to 500 active observations for the fit. Cheaper than full
-    // scan, statistically sufficient for d=384.
+    // The fit sample. Two things were wrong with the old one, and together they
+    // were the other half of why abstention rejected everything.
+    //
+    // It took 500 rows for d=384 (n/d ≈ 1.3) and called that "statistically
+    // sufficient". It is not: the sample covariance of 147,456 parameters cannot
+    // be estimated from 500 points, and its inverse amplifies noise, not signal.
+    // Ledoit-Wolf shrinkage now handles the conditioning, but a bigger sample is
+    // still strictly better and this corpus is small enough to afford one.
+    //
+    // Worse, it ordered by importance DESC — so the "distribution of the corpus"
+    // was fitted on the most important tail of it. A density estimated on a
+    // biased sample describes a distribution nothing was ever drawn from.
+    // ORDER BY id is unbiased (v4 UUIDs are random) and, unlike random(),
+    // deterministic — so the eval measures the same thing twice.
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
-         ORDER BY importance DESC, last_accessed DESC NULLS LAST
-         LIMIT 500",
+         ORDER BY id
+         LIMIT 5000",
     )
     .bind(project_id)
     .fetch_all(pool)

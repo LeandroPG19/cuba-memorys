@@ -74,12 +74,45 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 /// 2. Force `SET timezone TO 'UTC'` for exponential decay + REM consistency (FIX R-004).
 /// 3. Probe pgvector extension and configure ef_search if present.
 pub async fn init_schema(pool: &PgPool) -> Result<()> {
-    MIGRATOR
-        .run(pool)
-        .await
-        .context("failed to run sqlx migrations")?;
+    // Bug 0.7: when the app runs as a NON-superuser (NOSUPERUSER, no CREATE on
+    // schema public), it must NOT run migrations — DDL is a deploy-time task for
+    // an admin role (cuba). `CUBA_SKIP_MIGRATIONS=1` skips the migrator and just
+    // asserts the schema was already migrated, so RLS/audit stay enforced at
+    // runtime without granting the app DDL privileges.
+    let skip = std::env::var("CUBA_SKIP_MIGRATIONS")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false);
 
-    tracing::info!("sqlx migrations applied");
+    if skip {
+        // Read-only sanity check: the schema must already be present. Fail loudly
+        // (never silently) if an admin has not applied migrations first.
+        let applied: Option<(i64,)> = sqlx::query_as(
+            "SELECT MAX(version) FROM _sqlx_migrations WHERE success = TRUE",
+        )
+        .fetch_optional(pool)
+        .await
+        .context(
+            "CUBA_SKIP_MIGRATIONS is set but _sqlx_migrations is unreadable — \
+             run migrations once as an admin role before starting the app",
+        )?;
+        match applied.map(|(v,)| v) {
+            Some(v) => tracing::warn!(
+                latest_migration = v,
+                "CUBA_SKIP_MIGRATIONS active — skipping migrator (non-superuser runtime)"
+            ),
+            None => anyhow::bail!(
+                "CUBA_SKIP_MIGRATIONS is set but no migrations are applied — \
+                 initialize the database with an admin role first"
+            ),
+        }
+    } else {
+        MIGRATOR
+            .run(pool)
+            .await
+            .context("failed to run sqlx migrations")?;
+
+        tracing::info!("sqlx migrations applied");
+    }
 
     // FIX R-004: Force UTC timezone for exponential decay + REM consistency
     sqlx::query("SET timezone TO 'UTC'")

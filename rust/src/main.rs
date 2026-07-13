@@ -43,16 +43,79 @@ async fn main() {
         .init();
 
     // Subcommand dispatch. `eval` runs the read-only retrieval benchmark and
-    // exits; anything else falls through to the MCP stdio server. Kept before
-    // the server setup so eval never touches stdout's protocol channel.
+    // `doctor` the read-only health check; both exit without ever reaching the
+    // MCP server. Anything else falls through to the stdio server. Kept before
+    // the server setup so no subcommand touches stdout's protocol channel.
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) == Some("eval") {
-        if let Err(e) = cuba_memorys::eval::run_cli(&argv[2..]).await {
-            tracing::error!(error = %format!("{e:#}"), "eval failed");
-            eprintln!("eval error: {e:#}");
-            std::process::exit(1);
+    match argv.get(1).map(String::as_str) {
+        Some("eval") => {
+            if let Err(e) = cuba_memorys::eval::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "eval failed");
+                eprintln!("eval error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
+        Some("recall") => {
+            if let Err(e) = cuba_memorys::recall_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "recall failed");
+                eprintln!("recall error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("link") => {
+            if let Err(e) = cuba_memorys::link_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "link failed");
+                eprintln!("link error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("calibrate") => {
+            if let Err(e) = cuba_memorys::calibrate_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "calibrate failed");
+                eprintln!("calibrate error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("doctor") => {
+            if let Err(e) = cuba_memorys::doctor::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "doctor failed");
+                eprintln!("doctor error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        // The human surface: query and write the brain without an LLM in between.
+        Some(cmd @ ("search" | "save" | "delete" | "export" | "dashboard")) => {
+            let rest = &argv[2..];
+            let result = match cmd {
+                "search" => cuba_memorys::cli::run_search(rest).await,
+                "save" => cuba_memorys::cli::run_save(rest).await,
+                "delete" => cuba_memorys::cli::run_delete(rest).await,
+                "dashboard" => cuba_memorys::dashboard::run_cli(rest).await,
+                _ => cuba_memorys::export::run_cli(rest).await,
+            };
+            if let Err(e) = result {
+                tracing::error!(error = %format!("{e:#}"), command = cmd, "command failed");
+                eprintln!("{cmd}: {e:#}");
+                std::process::exit(1);
+            }
+            drain_background_tasks().await;
+            return;
+        }
+        // Client wiring. Touches no database, so it runs even when the brain is down.
+        Some("setup") => {
+            if let Err(e) = cuba_memorys::setup_agent::run_cli(&argv[2..]) {
+                tracing::error!(error = %format!("{e:#}"), "setup failed");
+                eprintln!("setup: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
     }
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");

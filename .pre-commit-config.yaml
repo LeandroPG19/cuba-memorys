@@ -8,16 +8,3 @@ repos:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-
-  - repo: https://github.com/PyCQA/bandit
-    rev: 1.9.4
-    hooks:
-      - id: bandit
-        args: [-r, src/, -ll, --skip, B101]
-        pass_filenames: false
-
-  - repo: https://github.com/jendrikseipp/vulture
-    rev: v2.15
-    hooks:
-      - id: vulture
-        args: [src/cuba_memorys/, --min-confidence, "80"]

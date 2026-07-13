@@ -13,7 +13,7 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
 pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-// Below PRED_ERROR_UPDATE → create new observation
+                                         // Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
@@ -152,7 +152,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "limit": {"type": "integer", "description": "Max results (default 10, max 50)"},
                     "before": {"type": "string", "description": "ISO8601 datetime — return results created before this time"},
                     "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"},
-                    "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format: verbose (default, full data) or compact (abbreviated keys, ~35% fewer tokens)"},
+                    "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format. compact (DEFAULT): abbreviated keys — e=entity, c=content, t=type, i=importance, s=score. 71% fewer tokens (798 vs 2787 at limit=10, measured). verbose: full key names, only when you need every field."},
                     "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"},
                     "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Counted exactly via tiktoken cl100k_base."},
                     "diversify": {"type": "boolean", "description": "v0.9: post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},
@@ -489,4 +489,228 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
         "description": description,
         "inputSchema": input_schema
     })
+}
+
+/// The two tools that make progressive disclosure possible.
+///
+/// Declared apart from `tool_definitions()` because they are *about* the tool
+/// list, and because the `lean` profile always includes them — a lean profile
+/// without the means to reach the other tools would be an amputation, not an
+/// optimization.
+fn meta_tool_defs() -> Vec<Value> {
+    vec![
+        tool_def(
+            "cuba_tools",
+            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 25 tools; \
+             under CUBA_TOOL_PROFILE=lean only the everyday core is pre-loaded and the rest live here. \
+             Search by capability ('audit', 'decay', 'contradiction', 'session'), then call what you \
+             find with cuba_call. detail='names' is cheapest, 'full' returns the exact argument schema.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Filter by capability — matches tool names and descriptions. Omit to list everything."},
+                    "detail": {"type": "string", "enum": ["names", "summary", "full"], "description": "names: just the names. summary (default): name + description. full: the complete JSON Schema, which is what you need to call the tool correctly."}
+                }
+            }),
+        ),
+        tool_def(
+            "cuba_call",
+            "Invoke any cuba-memorys tool by name — including the ones not pre-loaded in this session. \
+             Discover them first with cuba_tools (use detail='full' to see the exact arguments). \
+             Goes through the same dispatcher as a direct call, so behaviour is identical.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "description": "Tool name, e.g. cuba_zafra"},
+                    "args": {"type": "object", "description": "The tool's own arguments, exactly as its schema declares them"}
+                },
+                "required": ["tool"]
+            }),
+        ),
+    ]
+}
+
+// ── Tool Profiles ────────────────────────────────────────────────
+//
+// All 25 schemas are injected into the agent's context on every session. That
+// is a real tax — in tokens, and in the model's ability to pick the right tool
+// when two dozen are on the table. Most of them (REM cycles, audit log, GDPR
+// erasure, Bayesian calibration) are maintenance surfaces an agent almost never
+// needs mid-task.
+//
+// `full` stays the default: no existing setup changes behaviour by upgrading.
+// The narrower profiles are opt-in via `CUBA_TOOL_PROFILE`.
+
+/// Day-to-day agent flow: search, write, relate, errors, sessions, decisions.
+const PROFILE_AGENT: [&str; 13] = [
+    "cuba_faro",
+    "cuba_cronica",
+    "cuba_alma",
+    "cuba_puente",
+    "cuba_alarma",
+    "cuba_remedio",
+    "cuba_expediente",
+    "cuba_jornada",
+    "cuba_decreto",
+    "cuba_ingesta",
+    "cuba_proyecto",
+    "cuba_pre_compact",
+    "cuba_pizarra",
+];
+
+/// Agent flow + the cognitive tools worth reaching for mid-task.
+const PROFILE_STANDARD_EXTRA: [&str; 6] = [
+    "cuba_eco",
+    "cuba_reflexion",
+    "cuba_hipotesis",
+    "cuba_contradiccion",
+    "cuba_centinela",
+    "cuba_calibrar",
+];
+
+/// The lean core: what an agent actually reaches for in a normal turn.
+///
+/// Everything else is one `cuba_tools` call away — not gone.
+const PROFILE_LEAN: [&str; 5] = [
+    "cuba_faro",       // search
+    "cuba_cronica",    // write
+    "cuba_expediente", // past errors — the anti-repetition guard
+    "cuba_jornada",    // session lifecycle
+    "cuba_alarma",     // report an error
+];
+
+/// Which tools this process exposes on `tools/list`, per `CUBA_TOOL_PROFILE`.
+pub fn tools_for_profile() -> Vec<Value> {
+    tools_for(&std::env::var("CUBA_TOOL_PROFILE").unwrap_or_else(|_| "full".to_string()))
+}
+
+/// Filter the tool set by profile name.
+///
+/// `full` (default, all 25) | `standard` (19) | `agent` (13) | `lean` (5 + the
+/// two meta-tools). An unknown value falls back to `full`: a typo in an env var
+/// must never silently hide tools.
+///
+/// `lean` is the one that matters. It is not a smaller server — every one of the
+/// 25 tools remains callable through `cuba_call`; they simply stop shipping their
+/// schemas into the context of a session that may never use them. That is the
+/// difference between removing a capability and deferring it.
+///
+/// Takes the profile as an argument rather than reading the environment, so the
+/// tests can exercise it without mutating process-global state under a parallel
+/// test runner.
+pub fn tools_for(profile: &str) -> Vec<Value> {
+    let all = tool_definitions();
+
+    let allowed: Vec<&str> = match profile.to_lowercase().as_str() {
+        "lean" => {
+            // Core + the means to reach everything else.
+            let mut out: Vec<Value> = all
+                .iter()
+                .filter(|t| {
+                    t.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| PROFILE_LEAN.contains(&n))
+                })
+                .cloned()
+                .collect();
+            out.extend(meta_tool_defs());
+            return out;
+        }
+        "agent" => PROFILE_AGENT.to_vec(),
+        "standard" => PROFILE_AGENT
+            .iter()
+            .chain(PROFILE_STANDARD_EXTRA.iter())
+            .copied()
+            .collect(),
+        _ => {
+            // Full: the 25, plus the meta-tools, which stay useful — an agent can
+            // still ask "what can you do?" without the profile being narrowed.
+            let mut out = all.clone();
+            out.extend(meta_tool_defs());
+            return out;
+        }
+    };
+
+    all.iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| allowed.contains(&n))
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    /// Guard against a rename silently dropping a tool from a profile.
+    #[test]
+    fn every_profiled_tool_actually_exists() {
+        let names: Vec<&str> = tool_definitions()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        for t in PROFILE_AGENT.iter().chain(PROFILE_STANDARD_EXTRA.iter()) {
+            assert!(
+                names.contains(t),
+                "el perfil nombra una tool inexistente: {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_hides_nothing() {
+        // The whole point: upgrading must not shrink anyone's toolset. `full`
+        // now also carries the two meta-tools, so it grows — never shrinks.
+        let full = tools_for("full");
+        assert_eq!(full.len(), tool_definitions().len() + 2);
+        for t in tool_definitions() {
+            let name = t.get("name").and_then(Value::as_str).unwrap();
+            assert!(
+                full.iter().any(|f| f.get("name").and_then(Value::as_str) == Some(name)),
+                "{name} desapareció del perfil full"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_profile_falls_back_to_full() {
+        let n = tools_for("full").len();
+        assert_eq!(tools_for("typo-de-dedo").len(), n);
+        assert_eq!(tools_for("").len(), n);
+    }
+
+    #[test]
+    fn lean_defers_tools_it_does_not_delete_them() {
+        let lean = tools_for("lean");
+        // 5 core + cuba_tools + cuba_call.
+        assert_eq!(lean.len(), PROFILE_LEAN.len() + 2);
+        let names: Vec<&str> = lean
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"cuba_tools"), "lean sin cuba_tools deja las demás inalcanzables");
+        assert!(names.contains(&"cuba_call"), "lean sin cuba_call deja las demás inalcanzables");
+        assert!(names.contains(&"cuba_faro"));
+    }
+
+    #[test]
+    fn narrow_profiles_are_strict_subsets() {
+        assert_eq!(tools_for("agent").len(), PROFILE_AGENT.len());
+        assert_eq!(
+            tools_for("standard").len(),
+            PROFILE_AGENT.len() + PROFILE_STANDARD_EXTRA.len()
+        );
+        // A narrow profile must never invent a tool that `full` does not have.
+        let full: Vec<String> = tools_for("full")
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        for t in tools_for("agent") {
+            let name = t.get("name").and_then(Value::as_str).unwrap_or_default();
+            assert!(full.contains(&name.to_string()), "{name} no está en full");
+        }
+    }
 }
