@@ -491,6 +491,45 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
     })
 }
 
+/// The two tools that make progressive disclosure possible.
+///
+/// Declared apart from `tool_definitions()` because they are *about* the tool
+/// list, and because the `lean` profile always includes them — a lean profile
+/// without the means to reach the other tools would be an amputation, not an
+/// optimization.
+fn meta_tool_defs() -> Vec<Value> {
+    vec![
+        tool_def(
+            "cuba_tools",
+            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 25 tools; \
+             under CUBA_TOOL_PROFILE=lean only the everyday core is pre-loaded and the rest live here. \
+             Search by capability ('audit', 'decay', 'contradiction', 'session'), then call what you \
+             find with cuba_call. detail='names' is cheapest, 'full' returns the exact argument schema.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Filter by capability — matches tool names and descriptions. Omit to list everything."},
+                    "detail": {"type": "string", "enum": ["names", "summary", "full"], "description": "names: just the names. summary (default): name + description. full: the complete JSON Schema, which is what you need to call the tool correctly."}
+                }
+            }),
+        ),
+        tool_def(
+            "cuba_call",
+            "Invoke any cuba-memorys tool by name — including the ones not pre-loaded in this session. \
+             Discover them first with cuba_tools (use detail='full' to see the exact arguments). \
+             Goes through the same dispatcher as a direct call, so behaviour is identical.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "description": "Tool name, e.g. cuba_zafra"},
+                    "args": {"type": "object", "description": "The tool's own arguments, exactly as its schema declares them"}
+                },
+                "required": ["tool"]
+            }),
+        ),
+    ]
+}
+
 // ── Tool Profiles ────────────────────────────────────────────────
 //
 // All 25 schemas are injected into the agent's context on every session. That
@@ -529,6 +568,17 @@ const PROFILE_STANDARD_EXTRA: [&str; 6] = [
     "cuba_calibrar",
 ];
 
+/// The lean core: what an agent actually reaches for in a normal turn.
+///
+/// Everything else is one `cuba_tools` call away — not gone.
+const PROFILE_LEAN: [&str; 5] = [
+    "cuba_faro",       // search
+    "cuba_cronica",    // write
+    "cuba_expediente", // past errors — the anti-repetition guard
+    "cuba_jornada",    // session lifecycle
+    "cuba_alarma",     // report an error
+];
+
 /// Which tools this process exposes on `tools/list`, per `CUBA_TOOL_PROFILE`.
 pub fn tools_for_profile() -> Vec<Value> {
     tools_for(&std::env::var("CUBA_TOOL_PROFILE").unwrap_or_else(|_| "full".to_string()))
@@ -536,8 +586,14 @@ pub fn tools_for_profile() -> Vec<Value> {
 
 /// Filter the tool set by profile name.
 ///
-/// `full` (default, all 25) | `standard` (19) | `agent` (13). An unknown value
-/// falls back to `full`: a typo in an env var must never silently hide tools.
+/// `full` (default, all 25) | `standard` (19) | `agent` (13) | `lean` (5 + the
+/// two meta-tools). An unknown value falls back to `full`: a typo in an env var
+/// must never silently hide tools.
+///
+/// `lean` is the one that matters. It is not a smaller server — every one of the
+/// 25 tools remains callable through `cuba_call`; they simply stop shipping their
+/// schemas into the context of a session that may never use them. That is the
+/// difference between removing a capability and deferring it.
 ///
 /// Takes the profile as an argument rather than reading the environment, so the
 /// tests can exercise it without mutating process-global state under a parallel
@@ -546,13 +602,33 @@ pub fn tools_for(profile: &str) -> Vec<Value> {
     let all = tool_definitions();
 
     let allowed: Vec<&str> = match profile.to_lowercase().as_str() {
+        "lean" => {
+            // Core + the means to reach everything else.
+            let mut out: Vec<Value> = all
+                .iter()
+                .filter(|t| {
+                    t.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| PROFILE_LEAN.contains(&n))
+                })
+                .cloned()
+                .collect();
+            out.extend(meta_tool_defs());
+            return out;
+        }
         "agent" => PROFILE_AGENT.to_vec(),
         "standard" => PROFILE_AGENT
             .iter()
             .chain(PROFILE_STANDARD_EXTRA.iter())
             .copied()
             .collect(),
-        _ => return all.clone(),
+        _ => {
+            // Full: the 25, plus the meta-tools, which stay useful — an agent can
+            // still ask "what can you do?" without the profile being narrowed.
+            let mut out = all.clone();
+            out.extend(meta_tool_defs());
+            return out;
+        }
     };
 
     all.iter()
@@ -586,14 +662,38 @@ mod profile_tests {
 
     #[test]
     fn the_default_hides_nothing() {
-        // The whole point: upgrading must not shrink anyone's toolset.
-        assert_eq!(tools_for("full").len(), tool_definitions().len());
+        // The whole point: upgrading must not shrink anyone's toolset. `full`
+        // now also carries the two meta-tools, so it grows — never shrinks.
+        let full = tools_for("full");
+        assert_eq!(full.len(), tool_definitions().len() + 2);
+        for t in tool_definitions() {
+            let name = t.get("name").and_then(Value::as_str).unwrap();
+            assert!(
+                full.iter().any(|f| f.get("name").and_then(Value::as_str) == Some(name)),
+                "{name} desapareció del perfil full"
+            );
+        }
     }
 
     #[test]
     fn an_unknown_profile_falls_back_to_full() {
-        assert_eq!(tools_for("typo-de-dedo").len(), tool_definitions().len());
-        assert_eq!(tools_for("").len(), tool_definitions().len());
+        let n = tools_for("full").len();
+        assert_eq!(tools_for("typo-de-dedo").len(), n);
+        assert_eq!(tools_for("").len(), n);
+    }
+
+    #[test]
+    fn lean_defers_tools_it_does_not_delete_them() {
+        let lean = tools_for("lean");
+        // 5 core + cuba_tools + cuba_call.
+        assert_eq!(lean.len(), PROFILE_LEAN.len() + 2);
+        let names: Vec<&str> = lean
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"cuba_tools"), "lean sin cuba_tools deja las demás inalcanzables");
+        assert!(names.contains(&"cuba_call"), "lean sin cuba_call deja las demás inalcanzables");
+        assert!(names.contains(&"cuba_faro"));
     }
 
     #[test]
