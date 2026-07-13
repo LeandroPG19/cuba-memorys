@@ -247,6 +247,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
                      check   audita las configs existentes: variables faltantes, rutas muertas,\n\
                              y divergencias entre clientes (el bug que mató el recall vectorial).\n\
                      print   imprime el bloque correcto para pegarlo donde haga falta.\n\
+                     hook    instala un SessionStart que inyecta la memoria automáticamente.\n\
                      claude  ~/.claude.json     mcp  ~/.mcp.json     cursor  ~/.cursor/mcp.json\n\n\
                      Sin --apply, solo muestra el plan. Con --apply, respalda el archivo y mergea."
                 );
@@ -257,6 +258,7 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 
     match target.as_deref() {
+        Some("hook") => run_hook(apply),
         Some("check") | None => run_check(),
         Some("print") => {
             println!(
@@ -296,4 +298,91 @@ mod tests {
         assert!(cuba_block(&without).is_none());
         assert!(cuba_block(&json!({})).is_none());
     }
+}
+
+// ---------------------------------------------------------------------------
+// hook — make the memory load itself
+// ---------------------------------------------------------------------------
+
+/// Install a `SessionStart` hook that injects the brain's context.
+///
+/// The CLAUDE.md in this setup already *asks* the agent to start every session
+/// with `cuba_faro`, and the same file lists forgetting to do it as anti-pattern
+/// AP2. Asking is the problem. A hook cannot forget.
+fn run_hook(apply: bool) -> Result<()> {
+    let exe = std::env::current_exe().context("no se pudo resolver la ruta del binario")?;
+    let path = home().join(".claude").join("settings.json");
+
+    // `--quiet` so a project with no memory prints nothing at all rather than a
+    // header over an empty result: an empty section injected into every session
+    // is pure cost.
+    let command = format!("{} recall --quiet", exe.display());
+    let hook = json!({
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": command }]
+    });
+
+    println!("Se añadiría a {} un hook SessionStart:\n", path.display());
+    println!("{}\n", serde_json::to_string_pretty(&hook)?);
+    println!("Inyecta la última sesión, los errores sin resolver y las decisiones ya tomadas");
+    println!("— unos 300 tokens — antes de que el agente escriba nada.\n");
+
+    if !apply {
+        println!("Esto fue un plan — no se tocó ningún archivo.");
+        println!("Para aplicarlo:  cuba-memorys setup hook --apply");
+        return Ok(());
+    }
+
+    let mut cfg = read_json(&path).unwrap_or_else(|| json!({}));
+    if !cfg.is_object() {
+        bail!("{} no contiene un objeto JSON en la raíz", path.display());
+    }
+
+    if path.exists() {
+        let backup = path.with_extension(format!(
+            "json.bak-{}",
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+        ));
+        std::fs::copy(&path, &backup)
+            .with_context(|| format!("no se pudo respaldar {}", path.display()))?;
+        println!("Backup: {}", backup.display());
+    }
+
+    let obj = cfg.as_object_mut().expect("checked above");
+    obj.entry("hooks").or_insert_with(|| json!({}));
+    let hooks = cfg["hooks"]
+        .as_object_mut()
+        .context("hooks no es un objeto")?;
+    hooks.entry("SessionStart").or_insert_with(|| json!([]));
+    let list = cfg["hooks"]["SessionStart"]
+        .as_array_mut()
+        .context("SessionStart no es una lista")?;
+
+    // Idempotent: re-running must not stack a second copy of the same hook.
+    let already = list.iter().any(|h| {
+        h.get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|inner| {
+                inner.iter().any(|i| {
+                    i.get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.contains("cuba-memorys") && c.contains("recall"))
+                })
+            })
+    });
+    if already {
+        println!("El hook ya estaba instalado — no se duplicó.");
+        return Ok(());
+    }
+
+    list.push(hook);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&cfg)?)
+        .with_context(|| format!("no se pudo escribir {}", path.display()))?;
+
+    println!("Instalado. La próxima sesión arrancará con la memoria ya cargada,");
+    println!("obedezca el modelo su CLAUDE.md o no.");
+    Ok(())
 }

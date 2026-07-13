@@ -20,6 +20,7 @@ pub mod link_cli;
 pub mod observability;
 pub mod project;
 pub mod protocol;
+pub mod recall_cli;
 pub mod search;
 pub mod session;
 pub mod setup;
