@@ -12,6 +12,26 @@ The fourth memory, and every optimization measured on a real corpus instead of
 assumed. Several long-standing features turned out not to work at all; they are
 fixed or cut, and the negative results are recorded rather than buried.
 
+### ⚠ Breaking — `cuba_faro` now answers in `compact` by default
+
+The default response shape changed from `verbose` to `compact`: abbreviated keys
+(`e` entity, `c` content, `t` type, `i` importance, `s` score) and no per-branch
+score breakdown. It costs **40% fewer tokens at identical nDCG** — the truncation
+point was swept and set at its measured knee — and an agent reasoning over
+memories does not need `bm25_score` to do it.
+
+**If you parse the response**, this breaks you. Pass `"format": "verbose"` to get
+the old shape back, unchanged:
+
+```json
+{ "query": "...", "format": "verbose" }
+```
+
+Agents reading the JSON are fine — the tool description documents the short keys.
+Scripts and tests that index `entity_name` / `content` / `*_score` are not, and
+must ask for `verbose`. Both shapes are now pinned by an integration test, so
+neither can drift again.
+
 ### Added
 
 - **Procedural memory** — `cuba_receta` (migration `0033`): how things are *done*

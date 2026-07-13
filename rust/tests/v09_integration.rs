@@ -92,11 +92,18 @@ async fn test_v09_all() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // ── PR #6 Phase 3: BM25 third RRF signal ─────────────────────
+    //
+    // `format: "verbose"` explicitly. v0.11 made `compact` the default shape —
+    // abbreviated keys (e/c/t/i/s), 40% fewer tokens at identical nDCG — and
+    // compact deliberately omits the per-branch score breakdown, because an agent
+    // reasoning over memories has no use for bm25_score and pays tokens to carry
+    // it. This test is about the RETRIEVAL PIPELINE, not the default response
+    // shape, and the scores it asserts on only exist in verbose.
     println!("  [2/8] PR #6: BM25 hybrid as third RRF signal");
     let with_bm25 = cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_faro",
-        json!({"query": "Tokio runtime", "limit": 10, "enable_bm25": true}),
+        json!({"query": "Tokio runtime", "limit": 10, "enable_bm25": true, "format": "verbose"}),
     )
     .await
     .expect("faro with BM25");
@@ -106,6 +113,35 @@ async fn test_v09_all() {
         "results must include bm25_score field, got: {with_bm25_text}"
     );
     println!("  ✓ BM25 score present in fused results");
+
+    // ── v0.11: the two response shapes are a contract ────────────
+    //
+    // Changing the default from verbose to compact IS a breaking change for any
+    // caller that parses the keys — this very test broke on it, which is how the
+    // change got noticed at all. Both shapes are pinned here so the next person
+    // to touch the format has to do it deliberately.
+    println!("  [2b/8] v0.11: compact is the default shape, verbose is opt-in");
+    let default_shape = cuba_memorys::handlers::dispatch(
+        &pool,
+        "cuba_faro",
+        json!({"query": "Tokio runtime", "limit": 3}),
+    )
+    .await
+    .expect("faro default");
+    let default_text = extract_text(&default_shape);
+    assert!(
+        default_text.contains("\"c\":") && default_text.contains("\"e\":"),
+        "the DEFAULT must be compact (abbreviated keys), got: {default_text}"
+    );
+    assert!(
+        !default_text.contains("\"bm25_score\""),
+        "compact must NOT carry the per-branch scores — that is the whole saving"
+    );
+    assert!(
+        with_bm25_text.contains("\"entity_name\"") && with_bm25_text.contains("\"content\""),
+        "verbose must keep the full key names callers depend on"
+    );
+    println!("  ✓ compact by default, verbose on request — both shapes pinned");
 
     // ── PR #6 Phase 2: MMR diversification ───────────────────────
     println!("  [3/8] PR #6: MMR diversification");

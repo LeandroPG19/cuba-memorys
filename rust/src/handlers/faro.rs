@@ -774,6 +774,18 @@ fn compact_result(r: &Value) -> Value {
         .and_then(|v| v.as_str())
         .map(|s| crate::handlers::zafra::safe_truncate(s, compact_chars()));
     serde_json::json!({
+        // The id is NOT optional, however much it costs.
+        //
+        // compact shipped without one, and that made every result a dead end: an
+        // agent could read a memory but could not act on it. Deleting it needs the
+        // observation_id (cuba_cronica delete), reinforcing or correcting it needs
+        // the id (cuba_eco), citing it needs the id. A search result you cannot
+        // refer to is a search result you can only paraphrase.
+        //
+        // A UUID is ~36 chars — about 6% of a limit=10 response. That is the
+        // cheapest 6% in the whole payload: it is the difference between a memory
+        // the agent can use and a memory it can only look at.
+        "id": r.get("id"),
         "e": r.get("entity_name").or_else(|| r.get("name")),
         "c": content,
         "s": r.get("fused_score"),
