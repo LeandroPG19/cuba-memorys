@@ -159,28 +159,53 @@ pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
     let runtime_dim = crate::embeddings::onnx::embedding_dim();
-
-    let column: Option<String> = sqlx::query_scalar(
-        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute
-         WHERE attrelid = 'brain_observations'::regclass AND attname = 'embedding'",
-    )
-    .fetch_optional(pool)
-    .await
-    .context("reading the embedding column type")?;
-
-    // No column yet (fresh database, migrations about to run) — nothing to check.
-    let Some(column) = column else {
-        return Ok(());
-    };
-
     let expected = format!("vector({runtime_dim})");
-    if column != expected {
+
+    // EVERY vector column, asked of the catalog — not just brain_observations.
+    //
+    // Checking one table was not enough, and the gap bit immediately: migration
+    // 0033 added brain_procedures with its own vector column, the migration script
+    // (which also had a hand-written list) left it at 384-d while everything else
+    // moved to 1024, and this check waved it through because it only ever looked
+    // at brain_observations. Every INSERT into that table then failed with a
+    // dimension error, surfacing as an opaque "guardando el procedimiento".
+    //
+    // A table added tomorrow would be missed the same way. So: discover them.
+    let columns: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod)::text
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+           AND c.relkind = 'r'
+           AND a.attnum > 0 AND NOT a.attisdropped
+           AND format_type(a.atttypid, a.atttypmod) LIKE 'vector(%'
+         ORDER BY c.relname",
+    )
+    .fetch_all(pool)
+    .await
+    .context("reading the vector column types")?;
+
+    // No vector columns yet (fresh database, migrations about to run).
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let mismatched: Vec<String> = columns
+        .iter()
+        .filter(|(_, _, ty)| ty != &expected)
+        .map(|(t, c, ty)| format!("  {t}.{c} es {ty}"))
+        .collect();
+
+    if !mismatched.is_empty() {
         anyhow::bail!(
-            "el modelo de embeddings produce {expected} pero la columna es {column}.\n\
-             El servidor NO arranca así: cada búsqueda vectorial fallaría y la búsqueda \n\
-             híbrida devolvería resultados solo léxicos sin avisar de nada.\n\n\
+            "el modelo de embeddings produce {expected}, pero estas columnas no coinciden:\n\
+             {}\n\n\
+             El servidor NO arranca así: las escrituras a esas tablas fallarían, y la búsqueda\n\
+             vectorial devolvería resultados solo léxicos sin avisar de nada.\n\n\
              Si cambiaste de modelo:  scripts/migrate-embedding-dim.sh {runtime_dim}  y después  cuba-memorys reembed\n\
-             Si no querías cambiarlo: revisá CUBA_EMBEDDING_DIM y ONNX_MODEL_PATH en la config del cliente MCP."
+             Si no querías cambiarlo: revisá CUBA_EMBEDDING_DIM y ONNX_MODEL_PATH en la config del cliente MCP.",
+            mismatched.join("\n")
         );
     }
     Ok(())

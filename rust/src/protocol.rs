@@ -398,11 +398,24 @@ pub async fn run_mcp() -> Result<()> {
                     "id": req_id,
                     "result": v,
                 }),
-                Err(e) => serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": { "code": -32603, "message": e.to_string() }
-                }),
+                Err(e) => {
+                    // `{e:#}` — the whole anyhow chain, not just the outermost
+                    // context. `e.to_string()` prints only the top frame, so a
+                    // handler that wraps a database error with
+                    // .context("guardando el procedimiento") reported exactly
+                    // that string and nothing else: the agent saw a label, and
+                    // the cause (a pgvector dimension mismatch) never left the
+                    // process. An error message that hides why is barely an error
+                    // message, and this repo has spent enough time paying for
+                    // silent failures.
+                    let chain = format!("{e:#}");
+                    tracing::error!(error = %chain, "handler failed");
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": { "code": -32603, "message": chain }
+                    })
+                }
             };
             let _ = outbound().send(envelope);
         });
