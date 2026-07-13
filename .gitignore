@@ -53,3 +53,8 @@ Thumbs.db
 # Database backups (local only — never commit dumps)
 backups/
 !backups/.gitkeep
+
+# Internal working files — kept local, never published.
+# docs/ are work plans (not install docs); sandbox/ has local paths + brain refs.
+docs/
+sandbox/

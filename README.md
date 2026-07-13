@@ -13,16 +13,15 @@
 
 **Persistent memory for AI agents** — A Model Context Protocol (MCP) server that gives AI coding assistants long-term memory with a knowledge graph, neuroscience-inspired algorithms, and anti-hallucination grounding.
 
-25 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
+28 tools with Cuban soul. Sub-millisecond handlers. Mathematically rigorous.
 
 > [!IMPORTANT]
-> **v0.10.0** (2026-06-04) — Knowledge-graph memory plane on top of the v0.9 hybrid stack. **No breaking MCP API changes** for existing clients.
-> **Bitemporal facts** (`brain_facts`, migration `0018`): every `cuba_cronica` add/batch_add and `cuba_ingesta` ingest mirrors into valid-time rows — **on by default** (`CUBA_BITEMPORAL=0` to disable).
-> **Graph metrics** (`0022`–`0023`): `brain_node_metrics` (PageRank, energy, betweenness) + `brain_communities`; `cuba_zafra pagerank` / **`communities`** persist; `cuba_vigia` communities metric writes tags.
-> **Spreading activation** enriches `cuba_puente predict` alongside Adamic-Adar.
-> **Eval harness** (`rust/src/eval/`): nDCG@k, MRR, P@k, R@k over live `cuba_faro` hybrid (production path unchanged).
-> **Unified search view** (`v_unified_memory_search`, `0024`) joins facts via `brain_entities` — never `fact_id = node_id`.
-> **Shipped**: Cargo/npm `0.10.0`, PyPI `1.12.0`, GitHub Release `v0.10.0`, MCP Registry. QA: `./scripts/merge-gate.sh` (118 unit + smoke, E2E 73, MCP live 25).
+> **v0.11.0** — The four memories complete, and every optimization measured on a real corpus.
+> **Procedural memory** (`cuba_receta`, migration `0033`): how things are *done* here, ranked by the Wilson lower bound of their success rate — a recipe with a track record beats a lucky first try. `cuba-memorys skills <dir>` exports them as Claude Code Skills.
+> **Progressive tool loading** (`cuba_tools` + `cuba_call`, `CUBA_TOOL_PROFILE=lean`): the 25 tools stay callable while their schemas load on demand — 67% smaller catalogue, zero functions removed.
+> **Calibrated abstention** (`cuba-memorys calibrate`): Ledoit-Wolf covariance + a conformal threshold, so the OOD gate detects out-of-distribution queries without rejecting answerable ones. Persisted in `brain_calibration` (`0032`).
+> **RBAC** (`brain_principals` × `brain_grants`, `0031`), a `SessionStart` recall hook, NPMI graph auto-linking, and model-agnostic embeddings (e5-small → bge-m3, +21 nDCG on a real corpus).
+> **New subcommands**: `doctor` · `calibrate` · `recall` · `skills` · `reembed` · `link` · `setup`. Retrieval is deterministic (tie-broken fusion) and the eval reports token cost beside every quality metric.
 
 > [!NOTE]
 > **v0.9.x** — BM25 3-way RRF, MMR, OOD abstention, conformal PE gating, testing-effect decay, tiktoken budget, cross-encoder reranker (`CUBA_RERANKER_PATH`), `cuba_archivo` audit chain, `cuba_pizarra` working memory. **25 sqlx migrations** (`0001`–`0025`), bootstrap transparente para DBs legacy.

@@ -64,6 +64,15 @@ async fn main() {
             }
             return;
         }
+        Some("reembed") => {
+            if let Err(e) = cuba_memorys::reembed_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "reembed failed");
+                eprintln!("reembed error: {e:#}");
+                std::process::exit(1);
+            }
+            drain_background_tasks().await;
+            return;
+        }
         Some("recall") => {
             if let Err(e) = cuba_memorys::recall_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "recall failed");

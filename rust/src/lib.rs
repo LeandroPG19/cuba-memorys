@@ -21,6 +21,7 @@ pub mod observability;
 pub mod project;
 pub mod protocol;
 pub mod recall_cli;
+pub mod reembed_cli;
 pub mod search;
 pub mod session;
 pub mod setup;
