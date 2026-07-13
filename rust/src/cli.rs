@@ -72,9 +72,26 @@ pub async fn run_search(args: &[String]) -> Result<()> {
                 eprintln!(
                     "usage: cuba-memorys search <query> [--limit N] [--associative] [--json]\n\n\
                      Hybrid retrieval (text + vector + BM25, RRF-fused) — the same engine\n\
-                     cuba_faro serves to the agent."
+                     cuba_faro serves to the agent.\n\n\
+                     Nota: `--format` no existe aquí. El CLI renderiza para un humano;\n\
+                     el formato compact/verbose es cosa de la tool MCP."
                 );
                 return Ok(());
+            }
+            // A flag this command does not know is a mistake, not search text.
+            //
+            // It used to fall into the catch-all below and get CONCATENATED onto the
+            // query, so `search "postgres" --format verbose` searched, literally, for
+            // «postgres --format verbose» — and returned nothing, with no hint as to
+            // why. Same family as the `--batch 64` that reembed silently ignored: an
+            // argument the tool pretends not to see is an argument that lies about
+            // what it did.
+            flag if flag.starts_with("--") => {
+                bail!(
+                    "search: opción desconocida `{flag}`.\n\
+                     Si es parte de lo que buscás, entrecomillalo: search \"{flag}\".\n\
+                     Opciones válidas: --limit N · --associative · --json"
+                );
             }
             other => {
                 if query.is_none() {
@@ -192,6 +209,10 @@ pub async fn run_save(args: &[String]) -> Result<()> {
                 );
                 return Ok(());
             }
+            // A flag this command does not know is a mistake, not data. See run_search.
+            flag if flag.starts_with("--") => {
+                bail!("save: opción desconocida `{flag}` (probá --help)");
+            }
             other => positional.push(other.to_string()),
         }
     }
@@ -258,6 +279,10 @@ pub async fn run_delete(args: &[String]) -> Result<()> {
                      un archivo de undo con la fila completa, y después borra."
                 );
                 return Ok(());
+            }
+            // A flag this command does not know is a mistake, not data. See run_search.
+            flag if flag.starts_with("--") => {
+                bail!("delete: opción desconocida `{flag}` (probá --help)");
             }
             other => id = Some(other.to_string()),
         }

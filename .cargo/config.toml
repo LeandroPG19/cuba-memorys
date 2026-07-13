@@ -1,0 +1,11 @@
+# Build limits, so a compile does not take the machine down with it.
+#
+# The release profile uses `lto = "fat"` + `codegen-units = 1`. That is the right
+# choice for a shipped binary and the worst possible one for a laptop with 14 GB and
+# zram: fat LTO holds the whole crate graph in memory in a single unit, and with -j12
+# the peak can pass 8 GB. When RAM fills, zram starts compressing at 100% CPU and the
+# desktop stops responding — which reads as a freeze, not as slowness.
+#
+# 3 jobs leaves 9 cores for whoever else is using this computer.
+[build]
+jobs = 3

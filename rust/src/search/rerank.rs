@@ -1,34 +1,41 @@
 //! Cross-encoder reranker — bge-reranker-v2-m3 (Xiao 2023).
 //!
-//! # STATUS: measured, and it does NOT earn its place. Do not enable it.
+//! # It had never run. Not once.
 //!
-//! Tried properly in July 2026 and it bought nothing. Recording the result so
-//! nobody pays the cost of finding out twice:
+//! This file used to open with a confident postmortem: *"measured, and it does NOT
+//! earn its place"*, *"the eval did not move: nDCG@10 stayed at 0.7344, bit for
+//! bit"*. Every word of that was true and the conclusion drawn from it was wrong.
+//! The eval did not move because **the reranker never produced a single score**.
 //!
-//! - The integration was mathematically incapable of working. `faro` added
-//!   `cross_encoder_score * 0.0001` to the fusion score and called it a
-//!   "tiebreaker". Measured on this corpus, consecutive RRF scores are separated
-//!   by 0.00016–0.00219 — so a bump of at most 0.0001 is smaller than the
-//!   SMALLEST gap in the ranking. It could never reorder anything. On top of
-//!   that, the session boost runs a `sort_by(total)` whenever a session is open,
-//!   which restored the original order outright.
+//! Three bugs, in series, each one hiding the next:
 //!
-//! - Fixed that (the cross-encoder now REPLACES the fusion score, which is the
-//!   premise of retrieve-then-rerank) and the eval did not move: nDCG@10 stayed
-//!   at 0.7344, bit for bit, across every configuration tried.
+//! 1. **`faro` wrapped the call in `if let Ok(..)`.** Any error was dropped and the
+//!    RRF ranking returned untouched — the same silent-degradation pattern that let
+//!    the vector branch die unnoticed. This is why the output was "bit for bit
+//!    identical": not because reranking changed nothing, but because it never
+//!    happened.
 //!
-//! - It is not free. ~0.33 s per query on CPU, a 1.1 GB ONNX on disk, and the
-//!   quantized build published upstream does not even load (float16 scales in
-//!   DequantizeLinear, rejected by this ORT version). An isolated test of the
-//!   fp32 model hung, which suggests a deadlock in the spawn_blocking path that
-//!   nobody has hit because nobody has ever really run this.
+//! 2. **It fed the model `token_type_ids`.** bge-reranker-v2-m3 is **XLM-RoBERTa**,
+//!    which has no segment embeddings; `token_type_ids` is a BERT input. Every
+//!    inference threw `Invalid input name: token_type_ids`.
 //!
-//! The project rule is that a mechanism earns its place in the eval or gets cut.
-//! This one did not. The code stays — correctly wired now, so a future attempt
-//! starts from a working integration rather than a broken one — but it is off by
-//! default and should stay off until a larger dataset shows it winning. n=10 is
-//! too small to detect a small gain, and that is an honest limit of the evidence,
-//! not a reason to ship it on a hunch.
+//! 3. **It read the logits as `f32`.** The checkpoint emits `f16`. Once bug 2 was
+//!    fixed, this one surfaced immediately: `Cannot extract Tensor<f32> from
+//!    Tensor<f16>`.
+//!
+//! Two of these were architectural mismatches that would have been obvious from one
+//! error message. Nobody saw the error message, because bug 1 ate it.
+//!
+//! The earlier note also blamed `score * 0.0001` — a "tiebreaker" smaller than the
+//! smallest gap between consecutive RRF scores (0.00016–0.00219), which indeed could
+//! never reorder anything. That was real, and fixing it was necessary. It was just
+//! not sufficient, and fixing it while the inference still threw produced a "measured
+//! result" of exactly zero: the number you get from a model that is not running.
+//!
+//! The cross-encoder now REPLACES the fusion score, which is the premise of
+//! retrieve-then-rerank: RRF is the recall stage, the cross-encoder is the precision
+//! stage, and it is the stronger signal because it reads the query and the document
+//! together instead of scoring them apart.
 //!
 //! Real ONNX forward pass via the `ort` crate (already used by
 //! `embeddings::onnx`). Activated when `CUBA_RERANKER_PATH` points to a
@@ -238,29 +245,70 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
             .context("input_ids tensor")?;
         let attn_t = ort::value::Tensor::from_array((shape.clone(), attn))
             .context("attention_mask tensor")?;
-        let type_t =
-            ort::value::Tensor::from_array((shape, types)).context("token_type_ids tensor")?;
 
-        let outputs = session
-            .run(ort::inputs! {
+        // Ask the model what it takes. Do not assume.
+        //
+        // This passed `token_type_ids` unconditionally, and every inference failed
+        // with `Invalid input name: token_type_ids` — because bge-reranker-v2-m3 is
+        // **XLM-RoBERTa**, and RoBERTa has no segment embeddings. `token_type_ids` is
+        // a BERT input. The model was built for one architecture and fed the inputs of
+        // another, so it never produced a single score.
+        //
+        // The failure was invisible: `faro` wrapped the call in `if let Ok(..)`, so
+        // the error was dropped and the RRF ranking returned untouched. The model
+        // loaded, 0.33 s per query was spent on inference that always threw, and the
+        // output was bit-for-bit identical to not reranking at all — which is exactly
+        // what this project measured, and then published as "the cross-encoder
+        // reranker earns nothing". It could not earn anything. It never ran.
+        let wants_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
+
+        let outputs = if wants_type_ids {
+            let type_t =
+                ort::value::Tensor::from_array((shape, types)).context("token_type_ids tensor")?;
+            session.run(ort::inputs! {
                 "input_ids" => input_ids_t,
                 "attention_mask" => attn_t,
                 "token_type_ids" => type_t,
             })
-            .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
+        } else {
+            session.run(ort::inputs! {
+                "input_ids" => input_ids_t,
+                "attention_mask" => attn_t,
+            })
+        }
+        .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
 
         if outputs.len() == 0 {
             anyhow::bail!("reranker returned no outputs");
         }
-        let (out_shape, data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("extract logits: {e}"))?;
+
+        // The logits may come back as f32 or f16, depending on how the checkpoint was
+        // exported — and this asked only for f32, so a half-precision export failed
+        // with `Cannot extract Tensor<f32> from Tensor<f16>`. Behind an `if let Ok(..)`
+        // in the caller, that error vanished and the RRF order was returned untouched.
+        //
+        // Two independent bugs stood between this model and a single score: it was fed
+        // BERT's `token_type_ids` (it is XLM-RoBERTa and has none), and its output was
+        // read at the wrong precision. Both failed silently. Both had to be fixed
+        // before the reranker produced one number.
+        let (out_shape, data): (Vec<i64>, Vec<f32>) = match outputs[0].try_extract_tensor::<f32>() {
+            Ok((s, d)) => (s.to_vec(), d.to_vec()),
+            Err(_) => {
+                let (s, d) = outputs[0]
+                    .try_extract_tensor::<half::f16>()
+                    .map_err(|e| anyhow::anyhow!("extract logits (f32 and f16): {e}"))?;
+                (s.to_vec(), d.iter().map(|h| h.to_f32()).collect())
+            }
+        };
 
         // bge-reranker output: [batch=1, num_labels=1] → single logit.
         // Some checkpoints emit [1, 2] (binary classification) — pick label 1.
-        let logit = match out_shape.as_ref() {
-            &[_, 1] | &[1] => data[0],
-            &[_, 2] | &[2] => data[1] - data[0], // log-odds of relevance
+        let logit = match out_shape.as_slice() {
+            [_, 1] | [1] => data[0],
+            [_, 2] | [2] => data[1] - data[0], // log-odds of relevance
             _ => {
                 tracing::warn!(?out_shape, "unexpected reranker output shape — taking [0]");
                 data[0]

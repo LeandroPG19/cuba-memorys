@@ -4,8 +4,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use super::datasets::EvaluationSample;
-use super::metrics::{mrr, ndcg_at_k, precision_at_k, recall_at_k};
+use super::metrics::{
+    bootstrap_ci, minimum_detectable_effect, mrr, ndcg_at_k, precision_at_k, recall_at_k,
+};
 use crate::eval::metrics::{calculate_exact_match, calculate_f1_score};
+
+/// Bootstrap resamples. 2000 is the usual floor for a stable 95% interval and costs
+/// microseconds — the expensive part of this benchmark is the retrieval, not the
+/// statistics.
+const BOOTSTRAP_ITERATIONS: usize = 2000;
 
 /// What the eval actually switches on.
 ///
@@ -80,6 +87,24 @@ pub struct EvalReport {
     /// to answer anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub false_abstention_rate: Option<f64>,
+
+    /// 95% bootstrap interval around `ndcg_at_k`. A mean without one is a point
+    /// estimate that invites exactly the mistake this project already made twice:
+    /// reading a 3-point difference as a regression when the interval was ±12.
+    pub ndcg_ci95: (f64, f64),
+    /// The smallest true difference this sample size can detect (80% power, α=.05).
+    /// **Read this before believing any A/B on this dataset.** If a comparison shows
+    /// a gap smaller than this, the honest report is "could not measure", not "no
+    /// effect".
+    pub minimum_detectable_effect: f64,
+    /// nDCG per query, in dataset order. Kept so failures can be inspected instead
+    /// of averaged away — the mean tells you the score, never which query broke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub per_query_ndcg: Vec<f64>,
+    /// True when every scorable sample carried `relevant_ids`. When false, some
+    /// queries were graded by substring match — a laxer criterion whose numbers are
+    /// NOT comparable to id-scored ones.
+    pub scored_by_id: bool,
 }
 
 /// Retrieval quality for one LongMemEval ability (question type).
@@ -140,15 +165,27 @@ pub async fn run_faro_eval(
             per_ability: Vec::new(),
             abstention_accuracy: None,
             false_abstention_rate: None,
+            ndcg_ci95: (0.0, 0.0),
+            minimum_detectable_effect: f64::INFINITY,
+            per_query_ndcg: Vec::new(),
+            scored_by_id: false,
         });
     }
 
     let mut relevance_lists: Vec<Vec<bool>> = Vec::with_capacity(samples.len());
+    let mut ndcg_scores: Vec<f64> = Vec::with_capacity(samples.len());
     let mut ndcg_sum = 0.0;
     let mut prec_sum = 0.0;
     let mut recall_sum = 0.0;
     let mut em_sum = 0.0_f32;
     let mut f1_sum = 0.0_f32;
+
+    // Every scorable sample must carry ids, or the whole run is graded on the laxer
+    // substring criterion and its numbers cannot be compared with an id-scored run.
+    let all_by_id = samples
+        .iter()
+        .filter(|s| !s.abstain)
+        .all(|s| s.scored_by_id());
 
     // Cost, measured on the payload the agent would actually receive.
     let mut token_sum = 0usize;
@@ -188,11 +225,8 @@ pub async fn run_faro_eval(
         token_sum += cost;
         token_max = token_max.max(cost);
 
-        let ranked = extract_ranked_contents(&response);
-        let rels: Vec<bool> = ranked
-            .iter()
-            .map(|content| is_relevant(content, &sample.relevant_markers))
-            .collect();
+        let ranked = extract_ranked(&response);
+        let rels: Vec<bool> = ranked.iter().map(|hit| hit.is_relevant(sample)).collect();
 
         // Abstention samples are scored differently: success = the system returned
         // NOTHING for an out-of-domain query (OOD gate / empty result), rather than
@@ -223,10 +257,15 @@ pub async fn run_faro_eval(
             false_abstentions += 1;
         }
 
-        let total_rel = sample.relevant_markers.len().max(1);
-        let s_ndcg = ndcg_at_k(&rels, k);
+        // The denominator that makes both metrics mean what they say: how many
+        // documents in the CORPUS answer this query — including the ones retrieval
+        // missed. Grading against only what was found is how a system that recovered
+        // 2 of 5 relevant documents used to score a perfect nDCG.
+        let total_rel = sample.relevant_count();
+        let s_ndcg = ndcg_at_k(&rels, k, total_rel);
         let s_recall = recall_at_k(&rels, total_rel, k);
         ndcg_sum += s_ndcg;
+        ndcg_scores.push(s_ndcg);
         prec_sum += precision_at_k(&rels, k);
         recall_sum += s_recall;
         relevance_lists.push(rels);
@@ -239,7 +278,7 @@ pub async fn run_faro_eval(
         }
 
         if let Some(expected) = &sample.expected_answer {
-            let top = ranked.first().map(String::as_str).unwrap_or("");
+            let top = ranked.first().map(|h| h.content.as_str()).unwrap_or("");
             em_sum += calculate_exact_match(top, expected);
             f1_sum += calculate_f1_score(top, expected);
         }
@@ -268,6 +307,9 @@ pub async fn run_faro_eval(
             }
         })
         .collect();
+
+    let (_, lo, hi) = bootstrap_ci(&ndcg_scores, BOOTSTRAP_ITERATIONS, 0.95);
+    let mde = minimum_detectable_effect(&ndcg_scores);
 
     Ok(EvalReport {
         sample_count: n,
@@ -299,10 +341,38 @@ pub async fn run_faro_eval(
         } else {
             None
         },
+        ndcg_ci95: (lo, hi),
+        minimum_detectable_effect: mde,
+        per_query_ndcg: ndcg_scores,
+        scored_by_id: all_by_id,
     })
 }
 
-fn extract_ranked_contents(response: &Value) -> Vec<String> {
+/// One retrieved result: its id, and its text.
+struct Hit {
+    id: Option<String>,
+    content: String,
+}
+
+impl Hit {
+    /// Relevant iff the ground truth says so.
+    ///
+    /// By id when the dataset provides one — a result is the answer, or it is not.
+    /// By substring only for pre-v0.12 datasets, where "relevant" meant "mentions
+    /// the word", which counted every observation containing "postgres" as a correct
+    /// answer to a question about postgres, whether it answered anything or not.
+    fn is_relevant(&self, sample: &EvaluationSample) -> bool {
+        if sample.scored_by_id() {
+            return self
+                .id
+                .as_ref()
+                .is_some_and(|id| sample.relevant_ids.contains(id));
+        }
+        is_relevant_by_marker(&self.content, &sample.relevant_markers)
+    }
+}
+
+fn extract_ranked(response: &Value) -> Vec<Hit> {
     let mut out = Vec::new();
     let results = response
         .get("results")
@@ -310,17 +380,22 @@ fn extract_ranked_contents(response: &Value) -> Vec<String> {
         .and_then(|v| v.as_array());
     if let Some(arr) = results {
         for item in arr {
-            if let Some(c) = item.get("content").and_then(|v| v.as_str()) {
-                out.push(c.to_string());
-            } else if let Some(c) = item.get("c").and_then(|v| v.as_str()) {
-                out.push(c.to_string());
-            }
+            // `id` is present in both shapes. It was missing from compact until
+            // v0.11.1, which is precisely why compact could not be graded by id.
+            let id = item.get("id").and_then(|v| v.as_str()).map(str::to_string);
+            let content = item
+                .get("content")
+                .or_else(|| item.get("c"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            out.push(Hit { id, content });
         }
     }
     out
 }
 
-fn is_relevant(content: &str, markers: &[String]) -> bool {
+fn is_relevant_by_marker(content: &str, markers: &[String]) -> bool {
     let lower = content.to_lowercase();
     markers
         .iter()
@@ -330,13 +405,86 @@ fn is_relevant(content: &str, markers: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
+    fn sample_by_id(ids: &[&str]) -> EvaluationSample {
+        EvaluationSample {
+            query: "¿en qué lenguaje está escrito?".into(),
+            relevant_ids: ids.iter().map(|s| s.to_string()).collect(),
+            relevant_markers: vec![],
+            expected_answer: None,
+            ability: None,
+            abstain: false,
+        }
+    }
+
+    fn hit(id: &str, content: &str) -> Hit {
+        Hit {
+            id: Some(id.into()),
+            content: content.into(),
+        }
+    }
+
+    /// The whole point of v0.12: a document is the answer, or it is not. Mentioning
+    /// the topic is not answering the question.
     #[test]
-    fn relevance_marker_match() {
-        assert!(is_relevant(
-            "fallo de conexión postgres en docker",
-            &["postgres".into()]
-        ));
-        assert!(!is_relevant("todo ok", &["postgres".into()]));
+    fn id_scoring_does_not_reward_merely_being_on_topic() {
+        let sample = sample_by_id(&["the-answer"]);
+
+        assert!(hit("the-answer", "cuba-memorys está escrito en Rust").is_relevant(&sample));
+
+        // Same subject, same vocabulary, says nothing about the language. Under the
+        // old substring rule with marker "cuba-memorys" this scored as a hit.
+        assert!(
+            !hit("some-other-row", "cuba-memorys usa PostgreSQL con pgvector").is_relevant(&sample),
+            "an on-topic document that is not the answer must not count as relevant"
+        );
+    }
+
+    /// Legacy datasets still load, and still score the lax way — which is exactly
+    /// why the harness reports `scored_by_id: false` and warns.
+    #[test]
+    fn marker_scoring_survives_for_old_datasets() {
+        let legacy = EvaluationSample {
+            query: "error conexión postgres".into(),
+            relevant_ids: HashSet::new(),
+            relevant_markers: vec!["postgres".into()],
+            expected_answer: None,
+            ability: None,
+            abstain: false,
+        };
+        assert!(!legacy.scored_by_id());
+        assert!(hit("x", "fallo de conexión postgres en docker").is_relevant(&legacy));
+        assert!(!hit("y", "todo ok").is_relevant(&legacy));
+    }
+
+    /// Recall's denominator is the number of relevant DOCUMENTS, not of markers.
+    /// The old code used `relevant_markers.len()`, which is how R@10 = 3.125 — a
+    /// value a proportion cannot take — ended up in the README.
+    #[test]
+    fn relevant_count_is_the_size_of_the_ground_truth() {
+        assert_eq!(sample_by_id(&["a", "b", "c"]).relevant_count(), 3);
+    }
+
+    /// `id` must survive extraction from BOTH response shapes. Grading by id is
+    /// impossible otherwise — and compact carried no id at all until v0.11.1.
+    #[test]
+    fn ids_are_extracted_from_verbose_and_compact() {
+        let verbose = serde_json::json!({
+            "results": [{"id": "abc", "content": "texto largo", "entity_name": "e"}]
+        });
+        let compact = serde_json::json!({
+            "results": [{"id": "abc", "c": "texto largo", "e": "e"}]
+        });
+
+        for (shape, response) in [("verbose", verbose), ("compact", compact)] {
+            let hits = extract_ranked(&response);
+            assert_eq!(hits.len(), 1, "{shape}");
+            assert_eq!(hits[0].id.as_deref(), Some("abc"), "{shape}: falta el id");
+            assert_eq!(
+                hits[0].content, "texto largo",
+                "{shape}: falta el contenido"
+            );
+        }
     }
 }

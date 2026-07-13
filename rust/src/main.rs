@@ -47,6 +47,7 @@ OPERATIONS:
   reembed           recompute every embedding — after changing model or dimension
   calibrate         recompute the abstention threshold from the live corpus
   link              auto-link entities by NPMI co-occurrence
+  dedupe            find entities that are the same thing under different names
   skills <dir>      export procedures as Claude Code skills
   eval              retrieval benchmark (nDCG@10, MRR, recall) — read-only
   setup             wire this server into your MCP clients; `setup check` audits them
@@ -137,6 +138,14 @@ async fn main() {
             if let Err(e) = cuba_memorys::calibrate_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "calibrate failed");
                 eprintln!("calibrate error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("dedupe") => {
+            if let Err(e) = cuba_memorys::dedupe_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "dedupe failed");
+                eprintln!("dedupe error: {e:#}");
                 std::process::exit(1);
             }
             return;

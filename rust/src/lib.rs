@@ -10,6 +10,7 @@ pub mod constants;
 pub mod core;
 pub mod dashboard;
 pub mod db;
+pub mod dedupe_cli;
 pub mod doctor;
 pub mod embeddings;
 pub mod eval;

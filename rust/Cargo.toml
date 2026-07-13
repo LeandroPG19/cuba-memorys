@@ -6,6 +6,7 @@ description = "Knowledge Graph MCP Server — 25 tools, sqlx-migrate, BM25/MMR/O
 license = "AGPL-3.0-only"
 
 [dependencies]
+half = "2"
 futures = "0.3"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -34,7 +35,7 @@ serde_json = "1"
 # IMPORTANT: =exact pin until ort 2.0.0 stable releases. Do NOT change.
 # tls-native-vendored: statically compiles OpenSSL from source — eliminates
 # system OpenSSL dependency that breaks ARM64 cross-compilation in CI.
-ort = { version = "=2.0.0-rc.12", features = ["load-dynamic", "tls-native-vendored"] }
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic", "tls-native-vendored", "half"] }
 tokenizers = "0.21"
 
 # Logging (structured, to stderr)
@@ -107,3 +108,17 @@ strip = true
 # CL-001: suppress unexpected_cfg warning for kani formal verification annotations
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+# Iteration profile: optimized enough to be representative, cheap enough not to
+# freeze the machine. `lto = "thin"` + 16 codegen units cuts peak build memory by
+# roughly 4x versus the release profile's fat LTO, at a small runtime cost.
+#
+# Use it for everything except measuring and shipping:
+#     cargo build --profile quick
+[profile.quick]
+inherits = "release"
+opt-level = 2
+lto = "thin"
+codegen-units = 16
+debug = false
+strip = true

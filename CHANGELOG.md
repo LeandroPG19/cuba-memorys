@@ -6,6 +6,68 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [Unreleased] — v0.12
+
+The benchmark could not measure what this project claimed to have measured, and the
+graph was quietly broken.
+
+### ⚠ Two published findings are withdrawn
+
+The evaluation had **ten queries**. At n=10 the 95% interval on nDCG is roughly
+±0.12, and the smallest detectable effect is ~0.25. Two conclusions this project
+published rested inside that noise and are hereby retracted:
+
+- ~~"Associative retrieval degrades all four metrics"~~ — the reported drop was
+  **−0.03**. That is a quarter of the error bar. **Not measured.**
+- ~~"The cross-encoder reranker earns nothing"~~ — with n=10, nothing smaller than
+  ~25 points was detectable. The honest statement is **"could not measure"**, not
+  "no effect".
+
+Both features remain off, but for lack of evidence, not because of it. They will be
+re-evaluated on the new benchmark.
+
+### Fixed — the benchmark itself
+
+- **Relevance was judged by substring match.** A result counted as correct if its
+  text merely *contained* a marker word, so every observation mentioning "postgres"
+  scored as a right answer to any question about postgres — whether it answered
+  anything or not. That measures keyword presence, not retrieval, and it biases the
+  whole benchmark toward the lexical branch and against the vector one. Ground truth
+  is now a set of observation **ids** per query (TREC-style qrels).
+- **nDCG normalized against what was RETRIEVED, not what EXISTS.** With 5 relevant
+  documents in the corpus and 2 found, the "ideal" ranking was taken to be those 2 —
+  so a system that missed 60% of the answer scored a **perfect 1.0**. The ideal is
+  now built from `min(total_relevant, k)`, so documents you failed to retrieve count
+  against you. This makes the numbers go **down**, which is the expected direction
+  when you stop grading on a curve you drew yourself.
+- **R@10 = 3.125 shipped in the README.** Recall is a proportion. The denominator
+  was the count of *marker strings*, not of relevant *documents*.
+- **Every metric now carries a bootstrap 95% interval** (Efron 1979, deterministic
+  resampling) and the run reports its **minimum detectable effect**. A benchmark that
+  cannot see a 5-point change should not be used to claim a 3-point regression.
+
+### Added
+
+- **`cuba-memorys dedupe`** — entities that are the same thing under different names.
+  `cuba_alma create` inserts with `ON CONFLICT (name)`: a different string is a
+  different entity, so one project fragments into `Mapupita-Web`, `Mapupitta-Web`
+  (typo), `Mapupita Web`, `mapupita`… On the live brain: **266 entities, 158 (59%)
+  with not a single relation** — for PageRank and multi-hop retrieval they do not
+  exist.
+
+  The infrastructure to fix this was already present and dead: `brain_entity_aliases`
+  has a schema, indexes, and a `resolve_entity()` that matches exactly and fuzzily.
+  Zero rows; nothing called the function. Merging now writes the old name there, so
+  nothing is lost.
+
+  **What decides a merge is not the embedding centroid.** That was the obvious idea
+  and it is wrong: `M-Codes Reference Guide` and `G-Codes Reference Guide` sit at
+  **0.811 cosine** between centroids. On a corpus about one domain, centroid
+  similarity measures the domain, not the entity — trusting a 0.80 threshold would
+  have merged two different CNC guides irreversibly. So `--apply` merges only what is
+  *provable* (identical after normalizing case and separators), and everything else
+  is shown, or judged one by one with `--judge`.
+
 ## [0.11.2] — 2026-07-13 (Cargo `0.11.2` · npm `0.11.2` · PyPI `1.13.2`)
 
 The anti-hallucination feature was hallucinating. Found by pointing the demo at it.

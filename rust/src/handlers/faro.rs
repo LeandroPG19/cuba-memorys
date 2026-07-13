@@ -469,6 +469,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     // V0.9.2: cross-encoder rerank pass. Reorders results in place; MMR
     // runs after this so diversification operates on the better-ranked
     // candidates. Identity fallback when reranker is not configured.
+    let mut reranker_failed = false;
     if opts.enable_rerank && results.len() > 1 {
         let contents: Vec<&str> = results
             .iter()
@@ -486,37 +487,49 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         // the order but destroy the fusion scores the caller reads.
         let have_model = crate::search::rerank::enabled();
 
-        if let Ok(reranked) = crate::search::rerank::rerank(query, &contents).await {
-            let original = results.clone();
-            results = reranked
-                .into_iter()
-                .filter_map(|(idx, score)| {
-                    let mut entry = original.get(idx).cloned()?;
-                    if have_model {
-                        // The cross-encoder REPLACES the fusion score. That is the
-                        // entire premise of retrieve-then-rerank: RRF is the recall
-                        // stage, the cross-encoder is the precision stage, and it is
-                        // the stronger signal — it reads the query and the document
-                        // together instead of scoring them apart.
-                        //
-                        // The previous line added `score * 0.0001` and called it a
-                        // "tiebreaker". Measured on this corpus, consecutive RRF
-                        // scores are separated by 0.00016–0.00219, so a bump of at
-                        // most 0.0001 is smaller than the SMALLEST gap: it could not
-                        // reorder anything, ever. And any later `sort_by(total)` —
-                        // the session boost runs one whenever a session is open, and
-                        // one was — restored the original order outright.
-                        //
-                        // So a 568M-parameter model was loaded, 50 documents were
-                        // scored, 0.33s per query was spent, and the output was
-                        // bit-for-bit identical to not running it at all.
-                        entry.1.total = score;
-                    } else {
-                        entry.1.total += score * 0.0001;
-                    }
-                    Some(entry)
-                })
-                .collect();
+        // A failing reranker used to be an `if let Ok(..)` — the error dropped, the
+        // ranking left untouched, and not one word said about it. That is the same
+        // bug the vector branch had, and it produced the same lie: the model loaded,
+        // 0.33 s per query was spent, and the output was bit-for-bit identical to not
+        // running it at all. Which is how this project concluded, and published, that
+        // "the cross-encoder reranker earns nothing" — a feature cannot earn anything
+        // when its results are thrown away.
+        match crate::search::rerank::rerank(query, &contents).await {
+            Ok(reranked) => {
+                let original = results.clone();
+                results = reranked
+                    .into_iter()
+                    .filter_map(|(idx, score)| {
+                        let mut entry = original.get(idx).cloned()?;
+                        if have_model {
+                            // The cross-encoder REPLACES the fusion score. That is the
+                            // entire premise of retrieve-then-rerank: RRF is the recall
+                            // stage, the cross-encoder is the precision stage, and it is
+                            // the stronger signal — it reads the query and the document
+                            // together instead of scoring them apart.
+                            //
+                            // An earlier version added `score * 0.0001` and called it a
+                            // "tiebreaker". Consecutive RRF scores on this corpus are
+                            // separated by 0.00016–0.00219, so a bump of at most 0.0001
+                            // is smaller than the SMALLEST gap: it could not reorder
+                            // anything, ever.
+                            entry.1.total = score;
+                        } else {
+                            entry.1.total += score * 0.0001;
+                        }
+                        Some(entry)
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "RERANK FAILED — el ranking se devuelve SIN reordenar. El modelo se \
+                     cargó y se gastó el tiempo de inferencia, pero sus scores se \
+                     descartaron: los resultados son los de RRF."
+                );
+                reranker_failed = true;
+            }
         }
     }
 
@@ -726,6 +739,20 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             "La búsqueda vectorial falló: estos resultados son SOLO léxicos y el recall \
              está degradado. Causa habitual: la dimensión del embedding no coincide con la \
              de la columna. Diagnosticá con `cuba-memorys doctor`."
+        );
+    }
+
+    // Same principle, and the same bug this feature had for its entire life: you asked
+    // for reranking, the cross-encoder threw on every pair, the error was swallowed,
+    // and you got the RRF order back looking exactly like a reranked one. Anyone
+    // measuring that would conclude the reranker changes nothing — and someone did,
+    // and wrote it in the README.
+    if reranker_failed {
+        response["reranker_degraded"] = serde_json::json!(true);
+        response["reranker_degraded_reason"] = serde_json::json!(
+            "Pediste rerank y el cross-encoder falló: estos resultados vienen SIN reordenar, \
+             tal cual los dejó RRF. Se pagó el tiempo de inferencia y no se aplicó nada. \
+             Mirá los logs (nivel ERROR) para la causa."
         );
     }
 
