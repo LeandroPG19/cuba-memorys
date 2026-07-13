@@ -302,8 +302,9 @@ fn truncate_for_prompt(s: &str) -> String {
 /// two observations contradict.
 pub fn redact_secrets(s: &str) -> String {
     /// Key names whose value is a secret, whatever the separator.
-    const SECRET_KEYS: [&str; 7] =
-        ["password", "passwd", "pwd", "token", "secret", "api_key", "apikey"];
+    const SECRET_KEYS: [&str; 7] = [
+        "password", "passwd", "pwd", "token", "secret", "api_key", "apikey",
+    ];
 
     fn names_a_secret(key: &str) -> bool {
         let key = key.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
@@ -363,9 +364,17 @@ pub fn redact_secrets(s: &str) -> String {
         }
 
         // Provider tokens and JWTs, by prefix.
-        let is_provider_token = ["sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA"]
-            .iter()
-            .any(|p| trimmed.starts_with(p))
+        let is_provider_token = [
+            "sk-",
+            "ghp_",
+            "gho_",
+            "github_pat_",
+            "xoxb-",
+            "xoxp-",
+            "AKIA",
+        ]
+        .iter()
+        .any(|p| trimmed.starts_with(p))
             && trimmed.len() > 12;
         let is_jwt = trimmed.starts_with("eyJ") && trimmed.matches('.').count() == 2;
         if is_provider_token || is_jwt {
@@ -493,14 +502,20 @@ mod tests {
         // has no business shipping a real one to a public repo.
         let dirty = "la app conecta a postgresql://cuba:hunter2-fake@127.0.0.1:5488/brain";
         let clean = redact_secrets(dirty);
-        assert!(!clean.contains("hunter2-fake"), "la contraseña salió al prompt: {clean}");
+        assert!(
+            !clean.contains("hunter2-fake"),
+            "la contraseña salió al prompt: {clean}"
+        );
         // The shape survives — the judge still sees "this is a Postgres URL".
         assert!(clean.contains("postgresql://cuba:***@127.0.0.1:5488/brain"));
     }
 
     #[test]
     fn provider_tokens_and_jwts_are_stripped() {
-        assert_eq!(redact_secrets("token ghp_abcdefghijklmnop fin"), "token *** fin");
+        assert_eq!(
+            redact_secrets("token ghp_abcdefghijklmnop fin"),
+            "token *** fin"
+        );
         assert_eq!(redact_secrets("bearer eyJhbG.eyJzdWI.SflKxw"), "bearer ***");
         assert!(!redact_secrets("key sk-ant-api03-XXXXXXXXXXXX").contains("sk-ant"));
         // A short word that merely starts with a prefix is not a token.
@@ -509,11 +524,17 @@ mod tests {
 
     #[test]
     fn key_value_secrets_are_stripped_but_the_key_stays() {
-        assert_eq!(redact_secrets("DISCORD_TOKEN=abc123xyz"), "DISCORD_TOKEN=***");
+        assert_eq!(
+            redact_secrets("DISCORD_TOKEN=abc123xyz"),
+            "DISCORD_TOKEN=***"
+        );
         // The value lives in the NEXT token — the shape every YAML snippet and
         // log line uses, and the one that leaked before this test existed.
         assert_eq!(redact_secrets("password: hunter2"), "password: ***");
-        assert_eq!(redact_secrets("api_key: sk-live-1234 fin"), "api_key: *** fin");
+        assert_eq!(
+            redact_secrets("api_key: sk-live-1234 fin"),
+            "api_key: *** fin"
+        );
         // Ordinary text with '=' or ':' is untouched.
         assert_eq!(redact_secrets("x=1 nota: todo bien"), "x=1 nota: todo bien");
         assert_eq!(redact_secrets("ratio 3:1 y listo"), "ratio 3:1 y listo");

@@ -281,17 +281,17 @@ pub async fn store_ood_threshold(
 /// simply about a different space, and using it would silently resurrect the
 /// abstain-on-everything bug.
 pub async fn load_ood_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
-    let row = sqlx::query(
-        "SELECT value, metadata FROM brain_calibration WHERE key = $1",
-    )
-    .bind(OOD_THRESHOLD_KEY)
-    .fetch_optional(pool)
-    .await
-    .ok()??;
+    let row = sqlx::query("SELECT value, metadata FROM brain_calibration WHERE key = $1")
+        .bind(OOD_THRESHOLD_KEY)
+        .fetch_optional(pool)
+        .await
+        .ok()??;
 
     let value: f64 = row.try_get("value").ok()?;
     let metadata: serde_json::Value = row.try_get("metadata").ok()?;
-    let stored_dim = metadata.get("embedding_dim").and_then(serde_json::Value::as_u64)? as usize;
+    let stored_dim = metadata
+        .get("embedding_dim")
+        .and_then(serde_json::Value::as_u64)? as usize;
 
     if stored_dim != dim {
         tracing::warn!(

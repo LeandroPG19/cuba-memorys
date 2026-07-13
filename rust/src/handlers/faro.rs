@@ -679,7 +679,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         results_json
     };
     // Whichever shape we are in, this is where the text lives.
-    let text_key = if opts.format == "compact" { "c" } else { "content" };
+    let text_key = if opts.format == "compact" {
+        "c"
+    } else {
+        "content"
+    };
 
     let mut token_budget = opts.max_tokens;
     let mut final_results: Vec<Value> = Vec::with_capacity(shaped.len());
@@ -1457,9 +1461,7 @@ fn env_threshold() -> Option<f64> {
 async fn calibrated_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
     static CACHE: tokio::sync::OnceCell<Option<f64>> = tokio::sync::OnceCell::const_new();
     *CACHE
-        .get_or_init(|| async {
-            crate::search::calibrate::load_ood_threshold(pool, dim).await
-        })
+        .get_or_init(|| async { crate::search::calibrate::load_ood_threshold(pool, dim).await })
         .await
 }
 

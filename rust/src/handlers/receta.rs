@@ -44,8 +44,7 @@ pub fn wilson_lower_bound(successes: i64, failures: i64) -> f64 {
     }
     let p = successes as f64 / n;
     let z2 = Z_95 * Z_95;
-    let numerator =
-        p + z2 / (2.0 * n) - Z_95 * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt();
+    let numerator = p + z2 / (2.0 * n) - Z_95 * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt();
     let denominator = 1.0 + z2 / n;
     (numerator / denominator).clamp(0.0, 1.0)
 }
@@ -144,7 +143,9 @@ async fn add(pool: &PgPool, args: &Value) -> Result<Value> {
     // Embed name + trigger: that is what a search for "how do I bring up the
     // services" has to match against. The steps are the payload, not the key.
     let embed_text = format!("{name}. {trigger}");
-    let embedding = crate::embeddings::onnx::embed_passage(&embed_text).await.ok();
+    let embedding = crate::embeddings::onnx::embed_passage(&embed_text)
+        .await
+        .ok();
     let model = crate::embeddings::onnx::current_model();
 
     let row = sqlx::query(
@@ -215,7 +216,11 @@ async fn search(pool: &PgPool, args: &Value) -> Result<Value> {
         .get("query")
         .and_then(Value::as_str)
         .context("falta 'query'")?;
-    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(5).clamp(1, 25);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(5)
+        .clamp(1, 25);
     let project_id = crate::project::current_project_id(pool).await?;
 
     let embedding = crate::embeddings::onnx::embed(query).await.ok();
@@ -316,7 +321,11 @@ async fn outcome(pool: &PgPool, args: &Value) -> Result<Value> {
 }
 
 async fn list(pool: &PgPool, args: &Value) -> Result<Value> {
-    let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(20).clamp(1, 100);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_i64)
+        .unwrap_or(20)
+        .clamp(1, 100);
     let project_id = crate::project::current_project_id(pool).await?;
 
     let rows = sqlx::query(
@@ -413,7 +422,10 @@ mod tests {
         // Same rate, more evidence → a tighter (higher) lower bound.
         let few = wilson_lower_bound(8, 2);
         let many = wilson_lower_bound(80, 20);
-        assert!(many > few, "más evidencia con la misma tasa debe subir: {many:.3} vs {few:.3}");
+        assert!(
+            many > few,
+            "más evidencia con la misma tasa debe subir: {many:.3} vs {few:.3}"
+        );
         // But never above the rate itself.
         assert!(many < 0.8);
     }

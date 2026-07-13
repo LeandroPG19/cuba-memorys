@@ -113,8 +113,12 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         let outcome: String = row.try_get("outcome").unwrap_or_default();
         let d: String = row.try_get("d").unwrap_or_default();
         let summary = crate::handlers::zafra::safe_truncate(&summary, 400);
-        push(&mut out, &mut spent, budget,
-            &format!("\n### Última sesión ({d}, {outcome})\n**{name}**\n{summary}\n"));
+        push(
+            &mut out,
+            &mut spent,
+            budget,
+            &format!("\n### Última sesión ({d}, {outcome})\n**{name}**\n{summary}\n"),
+        );
     }
 
     // 2. Unresolved errors — the ones an agent is about to repeat.
@@ -220,13 +224,21 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
             .iter()
             .filter_map(|r| r.try_get::<String, _>("name").ok())
             .collect();
-        push(&mut out, &mut spent, budget,
-            &format!("\n### Entidades de «{p}»\n{}\n", names.join(", ")));
+        push(
+            &mut out,
+            &mut spent,
+            budget,
+            &format!("\n### Entidades de «{p}»\n{}\n", names.join(", ")),
+        );
     }
 
-    push(&mut out, &mut spent, budget,
+    push(
+        &mut out,
+        &mut spent,
+        budget,
         "\n_Buscá más con `cuba_faro`. Antes de proponer un enfoque, consultá `cuba_expediente` \
-         con `proposed_action` para no repetir un error ya cometido._\n");
+         con `proposed_action` para no repetir un error ya cometido._\n",
+    );
 
     // Header only? Then there was nothing worth saying.
     if spent == 0 {

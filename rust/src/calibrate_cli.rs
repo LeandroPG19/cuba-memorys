@@ -113,11 +113,19 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     );
     println!();
 
-    println!("  umbral TEÓRICO (χ², Wilson-Hilferty) : {:.2}", report.theoretical_threshold);
+    println!(
+        "  umbral TEÓRICO (χ², Wilson-Hilferty) : {:.2}",
+        report.theoretical_threshold
+    );
     if let Some(c) = &report.corpus {
-        println!("\n  Distancias del CORPUS contra su propia distribución (n={}):", c.n);
-        println!("    min={:.1}  p50={:.1}  p90={:.1}  p95={:.1}  p99={:.1}  max={:.1}",
-                 c.min, c.p50, c.p90, c.p95, c.p99, c.max);
+        println!(
+            "\n  Distancias del CORPUS contra su propia distribución (n={}):",
+            c.n
+        );
+        println!(
+            "    min={:.1}  p50={:.1}  p90={:.1}  p95={:.1}  p99={:.1}  max={:.1}",
+            c.min, c.p50, c.p90, c.p95, c.p99, c.max
+        );
         println!(
             "    → el umbral teórico rechaza el {:.1}% del propio corpus (debería ser ~1%)",
             report.theoretical_rejects_corpus * 100.0
@@ -125,14 +133,19 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
     if let Some(q) = &report.queries {
         println!("\n  Distancias de las CONSULTAS respondibles (n={}):", q.n);
-        println!("    min={:.1}  p50={:.1}  p90={:.1}  p95={:.1}  p99={:.1}  max={:.1}",
-                 q.min, q.p50, q.p90, q.p95, q.p99, q.max);
+        println!(
+            "    min={:.1}  p50={:.1}  p90={:.1}  p95={:.1}  p99={:.1}  max={:.1}",
+            q.min, q.p50, q.p90, q.p95, q.p99, q.max
+        );
     }
 
     println!();
     match report.conformal_threshold {
         Some(t) => {
-            println!("  umbral CONFORMAL (α={:.2})           : {:.2}", report.alpha, t);
+            println!(
+                "  umbral CONFORMAL (α={:.2})           : {:.2}",
+                report.alpha, t
+            );
             println!(
                 "\n  Garantía: como mucho el {:.0}% de las consultas respondibles futuras\n  \
                  serán rechazadas por error — sin asumir gaussianidad ni una Σ bien estimada.",
@@ -143,7 +156,9 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                 println!("\n  Guardado en brain_calibration. El servidor ya lo usa.");
             } else {
                 println!("\n  Esto fue un diagnóstico — no se guardó nada.");
-                println!("  Para que el servidor lo use:  cuba-memorys calibrate --dataset ... --apply");
+                println!(
+                    "  Para que el servidor lo use:  cuba-memorys calibrate --dataset ... --apply"
+                );
             }
         }
         None => println!("  no se pudo calcular el umbral conformal (sin consultas)"),

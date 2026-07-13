@@ -41,7 +41,12 @@ fn safe_note_name(name: &str) -> String {
 
 /// YAML frontmatter is not markdown: a stray `"` or newline breaks the parse.
 fn yaml_escape(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " "))
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+    )
 }
 
 /// Observation text is free-form and *already contains* `[[wikilinks]]` — the
@@ -116,8 +121,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 }
 
 pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("no se pudo crear {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
 
     // --- entities ---
     let entities: Vec<Entity> = sqlx::query(
@@ -144,20 +148,19 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
     let by_id: HashMap<uuid::Uuid, &Entity> = entities.iter().map(|e| (e.id, e)).collect();
 
     // --- relations ---
-    let relations: Vec<Relation> = sqlx::query(
-        "SELECT from_entity, to_entity, relation_type, strength FROM brain_relations",
-    )
-    .fetch_all(pool)
-    .await
-    .context("reading relations")?
-    .iter()
-    .map(|r| Relation {
-        from: r.try_get("from_entity").unwrap_or_default(),
-        to: r.try_get("to_entity").unwrap_or_default(),
-        relation_type: r.try_get("relation_type").unwrap_or_default(),
-        strength: r.try_get("strength").unwrap_or(0.0),
-    })
-    .collect();
+    let relations: Vec<Relation> =
+        sqlx::query("SELECT from_entity, to_entity, relation_type, strength FROM brain_relations")
+            .fetch_all(pool)
+            .await
+            .context("reading relations")?
+            .iter()
+            .map(|r| Relation {
+                from: r.try_get("from_entity").unwrap_or_default(),
+                to: r.try_get("to_entity").unwrap_or_default(),
+                relation_type: r.try_get("relation_type").unwrap_or_default(),
+                strength: r.try_get("strength").unwrap_or(0.0),
+            })
+            .collect();
 
     // --- observations, grouped by entity ---
     let mut obs_by_entity: HashMap<uuid::Uuid, Vec<Observation>> = HashMap::new();
@@ -245,7 +248,10 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
             md.push_str("## Observaciones\n\n");
             let mut grouped: HashMap<&str, Vec<&Observation>> = HashMap::new();
             for o in obs {
-                grouped.entry(o.observation_type.as_str()).or_default().push(o);
+                grouped
+                    .entry(o.observation_type.as_str())
+                    .or_default()
+                    .push(o);
             }
             let mut kinds: Vec<&&str> = grouped.keys().collect();
             kinds.sort_unstable();
@@ -276,7 +282,9 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
         obs_rows.len()
     ));
     idx.push_str("Exportado read-only desde la base. Abrí la vista de grafo de Obsidian: las\n");
-    idx.push_str("aristas son las relaciones reales del knowledge graph, no wikilinks inventados.\n\n");
+    idx.push_str(
+        "aristas son las relaciones reales del knowledge graph, no wikilinks inventados.\n\n",
+    );
 
     idx.push_str("## Más centrales (por importancia)\n\n");
     for e in entities.iter().take(20) {
@@ -302,12 +310,17 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
         // finding they are.
         let mut groups: Vec<(usize, Vec<&str>)> = by_community.into_iter().collect();
         groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
-        let (real, isolated): (Vec<_>, Vec<_>) =
-            groups.into_iter().partition(|(_, m)| m.len() > 1);
+        let (real, isolated): (Vec<_>, Vec<_>) = groups.into_iter().partition(|(_, m)| m.len() > 1);
 
-        idx.push_str(&format!("\n## Comunidades ({} con más de una entidad)\n\n", real.len()));
+        idx.push_str(&format!(
+            "\n## Comunidades ({} con más de una entidad)\n\n",
+            real.len()
+        ));
         for (c, members) in &real {
-            idx.push_str(&format!("### Comunidad {c} ({} entidades)\n\n", members.len()));
+            idx.push_str(&format!(
+                "### Comunidad {c} ({} entidades)\n\n",
+                members.len()
+            ));
             for m in members.iter().take(12) {
                 idx.push_str(&format!("- [[{}]]\n", safe_note_name(m)));
             }

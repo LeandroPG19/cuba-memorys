@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::chunk::payload_hash;

@@ -30,7 +30,10 @@ impl<V: Clone> TtlLruCache<V> {
     /// Create new cache with configured max size and TTL.
     pub fn new() -> Self {
         Self {
-            inner: LruCache::new(NonZeroUsize::new(CACHE_MAX_ENTRIES).unwrap()),
+            inner: LruCache::new(
+                NonZeroUsize::new(CACHE_MAX_ENTRIES)
+                    .expect("CACHE_MAX_ENTRIES is a non-zero constant"),
+            ),
             ttl: Duration::from_secs(CACHE_TTL_SECS),
         }
     }
@@ -38,7 +41,9 @@ impl<V: Clone> TtlLruCache<V> {
     /// Create cache with custom capacity and TTL.
     pub fn with_config(max_entries: usize, ttl_secs: u64) -> Self {
         Self {
-            inner: LruCache::new(NonZeroUsize::new(max_entries.max(1)).unwrap()),
+            inner: LruCache::new(
+                NonZeroUsize::new(max_entries.max(1)).expect("max(1) cannot be zero"),
+            ),
             ttl: Duration::from_secs(ttl_secs),
         }
     }

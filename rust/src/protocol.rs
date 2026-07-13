@@ -30,8 +30,15 @@ const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
 
 // ── JSON-RPC Types ───────────────────────────────────────────────
 
+/// An inbound JSON-RPC envelope.
+///
+/// `jsonrpc` and `params` are never read directly — the dispatcher works from
+/// `method` and pulls arguments out of the raw `Value`. They are declared anyway
+/// because their presence is what makes serde REJECT a malformed envelope at the
+/// door: drop them and a request missing `jsonrpc` would deserialize happily and
+/// fail somewhere deeper, with a worse error. The fields are the validation.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[allow(dead_code)] // see above: these fields validate the shape, they are not read
 struct JsonRpcRequest {
     jsonrpc: String,
     id: Option<Value>,

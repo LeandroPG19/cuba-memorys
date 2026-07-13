@@ -88,13 +88,20 @@ impl Adwin {
         // Precompute prefix sums for O(1) mean queries
         let mut prefix = Vec::with_capacity(n + 1);
         prefix.push(0.0);
+        // Carry the running sum instead of re-reading the vector's tail: same
+        // result, no unwrap, and it does not depend on `prefix` being non-empty.
+        let mut running = 0.0;
         for &v in &self.window {
-            prefix.push(prefix.last().unwrap() + v);
+            running += v;
+            prefix.push(running);
         }
         let total = prefix[n];
 
         // `cut` is used to index multiple arrays + arithmetic; iterator form
         // would produce a less readable pattern, so we explicitly opt out.
+        // The loop index IS the quantity of interest — `cut` is the split point
+        // whose statistic we are testing, and both prefix[cut] and prefix[n]-prefix[cut]
+        // are read from it. An iterator would have to reconstruct the index anyway.
         #[allow(clippy::needless_range_loop)]
         for cut in 4..(n - 4) {
             let n0 = cut as f64;

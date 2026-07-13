@@ -623,11 +623,20 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             );
         } else {
             for chunk in raw.chunks_exact(rec_size) {
-                let id_bytes: [u8; 16] = chunk[..16].try_into().unwrap();
+                // chunks_exact(rec_size) yields slices of exactly rec_size, and
+                // rec_size > 16 is guaranteed by the length check above — so this
+                // slice is always 16 bytes. Stated as an expect() rather than an
+                // unwrap() because this parses a file from another machine, and an
+                // invariant that only lives in a maintainer's head is not one.
+                let id_bytes: [u8; 16] = chunk[..16]
+                    .try_into()
+                    .expect("chunks_exact guarantees rec_size > 16 bytes");
                 let id = Uuid::from_bytes(id_bytes);
                 let mut floats = Vec::with_capacity(dim);
                 for f_chunk in chunk[16..].chunks_exact(4) {
-                    let arr: [u8; 4] = f_chunk.try_into().unwrap();
+                    let arr: [u8; 4] = f_chunk
+                        .try_into()
+                        .expect("chunks_exact(4) yields exactly 4 bytes");
                     floats.push(f32::from_le_bytes(arr));
                 }
                 let v = pgvector::Vector::from(floats);

@@ -13,7 +13,7 @@ pub const DEDUP_THRESHOLD: f64 = 0.85;
 /// Prediction Error Gating thresholds (V5 — Vestige-inspired).
 pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
 pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-                                         // Below PRED_ERROR_UPDATE → create new observation
+// Below PRED_ERROR_UPDATE → create new observation
 
 /// Cache configuration.
 /// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
@@ -693,7 +693,8 @@ mod profile_tests {
         for t in tool_definitions() {
             let name = t.get("name").and_then(Value::as_str).unwrap();
             assert!(
-                full.iter().any(|f| f.get("name").and_then(Value::as_str) == Some(name)),
+                full.iter()
+                    .any(|f| f.get("name").and_then(Value::as_str) == Some(name)),
                 "{name} desapareció del perfil full"
             );
         }
@@ -715,8 +716,14 @@ mod profile_tests {
             .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str))
             .collect();
-        assert!(names.contains(&"cuba_tools"), "lean sin cuba_tools deja las demás inalcanzables");
-        assert!(names.contains(&"cuba_call"), "lean sin cuba_call deja las demás inalcanzables");
+        assert!(
+            names.contains(&"cuba_tools"),
+            "lean sin cuba_tools deja las demás inalcanzables"
+        );
+        assert!(
+            names.contains(&"cuba_call"),
+            "lean sin cuba_call deja las demás inalcanzables"
+        );
         assert!(names.contains(&"cuba_faro"));
     }
 

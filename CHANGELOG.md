@@ -6,6 +6,83 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.11.0] — 2026-07-13 (Cargo `0.11.0` · npm `0.11.0` · PyPI `1.13.0`)
+
+The fourth memory, and every optimization measured on a real corpus instead of
+assumed. Several long-standing features turned out not to work at all; they are
+fixed or cut, and the negative results are recorded rather than buried.
+
+### Added
+
+- **Procedural memory** — `cuba_receta` (migration `0033`): how things are *done*
+  here, not just what is true. Ranked by the **Wilson lower bound** of the success
+  rate, so a recipe with a track record beats a lucky first try (1-of-1 scores
+  0.21; 47-of-50 scores 0.84). Reinforced by outcome, not by access — the
+  ACT-R distinction between declarative and procedural memory. `cuba-memorys
+  skills <dir>` exports them as Claude Code Skills, which load lazily.
+- **Progressive tool loading** — `cuba_tools` + `cuba_call`, and
+  `CUBA_TOOL_PROFILE=lean`. The catalogue shrinks 67% (25,060 → 8,413 chars)
+  while **every tool stays callable**: schemas are deferred, not deleted.
+- **Calibrated abstention** — `cuba-memorys calibrate`. The OOD gate now detects
+  out-of-distribution queries (100%) without rejecting answerable ones (0% false
+  abstentions). Persisted in `brain_calibration` (`0032`).
+- **RBAC** — `brain_principals` × `brain_grants` (`0031`), enforced by a
+  RESTRICTIVE RLS policy. Zero regression: with no principals defined, nothing
+  is denied.
+- **New subcommands** — `doctor` (health check), `calibrate`, `recall` (session
+  context for a `SessionStart` hook), `skills`, `reembed`, `link`, `setup`,
+  `search` / `save` / `delete` / `export` / `dashboard`.
+- **Graph auto-linking** — `cuba-memorys link`, scored by normalized pointwise
+  mutual information so a ubiquitous entity earns no edges from being ubiquitous.
+- **Model-agnostic embeddings** — e5-small (384-d) or bge-m3 (1024-d) by config.
+  Measured on a real 1,443-observation corpus: **nDCG@10 0.682 → 0.894**.
+
+### Fixed
+
+- **Hybrid search could silently become lexical search.** A failing vector branch
+  was discarded by an `if let Ok(..)` — no log, no flag, no symptom. Now it logs
+  at ERROR, sets `degraded: true` in the response, and the server **refuses to
+  start** when the model's dimension disagrees with the column.
+- **`setup check` reported "all consistent" while a stale project-level
+  `.mcp.json` spawned 384-d servers against a 1024-d column.** It now audits
+  project configs too, and treats an absent `CUBA_EMBEDDING_DIM` as the 384-d
+  value it actually is — so it can disagree with one that sets 1024.
+- **Retrieval was not deterministic.** Fusion happened in a `HashMap` and sorted
+  by score with no tie-break; Rust randomizes iteration order per process, so
+  three identical eval runs scored 0.7389 / 0.7344 / 0.7389. Every optimization
+  number previously recorded rested on that. Now tie-broken by id: 5/5 identical.
+- **The token budget counted text it then threw away**, spending a 5,000-token
+  budget to return 798. Shape first, then budget. Compact truncation swept and
+  set at its measured knee (1200 chars): **40% fewer tokens, identical nDCG**.
+- **The OOD threshold rejected 100% of answerable queries.** The covariance was
+  fitted from 500 samples in 384 dimensions with a fixed ridge mislabelled
+  "Ledoit-Wolf". Now real Ledoit-Wolf shrinkage plus a conformal threshold.
+- **The eval panicked on an empty result list** (`relevances[..1]` on a
+  zero-length slice) — it never fired only because nothing ever abstained.
+- **The LLM judge shipped credentials to a third party.** Observation text is now
+  redacted (Postgres URLs, provider tokens, JWTs) and length-capped.
+- **`doctor` could not see a stale process** — Linux appends `" (deleted)"` to
+  the exe name, and the filter dropped exactly the processes it existed to find.
+- Zero `unwrap()` in production code; zero clippy warnings.
+
+### Changed
+
+- `cuba_faro` defaults to `compact` (40% cheaper, same quality).
+- The eval reports **token cost beside every quality metric**, and tracks false
+  abstentions — abstention accuracy alone is trivially maximized by answering
+  nothing.
+
+### Removed / not adopted
+
+- **The cross-encoder reranker does not earn its place.** Its integration added
+  `score × 0.0001` to fusion scores separated by 0.00016 — arithmetically
+  incapable of reordering anything. Fixed the wiring, measured it properly, and
+  it still bought nothing for 0.33 s/query and 1.1 GB. Off by default, with the
+  negative result documented in the module.
+- **Associative multi-hop retrieval degrades every metric** (nDCG 0.734 → 0.705,
+  MRR 0.833 → 0.660, recall 2.31 → 1.88). The previous "+10 points recall" claim
+  predates the determinism fix. Stays opt-in and off.
+
 ## [0.10.0] — 2026-06-04 (Cargo `0.10.0` · npm `0.10.0` · PyPI `1.12.0`)
 
 Knowledge-graph memory plane: bitemporal facts, graph metrics, retrieval benchmarks,

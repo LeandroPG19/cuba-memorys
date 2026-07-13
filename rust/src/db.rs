@@ -86,15 +86,14 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
     if skip {
         // Read-only sanity check: the schema must already be present. Fail loudly
         // (never silently) if an admin has not applied migrations first.
-        let applied: Option<(i64,)> = sqlx::query_as(
-            "SELECT MAX(version) FROM _sqlx_migrations WHERE success = TRUE",
-        )
-        .fetch_optional(pool)
-        .await
-        .context(
-            "CUBA_SKIP_MIGRATIONS is set but _sqlx_migrations is unreadable — \
+        let applied: Option<(i64,)> =
+            sqlx::query_as("SELECT MAX(version) FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_optional(pool)
+                .await
+                .context(
+                    "CUBA_SKIP_MIGRATIONS is set but _sqlx_migrations is unreadable — \
              run migrations once as an admin role before starting the app",
-        )?;
+                )?;
         match applied.map(|(v,)| v) {
             Some(v) => tracing::warn!(
                 latest_migration = v,

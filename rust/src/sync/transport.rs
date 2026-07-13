@@ -125,7 +125,11 @@ mod tests {
         t.put("chunks/ab/cd.json", b"hola").unwrap();
         assert!(t.exists("chunks/ab/cd.json"));
         assert_eq!(t.get("chunks/ab/cd.json").unwrap(), b"hola");
-        assert!(t.list("chunks").unwrap().contains(&"chunks/ab/cd.json".to_string()));
+        assert!(
+            t.list("chunks")
+                .unwrap()
+                .contains(&"chunks/ab/cd.json".to_string())
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

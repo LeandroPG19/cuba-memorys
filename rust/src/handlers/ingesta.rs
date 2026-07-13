@@ -118,7 +118,10 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
 /// The candidate is always ingested afterwards by the pipeline, so ADD and UPDATE
 /// both keep the new fact; the difference is whether the old one is superseded.
 /// Best-effort per item. Returns the operation breakdown.
-async fn resolve_conflicts(pool: &PgPool, items: &[Value]) -> crate::cognitive::memory_op::OpBreakdown {
+async fn resolve_conflicts(
+    pool: &PgPool,
+    items: &[Value],
+) -> crate::cognitive::memory_op::OpBreakdown {
     use crate::cognitive::memory_op::{MemoryOp, OpBreakdown};
 
     // Below the dup threshold (0.85, already blocked) but related enough to

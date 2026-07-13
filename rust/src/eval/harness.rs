@@ -107,7 +107,10 @@ impl BenchmarkHarness {
     }
 
     pub async fn run(&self, pool: &PgPool) -> Result<EvalReport> {
-        let cfg = EvalConfig { k: self.k, ..EvalConfig::default() };
+        let cfg = EvalConfig {
+            k: self.k,
+            ..EvalConfig::default()
+        };
         run_faro_eval(pool, &self.dataset, &cfg).await
     }
 }
@@ -201,7 +204,12 @@ pub async fn run_faro_eval(
                 abstain_correct += 1;
             }
             let e = per_ability
-                .entry(sample.ability.clone().unwrap_or_else(|| "abstention".into()))
+                .entry(
+                    sample
+                        .ability
+                        .clone()
+                        .unwrap_or_else(|| "abstention".into()),
+                )
                 .or_insert((0, 0.0, 0.0));
             e.0 += 1; // count only; ndcg/recall undefined for abstention
             continue;

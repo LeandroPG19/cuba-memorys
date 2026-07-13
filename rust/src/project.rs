@@ -75,10 +75,14 @@ pub async fn observation_in_scope(
     observation_id: Uuid,
     project_id: Option<Uuid>,
 ) -> Result<bool> {
-    if filter_disabled() || project_id.is_none() {
+    if filter_disabled() {
         return Ok(true);
     }
-    let pid = project_id.unwrap();
+    // let-else instead of is_none() + unwrap(): the compiler now enforces what a
+    // comment used to promise.
+    let Some(pid) = project_id else {
+        return Ok(true);
+    };
     let row: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM brain_observations
          WHERE id = $1 AND (project_id = $2 OR project_id IS NULL)

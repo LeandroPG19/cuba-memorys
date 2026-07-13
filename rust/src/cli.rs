@@ -21,12 +21,7 @@ use crate::handlers;
 /// Where undo files land before a destructive apply.
 fn undo_dir() -> std::path::PathBuf {
     std::env::var("CUBA_UNDO_DIR").map_or_else(
-        |_| {
-            dirs_home()
-                .join(".cache")
-                .join("cuba-memorys")
-                .join("undo")
-        },
+        |_| dirs_home().join(".cache").join("cuba-memorys").join("undo"),
         std::path::PathBuf::from,
     )
 }
@@ -140,7 +135,10 @@ pub async fn run_search(args: &[String]) -> Result<()> {
         // content; errors carry error_type + error_message + resolved. Reading
         // an error as an observation prints "?" and an empty body.
         let (head, body) = if kind == "error" {
-            let etype = r.get("error_type").and_then(Value::as_str).unwrap_or("error");
+            let etype = r
+                .get("error_type")
+                .and_then(Value::as_str)
+                .unwrap_or("error");
             let resolved = r.get("resolved").and_then(Value::as_bool).unwrap_or(false);
             let state = if resolved { "resuelto" } else { "SIN RESOLVER" };
             (

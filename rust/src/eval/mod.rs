@@ -40,7 +40,10 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             "--abstain" => cfg.abstain = true,
             "--rerank" => cfg.rerank = true,
             "--format" => {
-                cfg.format = it.next().cloned().context("--format needs verbose|compact")?
+                cfg.format = it
+                    .next()
+                    .cloned()
+                    .context("--format needs verbose|compact")?
             }
             "-h" | "--help" => {
                 eprintln!(

@@ -83,11 +83,7 @@ pub fn npmi(co: f64, count_a: f64, count_b: f64, total: f64) -> Option<f64> {
 /// Only proposes edges that do not already exist — auto-linking must never
 /// overwrite a relation a human or an agent asserted deliberately, and it never
 /// touches the type or strength of one that is already there.
-pub async fn candidates(
-    pool: &PgPool,
-    min_co: i64,
-    threshold: f64,
-) -> Result<Vec<Candidate>> {
+pub async fn candidates(pool: &PgPool, min_co: i64, threshold: f64) -> Result<Vec<Candidate>> {
     let rows = sqlx::query(
         "WITH entity_sessions AS (
              -- One row per (entity, session) it was written in.
@@ -215,7 +211,10 @@ mod tests {
         // raw count in the corpus — and yet the co-occurrence is fully explained
         // by b's frequency. Raw counting would wire b to everything.
         let score = npmi(10.0, 10.0, 100.0, 100.0).expect("finite");
-        assert!(score.abs() < 1e-9, "una entidad ubicua no debe ganar aristas: {score}");
+        assert!(
+            score.abs() < 1e-9,
+            "una entidad ubicua no debe ganar aristas: {score}"
+        );
     }
 
     #[test]

@@ -127,7 +127,11 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
         let imp: f64 = r.try_get("importance").unwrap_or(0.0);
         let n: i64 = r.try_get("n").unwrap_or(0);
         let deg: i64 = r.try_get("deg").unwrap_or(0);
-        let orphan = if deg == 0 { " <span class=tag-orphan>aislada</span>" } else { "" };
+        let orphan = if deg == 0 {
+            " <span class=tag-orphan>aislada</span>"
+        } else {
+            ""
+        };
         top_rows.push_str(&format!(
             "<tr><td>{}{orphan}</td><td class=muted>{}</td><td class=num>{imp:.3}</td>\
              <td class=num>{n}</td><td class=num>{deg}</td></tr>",
@@ -290,6 +294,9 @@ mod tests {
         let safe = esc(hostile);
         assert!(!safe.contains("<script>"));
         assert!(safe.contains("&lt;script&gt;"));
-        assert_eq!(esc(r#"a & b "c" 'd'"#), "a &amp; b &quot;c&quot; &#39;d&#39;");
+        assert_eq!(
+            esc(r#"a & b "c" 'd'"#),
+            "a &amp; b &quot;c&quot; &#39;d&#39;"
+        );
     }
 }

@@ -17,15 +17,21 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--threshold" => {
-                threshold = it.next().and_then(|s| s.parse().ok())
+                threshold = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
                     .context("--threshold needs a float in [-1,1], e.g. 0.3")?
             }
             "--min-sessions" => {
-                min_co = it.next().and_then(|s| s.parse().ok())
+                min_co = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
                     .context("--min-sessions needs an integer")?
             }
             "--show" => {
-                limit = it.next().and_then(|s| s.parse().ok())
+                limit = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
                     .context("--show needs an integer")?
             }
             "--apply" => apply = true,
@@ -45,7 +51,9 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
 
     let url = crate::setup::resolve_database_url().await;
-    let pool = crate::db::create_pool(&url).await.context("connecting to database")?;
+    let pool = crate::db::create_pool(&url)
+        .await
+        .context("connecting to database")?;
 
     let cands = autolink::candidates(&pool, min_co, threshold).await?;
     if cands.is_empty() {

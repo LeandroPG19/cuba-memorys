@@ -50,7 +50,9 @@ fn slug(name: &str) -> String {
 fn yaml_quote(s: &str) -> String {
     format!(
         "\"{}\"",
-        s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ")
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
     )
 }
 
@@ -218,7 +220,10 @@ mod tests {
 
     #[test]
     fn slugs_survive_real_names() {
-        assert_eq!(slug("Levantar el entorno de desarrollo"), "levantar-el-entorno-de-desarrollo");
+        assert_eq!(
+            slug("Levantar el entorno de desarrollo"),
+            "levantar-el-entorno-de-desarrollo"
+        );
         assert_eq!(slug("migrar a bge-m3 (1024-d)"), "migrar-a-bge-m3-1024-d");
         assert_eq!(slug("   "), "procedimiento");
         assert_eq!(slug("¿cómo?"), "c-mo");

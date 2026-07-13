@@ -58,7 +58,12 @@ pub struct Check {
 
 impl Check {
     fn ok(name: &str, detail: impl Into<String>) -> Self {
-        Self { name: name.into(), status: Status::Ok, detail: detail.into(), hint: None }
+        Self {
+            name: name.into(),
+            status: Status::Ok,
+            detail: detail.into(),
+            hint: None,
+        }
     }
     fn warn(name: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
         Self {
@@ -170,7 +175,12 @@ fn stale_processes() -> Vec<u32> {
 /// behind an opt-in flag, and it is not worth a dependency.
 fn latest_published_version() -> Option<String> {
     let out = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "5", "https://registry.npmjs.org/cuba-memorys/latest"])
+        .args([
+            "-fsSL",
+            "--max-time",
+            "5",
+            "https://registry.npmjs.org/cuba-memorys/latest",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -225,7 +235,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 ));
             }
         }
-        Err(e) => checks.push(Check::warn("extensions", format!("no se pudo leer: {e}"), "revisar permisos")),
+        Err(e) => checks.push(Check::warn(
+            "extensions",
+            format!("no se pudo leer: {e}"),
+            "revisar permisos",
+        )),
     }
 
     // --- Migrations ---------------------------------------------------------
@@ -246,7 +260,10 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                     "una migración quedó a medias: restaurá desde backup antes de seguir",
                 ));
             } else {
-                checks.push(Check::ok("migrations", format!("{total} aplicadas, ninguna dirty")));
+                checks.push(Check::ok(
+                    "migrations",
+                    format!("{total} aplicadas, ninguna dirty"),
+                ));
             }
         }
         Err(e) => checks.push(Check::fail(
@@ -276,7 +293,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 ));
             }
         }
-        Err(e) => checks.push(Check::warn("schema", format!("no se pudo contar: {e}"), "revisar permisos")),
+        Err(e) => checks.push(Check::warn(
+            "schema",
+            format!("no se pudo contar: {e}"),
+            "revisar permisos",
+        )),
     }
 
     // --- Bug #1: the OR-tsquery function (silent zero recall without it) -----
@@ -297,7 +318,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 ));
             }
         }
-        Err(e) => checks.push(Check::warn("recall/or_tsquery", format!("no verificable: {e}"), "revisar permisos")),
+        Err(e) => checks.push(Check::warn(
+            "recall/or_tsquery",
+            format!("no verificable: {e}"),
+            "revisar permisos",
+        )),
     }
 
     // --- Bug #2: the vector branch dies silently without a model ------------
@@ -343,7 +368,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 )),
             }
         }
-        Err(e) => checks.push(Check::warn("embedding_dim", format!("no verificable: {e}"), "revisar esquema")),
+        Err(e) => checks.push(Check::warn(
+            "embedding_dim",
+            format!("no verificable: {e}"),
+            "revisar esquema",
+        )),
     }
 
     // --- Coverage: observations with no vector are invisible to dense search -
@@ -397,7 +426,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 ));
             }
         }
-        Err(e) => checks.push(Check::warn("bitemporal", format!("no verificable: {e}"), "revisar esquema")),
+        Err(e) => checks.push(Check::warn(
+            "bitemporal",
+            format!("no verificable: {e}"),
+            "revisar esquema",
+        )),
     }
 
     // --- The decay anchor (without it, REM re-applies decay 10-80×) ---------
@@ -411,7 +444,10 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         Ok(row) => {
             let n: i64 = row.try_get(0).unwrap_or(0);
             if n > 0 {
-                checks.push(Check::ok("decay_anchor", "last_decayed_at presente (migración 0028)"));
+                checks.push(Check::ok(
+                    "decay_anchor",
+                    "last_decayed_at presente (migración 0028)",
+                ));
             } else {
                 checks.push(Check::fail(
                     "decay_anchor",
@@ -421,7 +457,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 ));
             }
         }
-        Err(e) => checks.push(Check::warn("decay_anchor", format!("no verificable: {e}"), "revisar esquema")),
+        Err(e) => checks.push(Check::warn(
+            "decay_anchor",
+            format!("no verificable: {e}"),
+            "revisar esquema",
+        )),
     }
 
     // --- Bug 0.7: superuser makes RLS and the audit log decorative ----------
@@ -470,7 +510,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 format!("{obs} observaciones · {ent} entidades · {facts} hechos · {size}"),
             ));
         }
-        Err(e) => checks.push(Check::warn("corpus", format!("no verificable: {e}"), "revisar esquema")),
+        Err(e) => checks.push(Check::warn(
+            "corpus",
+            format!("no verificable: {e}"),
+            "revisar esquema",
+        )),
     }
 
     // --- Isolated entities: unreachable by multi-hop and by PageRank --------
@@ -511,13 +555,19 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     // --- Live processes running yesterday's binary --------------------------
     let stale = stale_processes();
     if stale.is_empty() {
-        checks.push(Check::ok("binary_freshness", "ningún proceso MCP corre un binario obsoleto"));
+        checks.push(Check::ok(
+            "binary_freshness",
+            "ningún proceso MCP corre un binario obsoleto",
+        ));
     } else {
         let pids: Vec<String> = stale.iter().map(u32::to_string).collect();
         checks.push(Check::warn(
             "binary_freshness",
-            format!("{} proceso(s) MCP corren un binario más viejo que el de disco (pid {})",
-                    stale.len(), pids.join(", ")),
+            format!(
+                "{} proceso(s) MCP corren un binario más viejo que el de disco (pid {})",
+                stale.len(),
+                pids.join(", ")
+            ),
             "recompilaste pero el cliente MCP sigue sirviendo la imagen vieja en memoria: \
              reiniciá el cliente para que tome el binario nuevo",
         ));
@@ -640,7 +690,10 @@ mod tests {
             None => (std::path::PathBuf::from(raw), false),
         };
         assert!(deleted);
-        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("cuba-memorys"));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("cuba-memorys")
+        );
 
         // A live binary parses unchanged.
         let live = "/home/x/rust/target/release/cuba-memorys";

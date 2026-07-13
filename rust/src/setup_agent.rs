@@ -77,13 +77,11 @@ fn project_configs() -> Vec<(String, PathBuf)> {
                 }
             }
             for c in candidates {
-                if c.is_file()
-                    && read_json(&c).as_ref().and_then(cuba_block).is_some()
-                {
-                    let label = c
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .map_or_else(|| "proyecto".to_string(), |n| n.to_string_lossy().to_string());
+                if c.is_file() && read_json(&c).as_ref().and_then(cuba_block).is_some() {
+                    let label = c.parent().and_then(|p| p.file_name()).map_or_else(
+                        || "proyecto".to_string(),
+                        |n| n.to_string_lossy().to_string(),
+                    );
                     out.push((label, c));
                 }
             }
@@ -99,8 +97,12 @@ fn desired_config() -> Result<Value> {
     let exe = std::env::current_exe().context("no se pudo resolver la ruta del binario")?;
 
     let db = std::env::var("DATABASE_URL").unwrap_or_default();
-    let onnx = std::env::var("ONNX_MODEL_PATH")
-        .unwrap_or_else(|_| home().join(".cache/cuba-memorys/models").display().to_string());
+    let onnx = std::env::var("ONNX_MODEL_PATH").unwrap_or_else(|_| {
+        home()
+            .join(".cache/cuba-memorys/models")
+            .display()
+            .to_string()
+    });
     let ort = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| {
         home()
             .join(".cache/cuba-memorys/onnxruntime/libonnxruntime.so")
@@ -171,7 +173,9 @@ fn run_check() -> Result<()> {
         for key in REQUIRED_ENV {
             match env.and_then(|e| e.get(key)).and_then(Value::as_str) {
                 Some(v) if !v.is_empty() => {
-                    seen.entry(key.to_string()).or_default().insert(v.to_string());
+                    seen.entry(key.to_string())
+                        .or_default()
+                        .insert(v.to_string());
                     // A path that points nowhere is as bad as an absent one.
                     if key != "DATABASE_URL" && !Path::new(v).exists() {
                         println!("   PROBLEMA: {key} apunta a una ruta inexistente ({v})");
@@ -462,14 +466,20 @@ mod tests {
     #[test]
     fn the_config_carries_the_vars_whose_absence_is_silent() {
         let cfg = desired_config().expect("current_exe resolves under test");
-        let env = cfg.get("env").and_then(Value::as_object).expect("env block");
+        let env = cfg
+            .get("env")
+            .and_then(Value::as_object)
+            .expect("env block");
         for key in REQUIRED_ENV {
             assert!(env.contains_key(key), "falta {key} en el bloque generado");
         }
         // An absolute path: a client resolving `cuba-memorys` off $PATH is how
         // you silently run yesterday's binary.
         let command = cfg.get("command").and_then(Value::as_str).unwrap_or("");
-        assert!(Path::new(command).is_absolute(), "el command debe ser absoluto");
+        assert!(
+            Path::new(command).is_absolute(),
+            "el command debe ser absoluto"
+        );
     }
 
     /// The divergence that actually broke production, in test form.
@@ -488,7 +498,11 @@ mod tests {
         // Config B omits it — which is NOT the same as agreeing.
         seen.insert("384 (default)".to_string());
 
-        assert_eq!(seen.len(), 2, "una config sin la var diverge de una que la fija");
+        assert_eq!(
+            seen.len(),
+            2,
+            "una config sin la var diverge de una que la fija"
+        );
     }
 
     #[test]

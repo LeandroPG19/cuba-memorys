@@ -5,10 +5,10 @@
 //! - `ood` — Out-of-distribution detection via Mahalanobis (Lee NeurIPS 2018)
 //! - `budget` — exact token counting via tiktoken cl100k_base (replaces 4 chars/tok heuristic)
 
-pub mod calibrate;
 pub mod bm25;
 pub mod budget;
 pub mod cache;
+pub mod calibrate;
 pub mod confidence;
 pub mod mmr;
 pub mod ood;
