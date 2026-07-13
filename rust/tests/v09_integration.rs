@@ -272,6 +272,13 @@ async fn test_v09_all() {
     // The constant is private now, so the compiler forbids the mistake. This asserts
     // the behaviour anyway, because privacy stops the OUTSIDE and the bug was one
     // import away from coming back.
+    //
+    // The invariant is conditional, and precisely so: IF a vector was written, THEN
+    // its label must name the model that made it. Without a real ONNX model, cronica
+    // deliberately writes neither — a hash-fallback vector labelled as a real model
+    // would corrupt search far worse than a missing one. CI has no 570 MB model, so
+    // there is nothing to label there and nothing to assert; asserting anyway is how
+    // this test failed CI while passing locally.
     println!("  [9/9] v0.11: embeddings are tagged with the model that produced them");
     {
         let tag = unique("test-model-tag");
@@ -279,7 +286,7 @@ async fn test_v09_all() {
         // reads CUBA_EMBED_MODEL concurrently here.
         unsafe { std::env::set_var("CUBA_EMBED_MODEL", &tag) };
 
-        cuba_memorys::handlers::dispatch(
+        let added = cuba_memorys::handlers::dispatch(
             &pool,
             "cuba_cronica",
             json!({
@@ -292,27 +299,45 @@ async fn test_v09_all() {
         .await
         .expect("cronica add under a custom model tag");
 
-        // The embedding lands fire-and-forget.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let payload: serde_json::Value =
+            serde_json::from_str(&extract_text(&added)).expect("cronica add returns JSON");
+        let obs_id: Uuid = payload["id"]
+            .as_str()
+            .expect("a fresh observation gets an id (not deduplicated/reinforced)")
+            .parse()
+            .expect("that id is a uuid");
 
-        let tagged: Option<(String,)> = sqlx::query_as(
-            "SELECT embedding_model FROM brain_observations
-             WHERE embedding_model = $1 AND embedding IS NOT NULL LIMIT 1",
+        // The embedding lands fire-and-forget.
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+        let row: (Option<String>, bool) = sqlx::query_as(
+            "SELECT embedding_model, embedding IS NOT NULL FROM brain_observations WHERE id = $1",
         )
-        .bind(&tag)
-        .fetch_optional(&pool)
+        .bind(obs_id)
+        .fetch_one(&pool)
         .await
-        .expect("query the tag back");
+        .expect("read the row back");
 
         unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
 
-        assert!(
-            tagged.is_some(),
-            "an observation embedded while CUBA_EMBED_MODEL={tag} must be stored with that \
-             tag — not with the hardcoded default. Stamping the wrong model name makes every \
-             new row look stale forever."
-        );
-        println!("  ✓ the stored tag follows CUBA_EMBED_MODEL, not a constant");
+        let (stored_tag, has_vector) = row;
+        if has_vector {
+            assert_eq!(
+                stored_tag.as_deref(),
+                Some(tag.as_str()),
+                "a vector was written, so its label must name the model that produced it. \
+                 Writing one model's vector under another model's name makes the row \
+                 permanently, invisibly stale."
+            );
+            println!("  ✓ the stored tag follows CUBA_EMBED_MODEL, not a constant");
+        } else {
+            assert!(
+                stored_tag.is_none(),
+                "no vector was written, so no model tag may be claimed — a label without a \
+                 vector is a lie about work that never happened"
+            );
+            println!("  ✓ no ONNX model loaded: no vector, and no tag claiming one (correct)");
+        }
     }
 
     // ── Cleanup ──────────────────────────────────────────────────
