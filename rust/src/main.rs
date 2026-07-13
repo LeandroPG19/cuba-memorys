@@ -56,6 +56,14 @@ async fn main() {
             }
             return;
         }
+        Some("link") => {
+            if let Err(e) = cuba_memorys::link_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "link failed");
+                eprintln!("link error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("calibrate") => {
             if let Err(e) = cuba_memorys::calibrate_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "calibrate failed");

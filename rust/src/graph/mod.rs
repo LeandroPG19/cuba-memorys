@@ -7,6 +7,7 @@
 //!   backbone" detection (used by `cuba_forget` to refuse deleting load-bearing
 //!   nodes).
 
+pub mod autolink;
 pub mod activation;
 pub mod centrality;
 pub mod closeness;
