@@ -6,6 +6,44 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.11.1] — 2026-07-13 (Cargo `0.11.1` · npm `0.11.1` · PyPI `1.13.1`)
+
+Two bugs found by *using* v0.11.0 rather than testing it — both in the same family
+as the ones v0.11.0 set out to kill.
+
+### Fixed
+
+- **Every new memory was stamped with the wrong model name.** `embeddings::onnx`
+  exposed a `pub const CURRENT_MODEL = "multilingual-e5-small"` beside a
+  `current_model()` that reads `CUBA_EMBED_MODEL`. The split was perverse: every
+  site that **wrote** an embedding used the constant, every site that **compared**
+  one used the function. So on a bge-m3 corpus, each new observation got a correct
+  1024-d bge-m3 vector labelled with a 384-d model that had not run in months —
+  permanently stale to `doctor`, whose warning count could only grow, and to
+  `zafra reembed`, which could never converge: it re-encoded the row, and the next
+  write re-mislabelled it.
+
+  The vectors were always fine (measured, not assumed: cross-label cosine on
+  same-entity pairs sits inside the range of within-label cosine — one vector
+  space, not two). Only the name lied. But that name is what tells you, after the
+  next model change, which rows still need re-encoding. `CURRENT_MODEL` is private
+  now, so the compiler forbids the mistake — and it immediately found a fifth site:
+  a smoke test asserting the constant's value, which had pinned the bug in place.
+
+  Only affects setups that override `CUBA_EMBED_MODEL`; on the default model the
+  label was accidentally correct.
+
+- **`reembed`'s smallest unit of work was "everything".** One observation missing a
+  vector, and the only cure on offer was to recompute all 1,461 — overwriting 1,460
+  good vectors to fill one empty. It now re-encodes the stale set by default (no
+  vector, or tagged with another model), which is right in both real cases without
+  a flag: changing models makes every row qualify; a single failed embedding makes
+  exactly one. `--all` still forces the full pass.
+
+- **`reembed --batch 64` was silently ignored** — only `--batch=64` parsed, and the
+  space-separated form fell into a catch-all that dropped it. Both forms work now,
+  and an unrecognised argument is an error instead of a shrug.
+
 ## [0.11.0] — 2026-07-13 (Cargo `0.11.0` · npm `0.11.0` · PyPI `1.13.0`)
 
 The fourth memory, and every optimization measured on a real corpus instead of
