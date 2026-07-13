@@ -1,4 +1,4 @@
-//! `cuba-memorys reembed` — re-encode the corpus with the current model.
+//! `cuba-memorys reembed` — re-encode what needs re-encoding.
 //!
 //! This existed only as an MCP tool, and that is the wrong place for it. Re-embedding
 //! 1400 observations with a 570 MB model takes minutes; an MCP call is a request
@@ -9,27 +9,55 @@
 //! and the loaded model has another.
 //!
 //! So: a plain command, run by a human, with progress on stderr.
+//!
+//! It used to re-encode the ENTIRE corpus, unconditionally, and that made it a
+//! tool you could not reach for. One observation missing a vector? The only cure on
+//! offer was to recompute all 1,461 — overwriting 1,460 good vectors to fix one
+//! empty. A maintenance command whose smallest unit of work is "everything" is a
+//! command people avoid, and the thing it was supposed to fix stays broken.
+//!
+//! The default is now the stale set: rows with no vector, or tagged with a model
+//! other than the one loaded. That covers both real cases without a flag —
+//! changing models leaves every row "tagged with another model", so all of them
+//! qualify; a single failed embedding leaves exactly one. `--all` remains for
+//! forcing the issue.
 
 use anyhow::{Context, Result};
 
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut batch: i64 = 500;
-    for a in args {
+    let mut all = false;
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: cuba-memorys reembed [--batch N]\n\n\
-                     Re-encodes every observation with the currently configured model.\n\
-                     Run it after changing CUBA_EMBEDDING_DIM / ONNX_MODEL_PATH, and after\n\
+                    "usage: cuba-memorys reembed [--all] [--batch N]\n\n\
+                     Re-encodes the observations that need it: missing a vector, or tagged\n\
+                     with a model other than the one currently loaded. Run it after changing\n\
+                     CUBA_EMBED_MODEL / CUBA_EMBEDDING_DIM / ONNX_MODEL_PATH — and after\n\
                      scripts/migrate-embedding-dim.sh has retyped the column.\n\n\
+                     --all       re-encode every observation, stale or not\n\
+                     --batch N   rows per progress report (default 500)\n\n\
                      Refuses to run without a real ONNX model: re-embedding with the hash\n\
                      fallback would overwrite meaningful vectors with noise."
                 );
                 return Ok(());
             }
+            "--all" => all = true,
+            // Accept both `--batch=N` and `--batch N`. The second form used to be
+            // swallowed in silence, so `--batch 64` ran with the default and said
+            // nothing — an argument the tool ignores is an argument that lies.
+            "--batch" => {
+                let n = it.next().context("--batch needs a number: --batch 500")?;
+                batch = n.parse().context("--batch needs an integer")?;
+            }
             other => {
                 if let Some(n) = other.strip_prefix("--batch=") {
                     batch = n.parse().context("--batch needs an integer")?;
+                } else {
+                    anyhow::bail!("reembed: argumento desconocido `{other}` (probá --help)");
                 }
             }
         }
@@ -73,14 +101,30 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         );
     }
 
-    let rows: Vec<(uuid::Uuid, String)> =
+    let rows: Vec<(uuid::Uuid, String)> = if all {
         sqlx::query_as("SELECT id, content FROM brain_observations ORDER BY id")
             .fetch_all(&pool)
             .await
-            .context("reading observations")?;
+    } else {
+        sqlx::query_as(
+            "SELECT id, content FROM brain_observations
+             WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM $1
+             ORDER BY id",
+        )
+        .bind(&model)
+        .fetch_all(&pool)
+        .await
+    }
+    .context("reading observations")?;
 
     let total = rows.len();
-    eprintln!("reembed: {total} observaciones");
+    if total == 0 {
+        println!("Nada que reembeber: todo el corpus ya está en {model} ({dim}-d).");
+        return Ok(());
+    }
+
+    let scope = if all { "todas" } else { "pendientes" };
+    eprintln!("reembed: {total} observaciones ({scope})");
 
     let mut done = 0usize;
     let mut failed = 0usize;
@@ -115,7 +159,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     if failed > 0 {
         println!("{failed} fallaron (ver los warnings).");
     }
-    println!("\nEl umbral de abstención estaba calibrado para el modelo anterior y ya no vale:");
-    println!("  cuba-memorys calibrate --dataset <dataset.jsonl> --apply");
+    if all || total > 100 {
+        println!(
+            "\nEl umbral de abstención estaba calibrado para el modelo anterior y ya no vale:"
+        );
+        println!("  cuba-memorys calibrate --dataset <dataset.jsonl> --apply");
+    }
     Ok(())
 }
