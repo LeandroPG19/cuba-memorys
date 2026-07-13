@@ -107,28 +107,109 @@ fn an_unknown_argument_is_an_error_not_a_server_launch() {
     }
 }
 
-/// npm's postinstall builds its download URL from package.json's version:
-///   releases/download/v{version}/cuba-memorys-linux-x64
+/// The `version` line under `[project]`, without pulling in a TOML parser.
+fn pyproject_version(src: &str) -> Option<String> {
+    let mut in_project = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_project = t == "[project]";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        if let Some(v) = t
+            .strip_prefix("version")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+        {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// One release, one number, four files that each hold their own copy of it.
 ///
-/// The release workflow builds that asset from Cargo.toml's version. Two files,
-/// one number, and nothing but this test connecting them. Bump one without the
-/// other and every `npm install` 404s on a tag that does not exist.
+/// * `Cargo.toml` — what the release workflow names the binaries after
+/// * `package.json` — what npm's postinstall builds its download URL from:
+///   `releases/download/v{version}/cuba-memorys-linux-x64`
+/// * `pyproject.toml` — the PyPI version (a different series; see below)
+/// * `server.json` — what gets published to the MCP Registry, telling the world
+///   which npm and PyPI versions to install
+///
+/// Nothing connected them. `server.json` sat at 0.10.0 while the other three said
+/// 0.11.0, and it took reading the publish workflow line by line to notice —
+/// tagging would have advertised the previous release to every client discovering
+/// this server through the registry.
+///
+/// PyPI runs its own series because it hit 1.0 first: `1.{minor+2}.{patch}`.
+/// Cargo 0.9.3 → PyPI 1.11.3, Cargo 0.11.0 → PyPI 1.13.0. Asserted, not assumed —
+/// if the convention ever changes, change it here, deliberately, once.
 #[test]
-fn cargo_and_package_json_agree_on_the_version() {
+fn every_file_that_holds_a_version_agrees() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repo root");
-    let pkg =
-        std::fs::read_to_string(root.join("package.json")).expect("package.json at repo root");
-    let pkg: serde_json::Value = serde_json::from_str(&pkg).expect("package.json parses");
-    let npm_version = pkg["version"].as_str().expect("package.json has a version");
+    let cargo = env!("CARGO_PKG_VERSION");
 
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    };
+    let json = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&read(name)).unwrap_or_else(|e| panic!("{name} must parse: {e}"))
+    };
+
+    // npm ── the postinstall download URL is built from this exact string.
+    let pkg = json("package.json");
+    let npm = pkg["version"].as_str().expect("package.json has a version");
     assert_eq!(
-        npm_version,
-        env!("CARGO_PKG_VERSION"),
-        "package.json ({npm_version}) and Cargo.toml ({}) must match — npm's postinstall \
-         downloads from releases/download/v{npm_version}/, which the release workflow only \
-         creates for the Cargo version",
-        env!("CARGO_PKG_VERSION")
+        npm, cargo,
+        "package.json ({npm}) vs Cargo.toml ({cargo}): npm's postinstall downloads from \
+         releases/download/v{npm}/, an asset the release workflow only builds for the Cargo version"
     );
+
+    // PyPI ── its own series, by convention.
+    let py =
+        pyproject_version(&read("pyproject.toml")).expect("pyproject.toml has a [project] version");
+    let (minor, patch) = {
+        let p: Vec<&str> = cargo.split('.').collect();
+        (p[1].parse::<u32>().expect("cargo minor"), p[2].to_string())
+    };
+    let expected_py = format!("1.{}.{}", minor + 2, patch);
+    assert_eq!(
+        py, expected_py,
+        "pyproject.toml ({py}) must follow 1.{{minor+2}}.{{patch}} for Cargo {cargo}"
+    );
+
+    // MCP Registry ── tells the world which npm and PyPI versions to install.
+    let srv = json("server.json");
+    let srv_version = srv["version"].as_str().expect("server.json has a version");
+    assert_eq!(
+        srv_version, cargo,
+        "server.json ({srv_version}) vs Cargo.toml ({cargo}) — this is what the MCP Registry \
+         publishes; stale here means the registry advertises the previous release"
+    );
+
+    for p in srv["packages"]
+        .as_array()
+        .expect("server.json has packages")
+    {
+        let registry = p["registryType"]
+            .as_str()
+            .or_else(|| p["registry_name"].as_str())
+            .expect("package has a registry");
+        let got = p["version"].as_str().expect("package has a version");
+        let want = match registry {
+            "npm" => npm,
+            "pypi" => &expected_py,
+            other => panic!(
+                "server.json declares an unknown registry `{other}` — teach this test about it"
+            ),
+        };
+        assert_eq!(
+            got, want,
+            "server.json's {registry} entry says {got}, but {registry} will receive {want}"
+        );
+    }
 }
