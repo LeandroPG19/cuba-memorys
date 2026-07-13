@@ -5,24 +5,27 @@
 
 use serde_json::{Value, json};
 
-/// Verify all 25 tools are defined in constants
-/// (v0.8 added cuba_proyecto, cuba_pre_compact, cuba_sync, cuba_juez;
-///  v0.9 added cuba_pizarra working memory + cuba_archivo audit log).
+/// Every tool a client may already depend on is still defined.
+///
+/// This used to assert an exact count — `assert_eq!(tools.len(), 25)` — and that
+/// is the wrong invariant. It says nothing about which tools exist, and it breaks
+/// on the one change that is always safe: ADDING a tool. It failed the release for
+/// exactly that reason, having spent its life protecting nothing.
+///
+/// What actually matters to a client is that a tool it calls today still exists
+/// tomorrow. So: assert presence, not arity. Removing or renaming one of these
+/// breaks the MCP API and this test says so; adding a new one does not, and it
+/// stays quiet.
 #[test]
 fn test_all_tools_defined() {
     let tools = cuba_memorys::constants::tool_definitions();
-    assert_eq!(
-        tools.len(),
-        25,
-        "Expected 25 MCP tools, got {}",
-        tools.len()
-    );
 
     let tool_names: Vec<&str> = tools
         .iter()
         .filter_map(|t: &Value| t.get("name").and_then(|n: &Value| n.as_str()))
         .collect();
 
+    // The published MCP surface. Removing any of these is a breaking change.
     let expected = [
         "cuba_alma",
         "cuba_cronica",
@@ -49,10 +52,19 @@ fn test_all_tools_defined() {
         "cuba_juez",
         "cuba_pizarra",
         "cuba_archivo",
+        // v0.11: procedural memory.
+        "cuba_receta",
     ];
 
     for name in &expected {
         assert!(tool_names.contains(name), "Missing tool definition: {name}");
+    }
+
+    // Two tools with the same name would make dispatch ambiguous, and the
+    // client would silently get whichever one serde happened to serialize last.
+    let mut seen = std::collections::HashSet::new();
+    for name in &tool_names {
+        assert!(seen.insert(*name), "duplicate tool definition: {name}");
     }
 }
 
@@ -160,42 +172,40 @@ fn test_threshold_invariants() {
     const _: () = assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Verify handler dispatch maps all 24 tools (v0.7 + v0.8 + v0.9).
+/// Every advertised tool is actually dispatchable.
+///
+/// The previous version of this test was named `test_handler_dispatch_coverage`
+/// and checked that a hard-coded list of names started with `cuba_` and was
+/// lowercase. It never touched the dispatcher. A tool could be advertised in
+/// `tools/list` with no arm in `dispatch` — the client would call it, get
+/// "unknown tool" at runtime, and this test would still be green.
+///
+/// It now asserts the real invariant: whatever the server ADVERTISES, it can
+/// SERVE. That is the contract a client relies on, and the only way to break it
+/// is to add a tool definition and forget the handler — which is exactly the
+/// mistake worth catching.
 #[test]
-fn test_handler_dispatch_coverage() {
-    let tool_names = [
-        "cuba_alma",
-        "cuba_cronica",
-        "cuba_faro",
-        "cuba_puente",
-        "cuba_eco",
-        "cuba_alarma",
-        "cuba_remedio",
-        "cuba_expediente",
-        "cuba_jornada",
-        "cuba_decreto",
-        "cuba_vigia",
-        "cuba_zafra",
-        "cuba_forget",
-        "cuba_reflexion",
-        "cuba_hipotesis",
-        "cuba_contradiccion",
-        "cuba_centinela",
-        "cuba_calibrar",
-        "cuba_ingesta",
-        // v0.8
-        "cuba_proyecto",
-        "cuba_pre_compact",
-        "cuba_sync",
-        "cuba_juez",
-        // v0.9
-        "cuba_pizarra",
-        "cuba_archivo",
-    ];
+fn advertised_tools_are_all_dispatchable() {
+    let tools = cuba_memorys::constants::tool_definitions();
 
-    for name in &tool_names {
-        assert!(name.starts_with("cuba_"));
-        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+    for tool in tools.iter() {
+        let name = tool
+            .get("name")
+            .and_then(|n: &Value| n.as_str())
+            .expect("every tool definition has a name");
+
+        assert!(
+            cuba_memorys::handlers::is_known_tool(name),
+            "{name} se anuncia en tools/list pero el dispatcher no la conoce: \
+             un cliente que la llame recibiría 'unknown tool' en runtime"
+        );
+
+        // MCP naming convention, kept as a cheap guard against typos.
+        assert!(name.starts_with("cuba_"), "{name}: prefijo inesperado");
+        assert!(
+            name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "{name}: los nombres de tool son snake_case en minúsculas"
+        );
     }
 }
 
