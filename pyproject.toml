@@ -7,7 +7,7 @@ name = "cuba-memorys"
 version = "1.13.2"
 description = "Persistent memory MCP server for AI agents (v0.10). 25 tools: bitemporal facts, sqlx-migrate, BM25+MMR+OOD hybrid retrieval, graph metrics, conformal prediction, Hebbian/BCM, project scoping, CFR-21 audit chain. Rust + PostgreSQL + pgvector."
 readme = "README.md"
-license = { text = "CC-BY-NC-4.0" }
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.9"
 keywords = [
     "mcp",
@@ -24,7 +24,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",

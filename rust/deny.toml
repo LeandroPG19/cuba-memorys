@@ -5,7 +5,9 @@
 # CI: cargo deny check licenses advisories
 
 [licenses]
-# Block copyleft licenses incompatible with CC-BY-NC-4.0
+# Dependencies stay permissive on purpose. cuba-memorys is AGPL-3.0, so a copyleft
+# dependency would be legal to use, but it would also make a commercial dual-license
+# impossible later: we can relicense our own code, not someone else's.
 unlicensed = "deny"
 allow = [
     "MIT",

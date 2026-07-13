@@ -296,4 +296,4 @@ Open a [Discussion](https://github.com/LeandroPG19/cuba-memorys/discussions) or 
 
 ---
 
-**License**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — Free to use and modify, not for commercial use.
+**License**: [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0). By contributing, you agree that your contributions are licensed under it.

@@ -3,7 +3,7 @@ name = "cuba-memorys"
 version = "0.11.2"
 edition = "2024"
 description = "Knowledge Graph MCP Server — 25 tools, sqlx-migrate, BM25/MMR/OOD search, conformal prediction, testing-effect/Δt-Hebbian/Robbins-Monro cognitive, source credibility, closeness/harmonic/k-core graph, working-memory + Allen interval + ADWIN drift + MI tagging, audit hash-chain (CFR-21) + RLS, MCP Resources URI scheme, optional Prometheus /metrics + MCPSamplingJudge, plus v0.8 features (project scoping, snapshots, sync, LLM-judge)"
-license = "CC-BY-NC-4.0"
+license = "AGPL-3.0-only"
 
 [dependencies]
 futures = "0.3"

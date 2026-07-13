@@ -3,7 +3,7 @@
   "version": "0.11.2",
   "mcpName": "io.github.LeandroPG19/cuba-memorys",
   "description": "Persistent memory MCP server (v0.10) — 25 tools, PostgreSQL + pgvector, bitemporal facts, BM25+RRF hybrid search, graph metrics/communities, Hebbian learning, episodic memory, audit log, project scoping.",
-  "license": "CC-BY-NC-4.0",
+  "license": "AGPL-3.0-only",
   "author": "Leandro Pérez G.",
   "repository": {
     "type": "git",
