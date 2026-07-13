@@ -98,9 +98,16 @@ pub async fn run_search(args: &[String]) -> Result<()> {
     };
 
     let pool = pool().await?;
+    // `verbose` explicitly: the renderer below reads entity_name/content/fused_score,
+    // and the handler now defaults to compact's abbreviated keys.
     let result = handlers::faro::handle(
         &pool,
-        json!({ "query": q, "limit": limit, "associative": associative }),
+        json!({
+            "query": q,
+            "limit": limit,
+            "associative": associative,
+            "format": "verbose",
+        }),
     )
     .await
     .context("search failed")?;

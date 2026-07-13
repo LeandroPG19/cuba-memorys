@@ -55,11 +55,15 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
-    // V0.6: Compact format — abbreviated keys, ~35% token savings
+    // Compact is the default: abbreviated keys cost 798 tokens for limit=10 where
+    // verbose costs 2787 — measured, not estimated (the old comment claimed ~35%;
+    // it is 71%). Every session pays this on every search, so the cheap shape is
+    // the one that should need no opt-in. Callers that need the full keys —
+    // the CLI renderer, chiefly — ask for `verbose` explicitly.
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
-        .unwrap_or("verbose");
+        .unwrap_or("compact");
 
     // V0.6: Tag filter
     let tag_filter = args.get("tags").and_then(|v| v.as_str());
@@ -592,42 +596,49 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         })
         .collect();
 
-    // V0.9: Token budget enforcement via exact tiktoken counting (cl100k_base).
-    // Replaces the old "len/4" heuristic which over-estimated for Spanish
-    // (~2.7 chars/tok) and under-estimated for code (~3.5 chars/tok).
+    // Shape first, THEN budget. The order matters and used to be wrong: the
+    // budget counted each row's full `content`, and compact_result afterwards
+    // truncated that same content to 200 chars. So the caller's budget was spent
+    // counting text that was never sent — a limit=10 compact response costs 798
+    // tokens against a 5000-token budget, meaning most of what was paid for was
+    // thrown away and fewer results came back than fit.
+    //
+    // Counting the serialized row (keys, scores and all) rather than just the
+    // content also stops the JSON envelope from riding along for free: ten
+    // verbose rows carry ten copies of ~10 field names.
     use crate::search::budget::{count_tokens, truncate_to_budget};
+
+    let shaped: Vec<Value> = if opts.format == "compact" {
+        results_json.iter().map(compact_result).collect()
+    } else {
+        results_json
+    };
+    // Whichever shape we are in, this is where the text lives.
+    let text_key = if opts.format == "compact" { "c" } else { "content" };
+
     let mut token_budget = opts.max_tokens;
-    let mut budget_results: Vec<Value> = Vec::with_capacity(results_json.len());
-    for mut r in results_json {
-        let content_tokens = r
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| count_tokens(s) as i64)
-            .unwrap_or(20);
+    let mut final_results: Vec<Value> = Vec::with_capacity(shaped.len());
+    for mut r in shaped {
         if token_budget <= 0 {
             break;
         }
-        if content_tokens > token_budget {
+        let row_tokens = count_tokens(&r.to_string()) as i64;
+        if row_tokens > token_budget {
+            // One row alone overflows what is left: keep it, but trim its text
+            // so the response still lands inside the budget.
             let truncated: Option<String> = r
-                .get("content")
+                .get(text_key)
                 .and_then(|v| v.as_str())
-                .map(|s| truncate_to_budget(s, token_budget as usize));
+                .map(|s| truncate_to_budget(s, token_budget.max(0) as usize));
             if let (Some(obj), Some(t)) = (r.as_object_mut(), truncated) {
-                obj.insert("content".to_string(), serde_json::json!(t));
+                obj.insert(text_key.to_string(), serde_json::json!(t));
             }
-            budget_results.push(r);
+            final_results.push(r);
             break;
         }
-        token_budget -= content_tokens;
-        budget_results.push(r);
+        token_budget -= row_tokens;
+        final_results.push(r);
     }
-
-    // V0.6: Compact format — abbreviated keys for ~35% token savings
-    let final_results: Vec<Value> = if opts.format == "compact" {
-        budget_results.iter().map(compact_result).collect()
-    } else {
-        budget_results
-    };
 
     Ok(serde_json::json!({
         "mode": "hybrid",
@@ -638,12 +649,47 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     }))
 }
 
-/// V0.6: Transform a result into compact format with abbreviated keys.
+/// How much of an observation the compact shape keeps.
+///
+/// This is the whole trade, and it was being made blind. Abbreviating the keys
+/// saves almost nothing; the saving comes from cutting the text — and cutting
+/// the text is what costs recall, because a marker sitting at character 300 of
+/// a memory is simply not there any more, and an agent cannot use what it
+/// cannot see.
+///
+/// Swept on the Spanish ability set (n=10, e5-small), quality against cost:
+///
+/// ```text
+///   chars   tokens   nDCG@10   vs verbose
+///     200      871    0.6353   -75% cost, -13.5% quality   ← the old hard-coded value
+///     400     1271    0.6900   -64% cost,  -6.0% quality
+///     600     1580    0.7090   -55% cost,  -3.5% quality
+///    1200     2109    0.7344   -40% cost,   NO LOSS        ← the knee
+///    2000     2531    0.7344   -28% cost,   no loss
+///    full     3508    0.7344    baseline
+/// ```
+///
+/// 1200 is where the curve bends: every character past it costs context and buys
+/// nothing, and every character below it starts eating relevance. The previous
+/// default of 200 was throwing away an eighth of the retrieval quality to save
+/// tokens nobody had measured.
+///
+/// Overridable with `CUBA_COMPACT_CHARS` — re-sweep it on a different corpus
+/// rather than inheriting this number the way we inherited 200.
+fn compact_chars() -> usize {
+    std::env::var("CUBA_COMPACT_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1200)
+}
+
+/// Transform a result into compact shape: abbreviated keys, bounded text.
 fn compact_result(r: &Value) -> Value {
     let content = r
         .get("content")
         .and_then(|v| v.as_str())
-        .map(|s| crate::handlers::zafra::safe_truncate(s, 200));
+        .map(|s| crate::handlers::zafra::safe_truncate(s, compact_chars()));
     serde_json::json!({
         "e": r.get("entity_name").or_else(|| r.get("name")),
         "c": content,

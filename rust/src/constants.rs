@@ -152,7 +152,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "limit": {"type": "integer", "description": "Max results (default 10, max 50)"},
                     "before": {"type": "string", "description": "ISO8601 datetime — return results created before this time"},
                     "after": {"type": "string", "description": "ISO8601 datetime — return results created after this time"},
-                    "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format: verbose (default, full data) or compact (abbreviated keys, ~35% fewer tokens)"},
+                    "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format. compact (DEFAULT): abbreviated keys — e=entity, c=content, t=type, i=importance, s=score. 71% fewer tokens (798 vs 2787 at limit=10, measured). verbose: full key names, only when you need every field."},
                     "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"},
                     "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Counted exactly via tiktoken cl100k_base."},
                     "diversify": {"type": "boolean", "description": "v0.9: post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},

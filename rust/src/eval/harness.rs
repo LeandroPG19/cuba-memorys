@@ -7,6 +7,47 @@ use super::datasets::EvaluationSample;
 use super::metrics::{mrr, ndcg_at_k, precision_at_k, recall_at_k};
 use crate::eval::metrics::{calculate_exact_match, calculate_f1_score};
 
+/// What the eval actually switches on.
+///
+/// This exists because the previous signature hard-coded `rerank: false` and
+/// never passed `abstain_ood` at all. Two features were being measured with the
+/// switch off, and then reported as scoring zero — which read as "they do not
+/// work" when it meant "they never ran".
+#[derive(Debug, Clone)]
+pub struct EvalConfig {
+    pub k: usize,
+    /// Multi-hop associative expansion (v0.11).
+    pub associative: bool,
+    /// Let the OOD gate fire, so abstention can actually be measured.
+    pub abstain: bool,
+    /// Run the cross-encoder reranker.
+    pub rerank: bool,
+    /// Response shape — and therefore what the token cost actually is.
+    pub format: String,
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        // Everything off, and `verbose`, so the baseline stays comparable with
+        // what was already measured (nDCG@10 = 0.7389). The CLI flags turn each
+        // one on for an A/B.
+        //
+        // `verbose` specifically, even though the handler now defaults to
+        // compact: relevance is judged by looking for markers in the returned
+        // text, and compact truncates that text to 200 chars. Grading on the
+        // truncated shape would score a marker at character 300 as a miss —
+        // penalizing the *presentation* format for a retrieval that was correct.
+        // `--format compact` then measures what the saving actually costs.
+        Self {
+            k: 10,
+            associative: false,
+            abstain: false,
+            rerank: false,
+            format: "verbose".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalReport {
     pub sample_count: usize,
@@ -17,6 +58,15 @@ pub struct EvalReport {
     pub recall_at_k: f64,
     pub mean_exact_match: f32,
     pub mean_f1: f32,
+    /// Mean tokens the response actually costs the agent's context, counted with
+    /// tiktoken (cl100k_base) over the serialized payload — not the retrieved
+    /// text alone. Quality per token is the axis the field competes on now
+    /// (Mem0 advertises 93.4% on LongMemEval under 7k tokens per retrieval);
+    /// an optimization that improves nDCG while doubling cost is not a win, and
+    /// without this number you cannot tell the two apart.
+    pub mean_response_tokens: f64,
+    /// Worst-case cost. The mean hides the query that blows the context.
+    pub max_response_tokens: usize,
     /// Per-ability breakdown (LongMemEval-style question types). Empty when the
     /// dataset carries no ability labels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -25,6 +75,11 @@ pub struct EvalReport {
     /// nothing relevant. None when the dataset has no abstention samples.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abstention_accuracy: Option<f64>,
+    /// False abstentions: answerable queries the system wrongly declined.
+    /// Abstention with no such counterweight is trivially maximized by refusing
+    /// to answer anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub false_abstention_rate: Option<f64>,
 }
 
 /// Retrieval quality for one LongMemEval ability (question type).
@@ -52,7 +107,8 @@ impl BenchmarkHarness {
     }
 
     pub async fn run(&self, pool: &PgPool) -> Result<EvalReport> {
-        run_faro_eval(pool, &self.dataset, self.k, false).await
+        let cfg = EvalConfig { k: self.k, ..EvalConfig::default() };
+        run_faro_eval(pool, &self.dataset, &cfg).await
     }
 }
 
@@ -63,10 +119,9 @@ impl BenchmarkHarness {
 pub async fn run_faro_eval(
     pool: &PgPool,
     samples: &[EvaluationSample],
-    k: usize,
-    associative: bool,
+    cfg: &EvalConfig,
 ) -> Result<EvalReport> {
-    let k = k.clamp(1, 50);
+    let k = cfg.k.clamp(1, 50);
     if samples.is_empty() {
         return Ok(EvalReport {
             sample_count: 0,
@@ -77,8 +132,11 @@ pub async fn run_faro_eval(
             recall_at_k: 0.0,
             mean_exact_match: 0.0,
             mean_f1: 0.0,
+            mean_response_tokens: 0.0,
+            max_response_tokens: 0,
             per_ability: Vec::new(),
             abstention_accuracy: None,
+            false_abstention_rate: None,
         });
     }
 
@@ -89,12 +147,19 @@ pub async fn run_faro_eval(
     let mut em_sum = 0.0_f32;
     let mut f1_sum = 0.0_f32;
 
+    // Cost, measured on the payload the agent would actually receive.
+    let mut token_sum = 0usize;
+    let mut token_max = 0usize;
+
     // Per-ability accumulators: (count, ndcg_sum, recall_sum).
     use std::collections::BTreeMap;
     let mut per_ability: BTreeMap<String, (usize, f64, f64)> = BTreeMap::new();
     // Abstention: count samples and how many correctly retrieved nothing relevant.
     let mut abstain_total = 0usize;
     let mut abstain_correct = 0usize;
+    // The counterweight: answerable queries the system wrongly declined.
+    let mut answerable_total = 0usize;
+    let mut false_abstentions = 0usize;
 
     for sample in samples {
         let args = serde_json::json!({
@@ -102,9 +167,11 @@ pub async fn run_faro_eval(
             "mode": "hybrid",
             "limit": k,
             "enable_bm25": true,
-            "rerank": false,
+            "rerank": cfg.rerank,
             "diversify": false,
-            "associative": associative,
+            "associative": cfg.associative,
+            "abstain_ood": cfg.abstain,
+            "format": cfg.format,
             // Do not apply the Testing Effect boost — the benchmark must not
             // mutate the corpus it is measuring.
             "track_access": false
@@ -112,6 +179,12 @@ pub async fn run_faro_eval(
         let response = crate::handlers::faro::handle(pool, args)
             .await
             .context("faro handle failed during eval")?;
+
+        // Exactly what the response costs in the agent's context.
+        let cost = crate::search::budget::count_tokens(&response.to_string());
+        token_sum += cost;
+        token_max = token_max.max(cost);
+
         let ranked = extract_ranked_contents(&response);
         let rels: Vec<bool> = ranked
             .iter()
@@ -132,6 +205,14 @@ pub async fn run_faro_eval(
                 .or_insert((0, 0.0, 0.0));
             e.0 += 1; // count only; ndcg/recall undefined for abstention
             continue;
+        }
+
+        // An answerable query that came back empty is a FALSE abstention. Without
+        // tracking these, "abstention accuracy" is trivially maximized by a system
+        // that refuses to answer anything at all.
+        answerable_total += 1;
+        if ranked.is_empty() {
+            false_abstentions += 1;
         }
 
         let total_rel = sample.relevant_markers.len().max(1);
@@ -197,9 +278,16 @@ pub async fn run_faro_eval(
         } else {
             0.0
         },
+        mean_response_tokens: token_sum as f64 / n as f64,
+        max_response_tokens: token_max,
         per_ability: ability_scores,
         abstention_accuracy: if abstain_total > 0 {
             Some(abstain_correct as f64 / abstain_total as f64)
+        } else {
+            None
+        },
+        false_abstention_rate: if answerable_total > 0 {
+            Some(false_abstentions as f64 / answerable_total as f64)
         } else {
             None
         },

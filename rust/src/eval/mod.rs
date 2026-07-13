@@ -20,26 +20,39 @@ use anyhow::{Context, Result};
 /// helped. Phase 1 of docs/PLAN-MEJORAS-v0.11.md: measure first.
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut dataset_path: Option<String> = None;
-    let mut k: usize = 10;
     let mut json = false;
-    let mut associative = false;
+    let mut cfg = harness::EvalConfig::default();
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--dataset" | "-d" => dataset_path = it.next().cloned(),
             "--k" => {
-                k = it
+                cfg.k = it
                     .next()
                     .and_then(|s| s.parse().ok())
                     .context("--k needs an integer")?
             }
             "--json" => json = true,
-            "--associative" => associative = true,
+            "--associative" => cfg.associative = true,
+            // These two exist because the harness used to hard-code them off and
+            // then report that they scored zero.
+            "--abstain" => cfg.abstain = true,
+            "--rerank" => cfg.rerank = true,
+            "--format" => {
+                cfg.format = it.next().cloned().context("--format needs verbose|compact")?
+            }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--associative] [--json]\n\
-                     --associative enables the v0.11 multi-hop expansion (compare vs without)\n\
+                    "usage: cuba-memorys eval [--dataset PATH.jsonl] [--k N]\n\
+                     \x20                        [--associative] [--abstain] [--rerank]\n\
+                     \x20                        [--format verbose|compact] [--json]\n\n\
+                     --associative  multi-hop expansion (v0.11)\n\
+                     --abstain      let the OOD gate fire, so abstention is actually exercised\n\
+                     --rerank       run the cross-encoder reranker\n\
+                     --format       response shape whose token cost is measured (default verbose)\n\n\
+                     Every run reports mean/max response tokens: quality that costs twice the\n\
+                     context is not free, and you cannot see that without printing both.\n\n\
                      JSONL row: {{\"query\": \"...\", \"relevant_markers\": [\"...\"], \"expected_answer\": \"...\"?}}"
                 );
                 return Ok(());
@@ -63,20 +76,23 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .await
         .context("connecting to database for eval")?;
 
-    let report = harness::run_faro_eval(&pool, &samples, k, associative).await?;
+    let report = harness::run_faro_eval(&pool, &samples, &cfg).await?;
 
     if json {
         println!(
             "{}",
-            reporters::generate_json_report(&report, samples.len(), k)
+            reporters::generate_json_report(&report, samples.len(), cfg.k)
         );
     } else {
         eprintln!(
-            "eval dataset={} samples={} k={} associative={}",
+            "eval dataset={} samples={} k={} associative={} abstain={} rerank={} format={}",
             dataset_path.as_deref().unwrap_or("<builtin>"),
             samples.len(),
-            k,
-            associative
+            cfg.k,
+            cfg.associative,
+            cfg.abstain,
+            cfg.rerank,
+            cfg.format,
         );
         println!("{}", reporters::summary_line(&report));
     }
