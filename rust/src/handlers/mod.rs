@@ -27,6 +27,7 @@ pub mod pizarra;
 pub mod pre_compact;
 pub mod proyecto;
 pub mod puente;
+pub mod receta;
 pub mod reflexion;
 pub mod remedio;
 pub mod sync;
@@ -51,6 +52,7 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
             "cuba_alma" => alma::handle(pool, args).await,
             "cuba_cronica" => cronica::handle(pool, args).await,
             "cuba_faro" => faro::handle(pool, args).await,
+            "cuba_receta" => receta::handle(pool, args).await,
             "cuba_tools" => tools::handle_tools(pool, args).await,
             "cuba_call" => tools::handle_call(pool, args).await,
             "cuba_forget" => forget::handle(pool, args).await,
@@ -117,6 +119,6 @@ pub fn is_known_tool(name: &str) -> bool {
             | "cuba_expediente" | "cuba_jornada" | "cuba_decreto" | "cuba_vigia" | "cuba_zafra"
             | "cuba_contradiccion" | "cuba_centinela" | "cuba_calibrar" | "cuba_ingesta"
             | "cuba_proyecto" | "cuba_pre_compact" | "cuba_sync" | "cuba_archivo"
-            | "cuba_pizarra" | "cuba_juez" | "cuba_tools" | "cuba_call"
+            | "cuba_pizarra" | "cuba_juez" | "cuba_tools" | "cuba_call" | "cuba_receta"
     )
 }

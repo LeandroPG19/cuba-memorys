@@ -25,5 +25,6 @@ pub mod search;
 pub mod session;
 pub mod setup;
 pub mod setup_agent;
+pub mod skills_cli;
 pub mod sync;
 pub mod tasks;

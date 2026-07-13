@@ -479,6 +479,28 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                 "required": ["action"]
             }),
         ),
+        tool_def(
+            "cuba_receta",
+            "PROCEDURAL MEMORY: how things are DONE here — bring up the dev services, run the test suite, deploy, migrate. \
+             The other tools remember what is TRUE; this one remembers what to DO, so an agent stops rediscovering it every session. \
+             Ranked by reliability, not by how often it is read: report the outcome with action='outcome' after running one, or the \
+             memory learns nothing. A recipe that keeps failing is worse than none, because it is trusted.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "get", "search", "outcome", "list", "delete"], "description": "search: find by meaning. get: fetch by exact name. add: store/update (re-adding the same name edits it, keeping its track record). outcome: record success/failure — this is what teaches it."},
+                    "name": {"type": "string", "description": "Procedure name, e.g. 'levantar el entorno de desarrollo'"},
+                    "trigger": {"type": "string", "description": "WHEN this applies — the IF half. e.g. 'cuando hay que levantar los servicios de mapupita-web'"},
+                    "steps": {"type": "array", "items": {"type": "object"}, "description": "Ordered steps: [{do: '...', run: 'comando'?, expect: 'qué debe pasar'?}]"},
+                    "preconditions": {"type": "string", "description": "What must already be true before starting"},
+                    "verification": {"type": "string", "description": "How you know it actually worked"},
+                    "success": {"type": "boolean", "description": "For action=outcome: did it work?"},
+                    "query": {"type": "string", "description": "For action=search"},
+                    "limit": {"type": "integer", "description": "Max results"}
+                },
+                "required": ["action"]
+            }),
+        ),
     ])
 }
 
@@ -542,7 +564,8 @@ fn meta_tool_defs() -> Vec<Value> {
 // The narrower profiles are opt-in via `CUBA_TOOL_PROFILE`.
 
 /// Day-to-day agent flow: search, write, relate, errors, sessions, decisions.
-const PROFILE_AGENT: [&str; 13] = [
+const PROFILE_AGENT: [&str; 14] = [
+    "cuba_receta",
     "cuba_faro",
     "cuba_cronica",
     "cuba_alma",
@@ -571,10 +594,11 @@ const PROFILE_STANDARD_EXTRA: [&str; 6] = [
 /// The lean core: what an agent actually reaches for in a normal turn.
 ///
 /// Everything else is one `cuba_tools` call away — not gone.
-const PROFILE_LEAN: [&str; 5] = [
+const PROFILE_LEAN: [&str; 6] = [
     "cuba_faro",       // search
     "cuba_cronica",    // write
     "cuba_expediente", // past errors — the anti-repetition guard
+    "cuba_receta",     // how things are done here — deferring this defeats its purpose
     "cuba_jornada",    // session lifecycle
     "cuba_alarma",     // report an error
 ];

@@ -168,7 +168,42 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         push(&mut out, &mut spent, budget, &s);
     }
 
-    // 4. What this project is about, if we could name it.
+    // 4. How things are DONE here. This is the section that stops an agent
+    // rediscovering the test command for the twentieth time — and it is ranked by
+    // what has actually worked, not by what has been read the most.
+    if let Ok(rows) = sqlx::query(
+        "SELECT name, trigger_context, success_count, failure_count
+         FROM brain_procedures
+         ORDER BY (success_count::float8 / GREATEST(success_count + failure_count, 1)) DESC,
+                  success_count DESC
+         LIMIT 5",
+    )
+    .fetch_all(pool)
+    .await
+        && !rows.is_empty()
+    {
+        let mut s = String::from("\n### Procedimientos conocidos\n");
+        for r in &rows {
+            let n: String = r.try_get("name").unwrap_or_default();
+            let t: String = r.try_get("trigger_context").unwrap_or_default();
+            let ok: i32 = r.try_get("success_count").unwrap_or(0);
+            let ko: i32 = r.try_get("failure_count").unwrap_or(0);
+            let record = if ok + ko == 0 {
+                "sin probar".to_string()
+            } else {
+                format!("{ok}/{} ok", ok + ko)
+            };
+            s.push_str(&format!("- **{n}** ({record})"));
+            if !t.is_empty() {
+                s.push_str(&format!(" — {t}"));
+            }
+            s.push('\n');
+        }
+        s.push_str("_Traelos con `cuba_receta action=get`._\n");
+        push(&mut out, &mut spent, budget, &s);
+    }
+
+    // 5. What this project is about, if we could name it.
     if let Some(p) = project
         && let Ok(rows) = sqlx::query(
             "SELECT e.name, e.entity_type

@@ -56,6 +56,14 @@ async fn main() {
             }
             return;
         }
+        Some("skills") => {
+            if let Err(e) = cuba_memorys::skills_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "skills failed");
+                eprintln!("skills error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("recall") => {
             if let Err(e) = cuba_memorys::recall_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "recall failed");
