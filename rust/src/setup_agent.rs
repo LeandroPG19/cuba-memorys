@@ -45,6 +45,10 @@ fn known_targets() -> Vec<(&'static str, PathBuf)> {
         ("claude", home().join(".claude.json")),
         ("mcp", home().join(".mcp.json")),
         ("cursor", home().join(".cursor").join("mcp.json")),
+        // Warp keeps its own MCP config, and it was quietly launching a 384-d
+        // server against a 1024-d column while this audit reported all clear —
+        // because it was not on the list.
+        ("warp", home().join(".warp").join(".mcp.json")),
     ]
 }
 
