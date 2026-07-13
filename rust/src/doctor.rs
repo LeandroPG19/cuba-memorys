@@ -124,15 +124,28 @@ fn stale_processes() -> Vec<u32> {
         let Ok(exe) = std::fs::read_link(&exe_link) else {
             continue; // not ours, or no permission
         };
-        if exe.file_name().and_then(|n| n.to_str()) != Some("cuba-memorys") {
+
+        // When a running binary is replaced, Linux appends " (deleted)" to the
+        // /proc/<pid>/exe symlink — so the file NAME becomes "cuba-memorys
+        // (deleted)". Matching on the raw name therefore filtered out precisely
+        // the processes this check exists to find: the ones still executing an
+        // image that no longer exists on disk. Strip the suffix before comparing.
+        let raw = exe.to_string_lossy();
+        let (path, deleted) = match raw.strip_suffix(" (deleted)") {
+            Some(p) => (std::path::PathBuf::from(p), true),
+            None => (exe.clone(), false),
+        };
+        if path.file_name().and_then(|n| n.to_str()) != Some("cuba-memorys") {
             continue;
         }
 
-        // The binary was replaced out from under a running process.
-        if exe.to_string_lossy().ends_with(" (deleted)") {
+        // The binary was replaced out from under a running process: it is still
+        // serving the old code from memory.
+        if deleted {
             stale.push(pid);
             continue;
         }
+        let exe = path;
 
         // mtime of /proc/<pid> approximates when the process started.
         let (Ok(bin_meta), Ok(proc_meta)) =
@@ -613,6 +626,25 @@ mod tests {
             redact_url("postgresql://localhost:5432/brain"),
             "postgresql://localhost:5432/brain"
         );
+    }
+
+    #[test]
+    fn a_replaced_binary_is_recognized_despite_the_deleted_suffix() {
+        // Linux appends " (deleted)" to /proc/<pid>/exe when the running image is
+        // replaced. Matching the raw file name against "cuba-memorys" therefore
+        // filtered out exactly the processes this check exists to find — it
+        // reported "no stale processes" while six were running the old code.
+        let raw = "/home/x/rust/target/release/cuba-memorys (deleted)";
+        let (path, deleted) = match raw.strip_suffix(" (deleted)") {
+            Some(p) => (std::path::PathBuf::from(p), true),
+            None => (std::path::PathBuf::from(raw), false),
+        };
+        assert!(deleted);
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("cuba-memorys"));
+
+        // A live binary parses unchanged.
+        let live = "/home/x/rust/target/release/cuba-memorys";
+        assert!(live.strip_suffix(" (deleted)").is_none());
     }
 
     #[test]
