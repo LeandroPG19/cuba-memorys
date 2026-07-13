@@ -455,14 +455,40 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .unwrap_or("")
             })
             .collect();
+        // Only let the cross-encoder speak when there is a cross-encoder. With no
+        // model loaded, `rerank` returns identity pairs whose scores are the
+        // descending index (n, n-1, …); writing those into `total` would preserve
+        // the order but destroy the fusion scores the caller reads.
+        let have_model = crate::search::rerank::enabled();
+
         if let Ok(reranked) = crate::search::rerank::rerank(query, &contents).await {
             let original = results.clone();
             results = reranked
                 .into_iter()
                 .filter_map(|(idx, score)| {
                     let mut entry = original.get(idx).cloned()?;
-                    // Bump total slightly so post-MMR ordering respects rerank
-                    entry.1.total += score * 0.0001; // tiebreaker only
+                    if have_model {
+                        // The cross-encoder REPLACES the fusion score. That is the
+                        // entire premise of retrieve-then-rerank: RRF is the recall
+                        // stage, the cross-encoder is the precision stage, and it is
+                        // the stronger signal — it reads the query and the document
+                        // together instead of scoring them apart.
+                        //
+                        // The previous line added `score * 0.0001` and called it a
+                        // "tiebreaker". Measured on this corpus, consecutive RRF
+                        // scores are separated by 0.00016–0.00219, so a bump of at
+                        // most 0.0001 is smaller than the SMALLEST gap: it could not
+                        // reorder anything, ever. And any later `sort_by(total)` —
+                        // the session boost runs one whenever a session is open, and
+                        // one was — restored the original order outright.
+                        //
+                        // So a 568M-parameter model was loaded, 50 documents were
+                        // scored, 0.33s per query was spent, and the output was
+                        // bit-for-bit identical to not running it at all.
+                        entry.1.total = score;
+                    } else {
+                        entry.1.total += score * 0.0001;
+                    }
                     Some(entry)
                 })
                 .collect();

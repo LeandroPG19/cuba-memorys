@@ -1,5 +1,35 @@
 //! Cross-encoder reranker — bge-reranker-v2-m3 (Xiao 2023).
 //!
+//! # STATUS: measured, and it does NOT earn its place. Do not enable it.
+//!
+//! Tried properly in July 2026 and it bought nothing. Recording the result so
+//! nobody pays the cost of finding out twice:
+//!
+//! - The integration was mathematically incapable of working. `faro` added
+//!   `cross_encoder_score * 0.0001` to the fusion score and called it a
+//!   "tiebreaker". Measured on this corpus, consecutive RRF scores are separated
+//!   by 0.00016–0.00219 — so a bump of at most 0.0001 is smaller than the
+//!   SMALLEST gap in the ranking. It could never reorder anything. On top of
+//!   that, the session boost runs a `sort_by(total)` whenever a session is open,
+//!   which restored the original order outright.
+//!
+//! - Fixed that (the cross-encoder now REPLACES the fusion score, which is the
+//!   premise of retrieve-then-rerank) and the eval did not move: nDCG@10 stayed
+//!   at 0.7344, bit for bit, across every configuration tried.
+//!
+//! - It is not free. ~0.33 s per query on CPU, a 1.1 GB ONNX on disk, and the
+//!   quantized build published upstream does not even load (float16 scales in
+//!   DequantizeLinear, rejected by this ORT version). An isolated test of the
+//!   fp32 model hung, which suggests a deadlock in the spawn_blocking path that
+//!   nobody has hit because nobody has ever really run this.
+//!
+//! The project rule is that a mechanism earns its place in the eval or gets cut.
+//! This one did not. The code stays — correctly wired now, so a future attempt
+//! starts from a working integration rather than a broken one — but it is off by
+//! default and should stay off until a larger dataset shows it winning. n=10 is
+//! too small to detect a small gain, and that is an honest limit of the evidence,
+//! not a reason to ship it on a hunch.
+//!
 //! Real ONNX forward pass via the `ort` crate (already used by
 //! `embeddings::onnx`). Activated when `CUBA_RERANKER_PATH` points to a
 //! directory containing `model.onnx` (or `model_quantized.onnx`) plus
@@ -281,3 +311,4 @@ mod tests {
         assert!(pairs.is_empty());
     }
 }
+
