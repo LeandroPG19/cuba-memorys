@@ -888,35 +888,82 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
         })
         .collect();
     evidence_list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    evidence_list.truncate(10);
 
-    let similarities: Vec<f64> = evidence_list.iter().map(|(_, _, s, _, _)| *s).collect();
-    let sources: Vec<&str> = evidence_list
-        .iter()
-        .map(|(_, _, _, t, _)| t.as_str())
-        .collect();
+    // Retrieval always returns its top-K. That is right for search and wrong for
+    // verification: "the Chernobyl reactor used graphite" came back with ten pieces
+    // of "evidence" from a corpus that has never heard of Chernobyl. Cut the ones
+    // that are merely the nearest thing in the store.
+    evidence_list.retain(|(_, _, sim, _, _)| *sim >= grounding::MIN_EVIDENCE_SIMILARITY);
+    evidence_list.truncate(10);
 
     // Mejora 9: top_entity from merged results (no second query)
     let top_entity: Option<String> = evidence_list.first().map(|(_, _, _, _, e)| e.clone());
 
-    // Count total observations for entity-relative coverage (Mejora 7 integration)
-    let total_obs: Option<usize> = if let Some(ref entity_name) = top_entity {
-        sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM brain_observations o
-             JOIN brain_entities e ON o.entity_id = e.id
-             WHERE e.name = $1 AND o.observation_type != 'superseded'",
-        )
-        .bind(entity_name)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .map(|(c,)| c as usize)
-    } else {
-        None
-    };
+    // Ask a judge what the evidence actually SAYS about the claim.
+    //
+    // Similarity answers "is this on-topic". Verification needs "does this assert
+    // the claim", and those come apart exactly where it matters: the store saying
+    // "written in Rust" is maximally on-topic for the claim "written in Java" and
+    // maximally against it. Under the old scoring that false claim scored 0.61 while
+    // a true one scored 0.59.
+    //
+    // The judge backend is resolved from CUBA_JUDGE. In `auto` it prefers MCP
+    // sampling — the client's own model, at no cost to this server — then a local
+    // CLI, then the API, and finally the heuristic, which honestly reports `unknown`
+    // rather than inventing a verdict it cannot reach.
+    // Concurrently, not one after another. The verdicts are independent — nothing in
+    // evidence #2 depends on what the judge made of evidence #1 — so serializing them
+    // just multiplies the model's latency by the evidence count. Judged in sequence,
+    // a three-evidence verify cost over a minute of wall clock and would have made
+    // this feature unusable no matter how correct it was.
+    let judge = crate::cognitive::judge::resolve_judge();
+    let max_judged = crate::cognitive::judge::default_max_pairs();
+    let to_judge: Vec<(usize, &String, f64)> = evidence_list
+        .iter()
+        .take(max_judged)
+        .enumerate()
+        .map(|(i, (_, content, sim, _, _))| (i, content, *sim))
+        .collect();
 
-    let (confidence, level) = grounding::compute_grounding(&similarities, &sources, total_obs);
+    let judgments = futures::future::join_all(to_judge.iter().map(|(i, content, sim)| {
+        let judge = &judge;
+        async move { (*i, *sim, judge.judge_claim(claim, content).await) }
+    }))
+    .await;
+
+    let mut judged: Vec<grounding::JudgedEvidence> = Vec::with_capacity(judgments.len());
+    let mut verdicts: HashMap<usize, Value> = HashMap::with_capacity(judgments.len());
+
+    for (i, sim, result) in judgments {
+        let judgment = match result {
+            Ok(j) => j,
+            Err(e) => {
+                // A judge that cannot be reached must not silently become a judge that
+                // agrees. Dropping the verdict leaves this evidence counting for
+                // nothing, which lands the claim in `unknown` — the honest outcome.
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    backend = judge.backend_name(),
+                    "judge unavailable for this evidence — it will not count as support"
+                );
+                continue;
+            }
+        };
+        verdicts.insert(
+            i,
+            serde_json::json!({
+                "verdict": judgment.verdict,
+                "reason": judgment.reason,
+            }),
+        );
+        judged.push(grounding::JudgedEvidence {
+            similarity: sim,
+            verdict: judgment.verdict,
+            judge_confidence: judgment.confidence,
+        });
+    }
+
+    let (confidence, level) = grounding::compute_grounding_judged(&judged);
 
     // Log verify prediction to brain_verify_log
     sqlx::query(
@@ -944,26 +991,51 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
     .ok()
     .flatten();
 
+    // Evidence carries the verdict that was reached on it, so a caller can see WHY
+    // a claim scored what it scored — and disagree with the judge if it wants to.
     let evidence_json: Vec<Value> = evidence_list
         .iter()
-        .map(|(_, content, sim, obs_type, entity_name)| {
-            serde_json::json!({
+        .enumerate()
+        .map(|(i, (_, content, sim, obs_type, entity_name))| {
+            let mut e = serde_json::json!({
                 "content": content,
                 "similarity": sim,
                 "type": obs_type,
                 "entity": entity_name
-            })
+            });
+            if let Some(v) = verdicts.get(&i) {
+                e["verdict"] = v["verdict"].clone();
+                e["reason"] = v["reason"].clone();
+            }
+            e
         })
         .collect();
+
+    // Say it in words. A bare 0.0 reads as "broken"; "nothing in memory speaks to
+    // this" reads as an answer — and it is the answer the tool exists to give.
+    let interpretation = match level {
+        "contradicted" => "The stored evidence CONTRADICTS this claim.",
+        "verified" => "The stored evidence supports this claim.",
+        "partial" | "weak" => "Partial support — some evidence backs this claim, not decisively.",
+        _ if judged.is_empty() && evidence_list.is_empty() => {
+            "Nothing in memory relates to this claim. No grounding — treat as unverified."
+        }
+        _ => {
+            "Memory holds related material, but none of it asserts this claim. \
+             No grounding — being on-topic is not support."
+        }
+    };
 
     let mut response = serde_json::json!({
         "mode": "verify",
         "claim": claim,
         "confidence": confidence,
         "grounding": level,
+        "interpretation": interpretation,
         "evidence": evidence_json,
         "evidence_count": evidence_json.len(),
-        "source_diversity": sources.len()
+        "judged_by": judge.backend_name(),
+        "verdicts_reached": judged.len()
     });
 
     if let Some((cal,)) = calibration {
@@ -1166,9 +1238,15 @@ async fn vector_search(
         }
     };
 
-    // Vector search with temporal filtering on observations
-    let observations: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
-        "SELECT o.id, e.name, o.content,
+    // Vector search with temporal filtering on observations.
+    //
+    // `importance` comes back too. It did not, and since a semantic hit usually wins
+    // the fusion, `compact` reported `"i": null` on most results — the field looked
+    // broken in every response where it mattered most. The lexical branch had always
+    // selected it; only this one did not, so which branch a result arrived on decided
+    // whether the caller could see how important the memory was.
+    let observations: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
+        "SELECT o.id, e.name, o.content, o.importance::float8,
                 1.0 - (o.embedding <=> $1::vector) AS cosine_sim
          FROM brain_observations o
          JOIN brain_entities e ON o.entity_id = e.id
@@ -1189,12 +1267,13 @@ async fn vector_search(
 
     let mut results: Vec<Value> = observations
         .iter()
-        .map(|(id, entity_name, content, sim)| {
+        .map(|(id, entity_name, content, importance, sim)| {
             serde_json::json!({
                 "id": id.to_string(),
                 "type": "observation",
                 "entity_name": entity_name,
                 "content": content,
+                "importance": importance,
                 "cosine_similarity": sim
             })
         })

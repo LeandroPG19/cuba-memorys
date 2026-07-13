@@ -1,0 +1,48 @@
+name: Announce
+
+# Publica la release en LinkedIn y Reddit. El texto sale de la seccion de la
+# version en CHANGELOG.md, no se genera: lo que se publica es lo que escribiste.
+#
+# Cada plataforma se salta sola si le faltan sus secrets, asi que el workflow
+# funciona aunque solo tengas una configurada.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version a anunciar (p.ej. 0.11.1)"
+        required: true
+      dry_run:
+        description: "Solo enseñar los textos, sin publicar"
+        type: boolean
+        default: true
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Announce release
+        env:
+          LINKEDIN_CLIENT_ID: ${{ secrets.LINKEDIN_CLIENT_ID }}
+          LINKEDIN_CLIENT_SECRET: ${{ secrets.LINKEDIN_CLIENT_SECRET }}
+          LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+          LINKEDIN_REFRESH_TOKEN: ${{ secrets.LINKEDIN_REFRESH_TOKEN }}
+          LINKEDIN_PERSON_URN: ${{ secrets.LINKEDIN_PERSON_URN }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          REDDIT_SUBREDDITS: ${{ vars.REDDIT_SUBREDDITS }}
+          VERSION: ${{ inputs.version || github.event.release.tag_name }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          uv run --no-project --with httpx python .github/scripts/announce.py \
+            --version "${VERSION}" ${DRY_RUN}

@@ -112,8 +112,72 @@ fn get_cache() -> &'static std::sync::Mutex<TtlLruCache<Vec<f32>>> {
     CACHE.get_or_init(|| std::sync::Mutex::new(TtlLruCache::new()))
 }
 
+/// Where the ONNX Runtime shared library actually is, or `None`.
+///
+/// `ort` is built with `load-dynamic`, so it opens libonnxruntime at runtime rather
+/// than linking it. When it cannot find the library it does not return an error we
+/// can catch and fall back from — the process simply stops answering. Set
+/// ONNX_MODEL_PATH without ORT_DYLIB_PATH and the server starts, connects, migrates,
+/// announces itself ready, and then hangs on the first embedding, having logged
+/// nothing at all. That is the worst failure this codebase can produce, and it is
+/// the one a person hits on their very first attempt to enable semantic search.
+///
+/// So we look for the library ourselves, before handing the problem to `ort`, and
+/// degrade to hash embeddings with an explanation if it is not there. Checking the
+/// same places `dlopen` would means we do not reject setups that work today: a
+/// system-installed onnxruntime with no ORT_DYLIB_PATH is perfectly valid.
+fn locate_onnxruntime() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("ORT_DYLIB_PATH") {
+        let p = PathBuf::from(explicit);
+        return p.exists().then_some(p);
+    }
+
+    let lib = if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else if cfg!(target_os = "windows") {
+        "onnxruntime.dll"
+    } else {
+        "libonnxruntime.so"
+    };
+
+    let search: Vec<PathBuf> = std::env::var("LD_LIBRARY_PATH")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .chain(
+            [
+                "/usr/lib",
+                "/usr/local/lib",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib64",
+                "/opt/homebrew/lib",
+            ]
+            .iter()
+            .map(PathBuf::from),
+        )
+        .collect();
+
+    search.into_iter().map(|d| d.join(lib)).find(|p| p.exists())
+}
+
 fn get_model_status() -> &'static ModelStatus {
     MODEL_STATUS.get_or_init(|| {
+        // Before anything else: can we even load the runtime? See locate_onnxruntime.
+        if std::env::var("ONNX_MODEL_PATH").is_ok_and(|p| !p.is_empty())
+            && locate_onnxruntime().is_none()
+        {
+            tracing::error!(
+                "ONNX_MODEL_PATH está definido pero no encuentro la librería de ONNX Runtime. \
+                 `ort` la carga dinámicamente: sin ella el servidor NO falla — se cuelga en el \
+                 primer embedding, sin decir nada. Degradando al fallback de hash (la búsqueda \
+                 léxica y BM25 siguen funcionando; la semántica no).\n\
+                 Definí ORT_DYLIB_PATH con la ruta a libonnxruntime.so — \
+                 `cuba-memorys doctor` lo diagnostica."
+            );
+            return ModelStatus::Fallback;
+        }
+
         match std::env::var("ONNX_MODEL_PATH") {
             Ok(path) if !path.is_empty() => {
                 let p = PathBuf::from(&path);

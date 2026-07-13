@@ -6,6 +6,70 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.11.2] — 2026-07-13 (Cargo `0.11.2` · npm `0.11.2` · PyPI `1.13.2`)
+
+The anti-hallucination feature was hallucinating. Found by pointing the demo at it.
+
+### ⚠ Breaking — `cuba_faro mode=verify` now calls an LLM judge
+
+Verification escalates its evidence to a judge and derives confidence from the
+verdicts. It costs a model call (free via MCP sampling — your client's model — or a
+local `claude` CLI) and takes a few seconds. With no judge available it answers
+`unknown` instead of inventing a verdict. Response gains `interpretation`,
+`judged_by`, and a per-evidence `verdict`/`reason`.
+
+### Fixed
+
+- **`verify` scored false claims HIGHER than true ones.** Confidence came from
+  cosine similarity to the retrieved evidence — and similarity measures what a text
+  is *about*, not what it *asserts*. "cuba-memorys is written in Rust" and "…in
+  Java" are nearly the same vector: same subject, same shape, one word apart.
+  Measured on the live 1,461-observation corpus:
+
+  | claim | before | after |
+  |---|---|---|
+  | "usa RRF con k=60" (true) | 0.59 | **0.83 · verified** |
+  | "está escrito en Java" (false) | **0.61** | **0.00 · contradicted** |
+  | "la mejor paella lleva azafrán" (unrelated) | 0.45, 10 "evidence" items | **0.00 · unknown**, none |
+
+  No threshold could have fixed it — true claims landed at 0.43–0.57 similarity and
+  false ones at 0.55–0.59, completely overlapping. Entailment is a different
+  question from similarity and needs something that reads. Evidence below a
+  similarity floor is now discarded (retrieval always returns its top-K; that is
+  right for search and wrong for verification), and what survives goes to a judge.
+  Verdicts are weighted by similarity, so similarity decides how much a verdict
+  counts — never what the verdict is. "Unrelated" contributes to neither side: being
+  on-topic is not support.
+
+- **`cuba_juez` with the `claude_cli` backend never worked.** `claude --print
+  --output-format json` returns a report *about* the call, with the model's answer
+  as a string field inside it. The parser took the first `{` and last `}` — that
+  envelope — found no `verdict`, and fell back to "unknown". Since v0.8. The
+  heuristic quietly did all the work while the logs showed a model being called.
+
+- **Setting `ONNX_MODEL_PATH` without `ORT_DYLIB_PATH` hung the server.** `ort` loads
+  the runtime dynamically; when it cannot find the library it does not error, the
+  process just stops answering — after starting, connecting, migrating and
+  announcing itself ready. It logs an ERROR and degrades to lexical search now.
+
+- **`compact` reported `"i": null`** on most results. Only the vector branch failed
+  to select `importance`, and a semantic hit usually wins the fusion — so the field
+  looked broken exactly where it mattered.
+
+- Judge verdicts are fetched **concurrently**. Serially, a three-evidence verify cost
+  over a minute of wall clock and would have been unusable however correct it was.
+
+### Changed
+
+- **README rewritten** for someone arriving new, not for someone who followed the
+  version history. Every number in it is checked against the code by a test or was
+  measured — the old one claimed 25 tools (there are 28), pinned installs to
+  versions two releases stale, and documented none of the 13 CLI commands.
+- **The demo no longer writes to your database.** It defaulted `DATABASE_URL` to the
+  real brain on `:5488`, so recording the README GIF created entities in a live
+  memory store and ran PageRank over it. It now starts a throwaway Postgres and
+  destroys it on exit, and ignores your embedding config rather than inheriting it.
+
 ## [0.11.1] — 2026-07-13 (Cargo `0.11.1` · npm `0.11.1` · PyPI `1.13.1`)
 
 Two bugs found by *using* v0.11.0 rather than testing it — both in the same family
