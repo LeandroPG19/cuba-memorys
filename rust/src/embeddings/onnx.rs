@@ -126,7 +126,7 @@ fn get_cache() -> &'static std::sync::Mutex<TtlLruCache<Vec<f32>>> {
 /// degrade to hash embeddings with an explanation if it is not there. Checking the
 /// same places `dlopen` would means we do not reject setups that work today: a
 /// system-installed onnxruntime with no ORT_DYLIB_PATH is perfectly valid.
-fn locate_onnxruntime() -> Option<PathBuf> {
+pub(crate) fn locate_onnxruntime() -> Option<PathBuf> {
     if let Ok(explicit) = std::env::var("ORT_DYLIB_PATH") {
         let p = PathBuf::from(explicit);
         return p.exists().then_some(p);
@@ -140,11 +140,27 @@ fn locate_onnxruntime() -> Option<PathBuf> {
         "libonnxruntime.so"
     };
 
-    let search: Vec<PathBuf> = std::env::var("LD_LIBRARY_PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    // Our own cache dir comes first, because `cuba-memorys setup` downloads the
+    // runtime to exactly here and then writes ORT_DYLIB_PATH into the MCP client's
+    // config — which means the *server* finds it and nothing else does. Every CLI
+    // invocation from a plain shell (`search`, `dedupe`, `reembed`) saw no
+    // ORT_DYLIB_PATH, found no system library, and silently fell back to hash
+    // embeddings: the same query answered from the CLI and from the MCP was hitting
+    // two different vector spaces. `dlopen` cannot guess this path, so we hand it over.
+    let cache_lib = std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".cache/cuba-memorys/onnxruntime"));
+
+    let search: Vec<PathBuf> = cache_lib
+        .into_iter()
+        .chain(
+            std::env::var("LD_LIBRARY_PATH")
+                .unwrap_or_default()
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>(),
+        )
         .chain(
             [
                 "/usr/lib",
@@ -158,7 +174,19 @@ fn locate_onnxruntime() -> Option<PathBuf> {
         )
         .collect();
 
-    search.into_iter().map(|d| d.join(lib)).find(|p| p.exists())
+    let found = search
+        .into_iter()
+        .map(|d| d.join(lib))
+        .find(|p| p.exists())?;
+
+    // `ort` reads this variable itself when it dlopens. Finding the library and not
+    // telling it would leave us right back where we started.
+    if std::env::var("ORT_DYLIB_PATH").is_err() {
+        // SAFETY: called from the OnceLock init paths, before any thread has a
+        // session open; `ort` reads ORT_DYLIB_PATH lazily on first load.
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", &found) };
+    }
+    Some(found)
 }
 
 fn get_model_status() -> &'static ModelStatus {

@@ -101,15 +101,21 @@ Answers arrive in **`compact` by default**: abbreviated keys, content truncated 
 
 `cuba_faro mode=verify` checks a claim against what is stored. It used to score claims by **cosine similarity to the retrieved evidence**, and that does not work — similarity measures what a text is *about*, not what it *asserts*. "cuba-memorys is written in Rust" and "…in Java" are nearly the same vector. Measured on the live corpus, the **false claim scored 0.61 and the true one 0.59.**
 
-It now escalates the evidence to an LLM judge (`supports` / `contradicts` / `unrelated`) and derives confidence from the verdicts, weighting each by the evidence's similarity. Same corpus, after:
+Entailment is a different question from similarity, and it needs something that *reads*. A local cross-encoder now judges each piece of evidence — `supports` / `contradicts` / `unrelated` — and confidence is derived from the verdicts, each weighted by that evidence's similarity. Same corpus, after:
 
-| Claim | Before | After |
+| Claim | Before (cosine) | Now |
 |---|---|---|
-| "written in Rust" (true) | 0.59 | **0.83 · verified** |
+| "written in Rust" (true) | 0.59 | **0.995 · verified** |
 | "written in Java" (false) | **0.61** | **0.00 · contradicted** |
 | "the best paella uses saffron" (unrelated) | 0.45, with 10 "evidence" items | **0.00 · unknown**, no evidence |
 
-Being on-topic is not support, and the judge is told so explicitly. The backend is resolved automatically: your MCP client's own model via sampling (costs this server nothing), a local `claude` CLI, the Anthropic API, or — with none of those — an honest `unknown` rather than an invented verdict.
+Being on-topic is not support, and `unrelated` counts for **neither** side.
+
+The judge is **mDeBERTa-v3-base-xnli** running locally on ONNX: 100 languages, ~50 ms per verdict, no API key, no network, no cost. That matters here — about 75% of this corpus is Spanish, and the English-only NLI models everyone reaches for first would have silently failed on three memories out of four. Install it with `./rust/scripts/download_nli.sh`; `cuba-memorys doctor` will tell you whether it loaded.
+
+Without it, verification falls back to an LLM (your MCP client's own model via sampling, a local `claude` CLI, or the Anthropic API) — and with none of those, to an honest `unknown` rather than an invented verdict.
+
+Two things it will not do. It will not **confirm** a claim on weak evidence: entailment must clear 0.80 while contradiction needs only 0.60, because confirming a false memory and doubting a true one are not errors of equal cost. And when it cannot tell, it says so instead of returning whichever number came out largest — an argmax over a 3-way head will happily publish `supports` for a claim that is flatly false, and did.
 
 ### Calibrated abstention
 
@@ -187,7 +193,9 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | — | Semantic embeddings. **Both or neither.** |
 | `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the +21 nDCG model |
 | `CUBA_TOOL_PROFILE` | `full` | `lean` → 2 tools, 67% smaller catalogue, nothing lost |
-| `CUBA_JUDGE` | `auto` | `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
+| `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
+| `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`download_nli.sh`) |
+| `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
 | `CUBA_COMPACT_CHARS` | `1200` | Compact truncation (measured knee) |
 | `CUBA_OOD_THRESHOLD` | calibrated | Override the abstention threshold |
 | `CUBA_BITEMPORAL` | on | Mirror observations into `brain_facts` |

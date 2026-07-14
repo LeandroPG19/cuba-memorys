@@ -6,6 +6,81 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [Unreleased]
+
+### `verify` decides for itself now — locally, in Spanish, in 50 ms
+
+v0.11.2 fixed `cuba_faro mode=verify` by handing its evidence to an LLM judge. That was
+correct and it was slow: ~20 s per claim through the `claude` CLI, and with no CLI and
+no MCP client that supports sampling, verification degraded to `unknown` — which is to
+say, to nothing.
+
+Entailment is a classification problem, so it is now classified: **mDeBERTa-v3-base-xnli**
+(100 languages, 87.1% on XNLI) runs on the ONNX runtime this project already links.
+
+```
+claim: "cuba-memorys está escrito en Java"   (FALSE)
+  v0.11.0 (cosine) ....... 0.61  ← scored HIGHER than the true claim
+  v0.11.2 (LLM judge) .... contradicted, ~20 s
+  now (local NLI) ........ contradicted, ~50 ms, offline, free
+
+claim: "cuba-memorys está escrito en Rust"   (TRUE)
+  now .................... verified, 0.995
+```
+
+A full 10-evidence `verify` went from blowing the 30 s handler timeout to **5 s**.
+
+- New `NliJudge`, preferred in `CUBA_JUDGE=auto` when a model is installed. It takes
+  `judge_claim` (entailment) and leaves `judge` (contradiction between two memories) to
+  the LLM — that taxonomy includes `supersedes`, which means *the same fact, updated*,
+  and needs a sense of time a 3-way classifier does not have. Reporting a port migration
+  as a contradiction would be a regression, so the NLI does not answer what it cannot.
+- `./rust/scripts/download_nli.sh` fetches the model. `cuba-memorys doctor` reports it.
+- Undecided claims do **not** escalate to an LLM by default. An undecided NLI already
+  returns `unknown`, which counts for neither side — abstaining is *already* safe.
+  Escalation buys recall, not safety, and it costs 12 s per evidence. Opt in with
+  `CUBA_NLI_ESCALATE=1`.
+
+### Three things that looked obviously right and were measurably wrong
+
+Recorded because the next person to improve this will reach for the same three.
+
+1. **The quantized model (323 MB) confirms false claims.** It read evidence saying the
+   reranker "is disabled by default" as SUPPORTING the claim that it is *enabled*, at
+   0.62 confidence. The fp32 export says `contradicts` at 0.995. DeBERTa-v3's
+   disentangled attention does not survive int8 — and it bought nothing: **48 ms per
+   verdict quantized, 53 ms at full precision.** It was paying in accuracy for a speedup
+   that does not exist on CPU. Ships fp32 (1.1 GB).
+
+2. **Decomposing evidence into sentences makes it worse.** XNLI premises are single
+   sentences and stored memories are paragraphs, so cutting them up looked necessary. It
+   got **three of five real cases wrong, and it CONTRADICTED true claims** — because NLI
+   is trained on *scenes*, where two predicates about one subject are alternatives ("a
+   man is playing guitar" genuinely contradicts "…playing piano"). A knowledge base is
+   not a scene: "cuba-memorys uses PostgreSQL" and "cuba-memorys is written in Rust" are
+   both true, and shown in isolation the model rates them a **contradiction at 0.993**.
+   Every clause about a *different attribute of the same entity* became a vote against
+   the claim. The premise is now scored whole.
+
+3. **An argmax over the 3-way head is not a verdict.** The model scores `entailment`
+   at 0.693 for "the reranker is a bi-encoder" against evidence saying it is a
+   cross-encoder — jargon whose mutual exclusivity it cannot know. An argmax publishes
+   that as `supports`: a confirmed false claim, the exact bug this subsystem exists to
+   kill. Each class must now clear its own floor, and the floors are **asymmetric on
+   purpose** — entailment needs 0.80, contradiction 0.60. Confirming a false memory and
+   doubting a true one are not errors of equal cost. Every genuine entailment measured
+   scored ≥0.95; spurious ones live in the 0.6s.
+
+### Fixed
+
+- **Every CLI invocation was silently using hash embeddings.** `setup` downloads
+  onnxruntime to `~/.cache/cuba-memorys/onnxruntime/` and writes `ORT_DYLIB_PATH` into
+  the MCP client's config — so the *server* found the library and nothing else did.
+  `search`, `dedupe` and `reembed` run from a plain shell saw no `ORT_DYLIB_PATH`, found
+  no system library, and fell back to hash vectors: **the same query answered from the
+  CLI and from the MCP was hitting two different vector spaces.** `locate_onnxruntime()`
+  now looks in its own cache directory, where `dlopen` cannot guess to look.
+
 ## [0.12.0] — 2026-07-13 (Cargo `0.12.0` · npm `0.12.0` · PyPI `1.14.0`)
 
 The benchmark could not measure what this project claimed to have measured, and the
