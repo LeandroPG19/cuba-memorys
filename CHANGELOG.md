@@ -6,7 +6,7 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
-## [Unreleased]
+## [0.13.0] — 2026-07-14 (Cargo `0.13.0` · npm `0.13.0` · PyPI `1.15.0`)
 
 ### `verify` decides for itself now — locally, in Spanish, in 50 ms
 
