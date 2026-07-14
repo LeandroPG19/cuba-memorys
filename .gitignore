@@ -58,3 +58,4 @@ backups/
 # docs/ are work plans (not install docs); sandbox/ has local paths + brain refs.
 docs/
 sandbox/
+*.jsonl.partial
