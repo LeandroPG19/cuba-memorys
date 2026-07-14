@@ -15,6 +15,21 @@ use std::sync::{Mutex, OnceLock};
 use crate::net::fetch;
 use crate::search::cache::TtlLruCache;
 
+/// Is the tool switched on? Default: **no**.
+///
+/// The Cargo feature was supposed to be the whole switch, and it was not enough. The
+/// published binaries are the default build, so a feature that is off by default is a
+/// feature that ships to nobody: `cuba_docs` existed for exactly one release and could
+/// not be invoked by a single person who installed from npm or PyPI. Compiling it in
+/// and *advertising* it conditionally is the version that both works and keeps the
+/// promise — with `CUBA_DOCS` unset the tool is not in the catalogue, the dispatcher
+/// refuses it, and this server makes no outbound request of any kind.
+pub fn enabled() -> bool {
+    std::env::var("CUBA_DOCS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Documentation is not a memory: it is fetched, read once, and worth keeping for the
 /// rest of the session rather than re-fetched for every follow-up question.
 static DOC_CACHE: OnceLock<Mutex<TtlLruCache<String>>> = OnceLock::new();
@@ -85,6 +100,13 @@ fn resolve(library: &str) -> Result<String> {
 /// navigation chrome and handing it the three paragraphs about the function it asked
 /// about.
 pub async fn handle(args: &Value) -> Result<Value> {
+    if !enabled() {
+        anyhow::bail!(
+            "cuba_docs está apagado. Es la única parte de cuba-memorys que sale a \
+             internet, así que no se enciende sola: exportá CUBA_DOCS=1 en el entorno \
+             del servidor MCP."
+        );
+    }
     let library = args
         .get("library")
         .and_then(Value::as_str)
@@ -196,6 +218,33 @@ mod tests {
     fn known_ecosystems_have_explicit_urls() {
         assert!(resolve("fastapi").unwrap().contains("tiangolo"));
         assert!(resolve("React").unwrap().contains("react.dev"));
+    }
+
+    /// The switch is OFF unless someone reaches for it.
+    ///
+    /// This is the guarantee: with `CUBA_DOCS` unset, the only tool in cuba-memorys
+    /// that can leave the machine is neither advertised nor dispatchable, so the server
+    /// makes no outbound request at all. v0.13.0 tried to make the Cargo feature carry
+    /// that promise and it carried too much — the published binaries are the default
+    /// build, so the tool shipped to nobody.
+    #[test]
+    fn the_network_is_off_unless_asked_for() {
+        // No env var in the test process, so this is the shipped default.
+        assert!(
+            !enabled(),
+            "CUBA_DOCS no está puesto: cuba_docs DEBE estar apagado"
+        );
+        assert!(
+            !crate::handlers::is_known_tool("cuba_docs"),
+            "apagado, el dispatcher no puede conocerla"
+        );
+        assert!(
+            !crate::constants::tool_definitions()
+                .iter()
+                .any(|t| t.get("name").and_then(Value::as_str) == Some("cuba_docs")),
+            "apagado, no puede aparecer en el catálogo: una herramienta que el agente \
+             no ve es una que no puede llamar, y ESA es la garantía"
+        );
     }
 
     /// A model WILL eventually pass a URL here, and that URL must not become a fetch

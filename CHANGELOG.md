@@ -6,6 +6,44 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.13.1] — 2026-07-14 (Cargo `0.13.1` · npm `0.13.1` · PyPI `1.15.1`)
+
+Two things v0.13.0 shipped that nobody could use, found by installing it instead of
+trusting the green checkmark.
+
+### `cuba_docs` shipped to nobody
+
+It was gated behind a Cargo feature that is **off by default** — and the published
+binaries *are* the default build. So the tool existed for one entire release and could
+not be invoked by a single person who installed from npm or PyPI. CI never compiled the
+feature either, so nothing anywhere was checking it.
+
+The feature now ships **compiled in** and switched off at runtime. With `CUBA_DOCS`
+unset the tool is not advertised, the dispatcher refuses it, and the server makes no
+outbound request of any kind — the guarantee is unchanged, but it is now a guarantee
+an agent can see, rather than a comment promising one. Set `CUBA_DOCS=1` to enable it.
+
+- Release binaries and the Python wheel build with `--features docs`.
+- CI compiles, clippies and tests **both** configurations. A feature CI never builds is
+  a feature nobody is checking.
+- A test asserts the tool is absent from the catalogue when the switch is off.
+
+### The npm recovery instruction sent you in a circle
+
+With `npm config set ignore-scripts true` — a reasonable hardening, and common — the
+postinstall that downloads the binary never runs. `bin.js` correctly refused to run a
+stale binary off the PATH and told you to fix it with:
+
+    npm rebuild cuba-memorys --foreground-scripts
+
+**which cannot work, because `npm rebuild` obeys `ignore-scripts` too.** The command it
+prints now is the one that was verified on a machine with the setting on:
+
+    npm rebuild cuba-memorys --ignore-scripts=false --foreground-scripts
+
+A recovery instruction that fails is worse than none: it costs the reader the time to
+try it before they start doubting the message instead of the setting.
+
 ## [0.13.0] — 2026-07-14 (Cargo `0.13.0` · npm `0.13.0` · PyPI `1.15.0`)
 
 ### `verify` decides for itself now — locally, in Spanish, in 50 ms

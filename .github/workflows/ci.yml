@@ -48,6 +48,16 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      # The `docs` feature ships in the release binaries, so it has to be tested like
+      # the release binaries. It was not, and cuba_docs shipped to nobody for a whole
+      # version: the published build is the DEFAULT build, and the feature was off by
+      # default. A feature CI never compiles is a feature nobody is checking.
+      - name: cargo clippy (--features docs)
+        run: cargo clippy --all-targets --features docs -- -D warnings
+
+      - name: cargo test (--features docs)
+        run: cargo test --features docs
+
       - name: cargo audit
         run: |
           cargo install cargo-audit --quiet

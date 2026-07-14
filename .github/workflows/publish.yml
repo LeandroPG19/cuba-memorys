@@ -70,12 +70,12 @@ jobs:
       - name: Build (cargo)
         if: "!matrix.use_cross"
         working-directory: rust
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features docs --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.use_cross
         working-directory: rust
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --features docs --target ${{ matrix.target }}
 
       - name: Stage artifact (Unix)
         if: runner.os != 'Windows'
@@ -173,7 +173,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist
+          args: --release --features docs --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           before-script-linux: ${{ matrix.openssl_before_script }}

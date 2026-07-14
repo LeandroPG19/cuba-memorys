@@ -54,15 +54,20 @@ function resolveBinary() {
       ? "no cuba-memorys on PATH (or it is too old to report its version)"
       : `PATH has cuba-memorys ${found}, but this package is ${EXPECTED}`;
 
+  // `npm rebuild` ALSO obeys ignore-scripts, so telling someone to run it when
+  // ignore-scripts is exactly what broke them sends them in a circle. It did, and the
+  // command printed here was verified against a machine with `ignore-scripts=true`
+  // set globally — which is a reasonable hardening, not a misconfiguration, and is
+  // why this path is common rather than exotic.
   process.stderr.write(
     `cuba-memorys: cannot find the ${EXPECTED} binary — ${reason}.\n\n` +
-      `Postinstall downloads it, so this usually means postinstall did not run:\n` +
-      `  • npm is configured with ignore-scripts (check: npm config get ignore-scripts)\n` +
-      `  • or the download from GitHub Releases failed\n\n` +
+      `Postinstall downloads it, so this means postinstall did not run. Almost always\n` +
+      `that is npm's ignore-scripts (check: npm config get ignore-scripts).\n\n` +
       `Fix with one of:\n` +
-      `  npm rebuild cuba-memorys --foreground-scripts\n` +
+      `  npm rebuild cuba-memorys --ignore-scripts=false --foreground-scripts\n` +
       `  pip install cuba-memorys\n` +
       `  https://github.com/LeandroPG19/cuba-memorys/releases/tag/v${EXPECTED}\n\n` +
+      `(Plain \`npm rebuild\` will NOT work: it obeys ignore-scripts too.)\n\n` +
       `Refusing to run a different version: this server migrates the database it\n` +
       `connects to, so the wrong binary does not just misbehave — it rewrites schema.\n`
   );

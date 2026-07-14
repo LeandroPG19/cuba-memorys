@@ -121,7 +121,7 @@ pub fn is_known_tool(name: &str) -> bool {
     // broken promise, and there is a test that says so.
     #[cfg(feature = "docs")]
     if name == "cuba_docs" {
-        return true;
+        return docs::enabled();
     }
     matches!(
         name,

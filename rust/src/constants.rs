@@ -106,7 +106,9 @@ static TOOL_DEFS: OnceLock<Vec<Value>> = OnceLock::new();
 
 /// Generate MCP tool definitions for tools/list response.
 pub fn tool_definitions() -> &'static Vec<Value> {
-    TOOL_DEFS.get_or_init(|| vec![
+    TOOL_DEFS.get_or_init(|| {
+        #[allow(unused_mut)]
+        let mut defs = vec![
         tool_def(
             "cuba_alma",
             "CRUD knowledge graph entities (concepts, projects, technologies, patterns, people). Auto-boosts neighbors on access. For transient info use cuba_cronica instead.",
@@ -514,7 +516,18 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                 "required": ["action"]
             }),
         ),
-    ])
+    ];
+
+        // Compiled in, but not offered unless asked for. `cuba_docs` is the only tool
+        // that leaves this machine, and a tool an agent cannot see is a tool it cannot
+        // call — which is the actual guarantee, not a comment promising one.
+        #[cfg(feature = "docs")]
+        if !crate::handlers::docs::enabled() {
+            defs.retain(|t| t.get("name").and_then(Value::as_str) != Some("cuba_docs"));
+        }
+
+        defs
+    })
 }
 
 /// Helper to build a tool definition.
