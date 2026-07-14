@@ -11,7 +11,7 @@
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
-Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools, 14 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
+Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `--features docs`), **14 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
 
 <p align="center">
   <img src="assets/demo.gif" alt="cuba-memorys terminal demo — hybrid search, claim verification with an LLM judge, procedural memory, and the CLI" width="760" />
