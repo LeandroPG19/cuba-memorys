@@ -6,7 +6,7 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
-## [Unreleased] — v0.12
+## [0.12.0] — 2026-07-13 (Cargo `0.12.0` · npm `0.12.0` · PyPI `1.14.0`)
 
 The benchmark could not measure what this project claimed to have measured, and the
 graph was quietly broken.
@@ -15,16 +15,48 @@ graph was quietly broken.
 
 The evaluation had **ten queries**. At n=10 the 95% interval on nDCG is roughly
 ±0.12, and the smallest detectable effect is ~0.25. Two conclusions this project
-published rested inside that noise and are hereby retracted:
+published rested inside that noise:
 
-- ~~"Associative retrieval degrades all four metrics"~~ — the reported drop was
-  **−0.03**. That is a quarter of the error bar. **Not measured.**
-- ~~"The cross-encoder reranker earns nothing"~~ — with n=10, nothing smaller than
-  ~25 points was detectable. The honest statement is **"could not measure"**, not
-  "no effect".
+- ~~**"The cross-encoder reranker earns nothing"**~~ — **it had never run.** Three
+  bugs in series, each hiding the next:
 
-Both features remain off, but for lack of evidence, not because of it. They will be
-re-evaluated on the new benchmark.
+  1. `faro` wrapped the call in `if let Ok(..)`, so the error was **dropped** and the
+     RRF ranking returned untouched. The same silent-degradation pattern that let the
+     vector branch die unnoticed. *This is why the output was "bit for bit identical"
+     to not reranking:* not because reranking changed nothing, but because it never
+     happened.
+  2. It fed the model **`token_type_ids`**. bge-reranker-v2-m3 is XLM-RoBERTa, which
+     has no segment embeddings — that is a BERT input. Every inference threw
+     `Invalid input name: token_type_ids`.
+  3. It read the logits as **`f32`**. The checkpoint emits `f16` (needs ort's `half`
+     feature). This one only surfaced once (2) was fixed.
+
+  Two of these were architectural mismatches, obvious from a single error message.
+  **Nobody saw the message, because bug 1 ate it.** A feature cannot earn anything
+  when its results are thrown away. Fixed and being measured properly.
+
+- **"Associative retrieval degrades all four metrics"** — the conclusion holds, the
+  evidence did not. −0.03 at n=10 is a quarter of the error bar. But the correct test
+  for two configurations over the *same* queries is a **paired** one, and under a
+  paired bootstrap on the new dataset the interval is **[−0.051, −0.018]** and never
+  touches zero: it improves **0** queries and hurts **23**. The decision to disable it
+  was right; the reasoning was not. *The power was never in more data — it was in
+  using the right test.*
+
+### The real numbers
+
+The system's nDCG is not 0.894. On 221 id-scored queries it is **0.50** [95% CI
+0.44–0.56]. It did not get worse; it was never 0.894.
+
+`compact` saves **28% of tokens** (not 40%) at **exactly identical nDCG** — identical
+to four decimal places, because a response format cannot change *which* documents rank,
+only how they are printed. That the old benchmark measured a quality cost for
+truncation was itself an artefact: truncating the text removed the marker substrings it
+was grading on.
+
+The **+21.2 nDCG for bge-m3 is withdrawn.** The direction is almost certainly right;
+the magnitude came from the broken benchmark and re-establishing it would mean
+re-embedding the corpus twice.
 
 ### Fixed — the benchmark itself
 
@@ -67,6 +99,34 @@ re-evaluated on the new benchmark.
   have merged two different CNC guides irreversibly. So `--apply` merges only what is
   *provable* (identical after normalizing case and separators), and everything else
   is shown, or judged one by one with `--judge`.
+
+  (The LLM judge, asked whether `Mapupitta-Web` and `Mapupita-Web` were the same
+  entity, first answered *"different — there are separate memory records for each"*.
+  That is the bug offered as proof there is no bug. The prompt now disarms that
+  argument explicitly, and a test pins it.)
+
+- **`reranker_degraded` in the search response.** You asked for reranking, the
+  cross-encoder threw on every pair, and you got the RRF order back looking exactly
+  like a reranked one. Same reason `degraded` exists for the vector branch: an agent
+  handed a silently un-reranked top-10 will simply trust it.
+
+### Fixed — the CLI was eating your flags
+
+- **`search "x" --format verbose` searched, literally, for «x --format verbose».**
+  Unknown flags fell into the catch-all and were **concatenated onto the query**. It
+  returned nothing, with no hint why.
+- **`save "x" --importancia 0.9` stored «x --importancia 0.9» AS THE MEMORY CONTENT.**
+  Same catch-all. This one corrupts data.
+- Both, plus `delete`, now reject unknown `--flags` with a usage error. Same family as
+  the `--batch 64` that `reembed` silently ignored: an argument a tool pretends not to
+  see is an argument that lies about what it did.
+
+### Added — build limits
+
+`.cargo/config.toml` (3 jobs) and a `quick` profile (`lto = "thin"`, 16 codegen units).
+The release profile's fat LTO with `codegen-units = 1` peaked past 8 GB in a single
+unit and froze a 14.9 GB laptop running zram. Use `--profile quick` to iterate;
+`--release` only to measure and ship.
 
 ## [0.11.2] — 2026-07-13 (Cargo `0.11.2` · npm `0.11.2` · PyPI `1.13.2`)
 

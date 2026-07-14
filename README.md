@@ -11,7 +11,7 @@
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
-Written in Rust. Backed by PostgreSQL + pgvector. 28 MCP tools, 13 CLI commands, and every number in this README measured rather than assumed.
+Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools, 14 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
 
 <p align="center">
   <img src="assets/demo.gif" alt="cuba-memorys terminal demo — hybrid search, claim verification with an LLM judge, procedural memory, and the CLI" width="760" />
@@ -71,7 +71,7 @@ export ONNX_MODEL_PATH="$HOME/.cache/cuba-memorys/models"
 export ORT_DYLIB_PATH="/path/to/libonnxruntime.so"    # BOTH are required
 ```
 
-**bge-m3 (1024-d) is materially better** — measured on a real 1,443-observation corpus, nDCG@10 goes **0.682 → 0.894**. It needs a dimension migration (`scripts/migrate-embedding-dim.sh 1024`) and `CUBA_EMBED_MODEL=bge-m3 CUBA_POOLING=cls`.
+**bge-m3 (1024-d) is better than e5-small**, though the size of the gap is no longer claimed: the +21 nDCG figure that used to sit here came from a benchmark that scored relevance by substring match. It needs a dimension migration (`scripts/migrate-embedding-dim.sh 1024`) and `CUBA_EMBED_MODEL=bge-m3 CUBA_POOLING=cls`.
 
 Set `ONNX_MODEL_PATH` without `ORT_DYLIB_PATH` and the server tells you and degrades to lexical search. (Until v0.11.2 it hung silently instead. That was the worst bug in this project's history.)
 </details>
@@ -95,7 +95,7 @@ Procedural memory is a separate table rather than a ninth observation type for a
 
 Hybrid RRF fusion (k=60, Cormack 2009) over three signals — full-text, BM25 (`ts_rank_cd`), and pgvector HNSW — with entropy-routed weighting that shifts from keyword-heavy to semantic as the query's Shannon entropy rises.
 
-Answers arrive in **`compact` by default**: abbreviated keys, truncation at its measured knee (1200 chars). **40% fewer tokens at identical nDCG.** Pass `"format": "verbose"` for the full per-branch score breakdown.
+Answers arrive in **`compact` by default**: abbreviated keys, content truncated at 1200 chars. **28% fewer tokens at identical nDCG** — identical to four decimal places, because the response format cannot change which documents rank, only how they are printed. Pass `"format": "verbose"` for the full per-branch score breakdown.
 
 ### Verification that actually verifies
 
@@ -131,7 +131,7 @@ This exists because the failure mode of a hybrid search engine is not a crash �
 
 ## The CLI: your memory without an LLM in the middle
 
-Thirteen commands. `cuba-memorys --help` lists them all.
+Fourteen commands. `cuba-memorys --help` lists them all.
 
 | | |
 |---|---|
@@ -142,9 +142,18 @@ Thirteen commands. `cuba-memorys --help` lists them all.
 | `reembed` | Re-encode what needs it (default: only stale rows, not all of them) |
 | `calibrate` | Recompute the abstention threshold from your corpus |
 | `link` | Auto-link entities by NPMI co-occurrence |
+| **`dedupe`** | Entities that are the same thing under different names — see below |
 | `skills <dir>` | Export procedures as Claude Code Skills |
-| `eval` | Retrieval benchmark — nDCG@10, MRR, recall, and token cost |
+| `eval` | Retrieval benchmark — nDCG@10 with confidence intervals, MRR, recall, token cost |
 | `setup` | Wire this into your MCP clients; `setup check` audits them |
+
+### `dedupe` — because a different string is a different entity
+
+`cuba_alma create` inserts with `ON CONFLICT (name)`. So one project fragments into `Mapupita-Web`, `Mapupitta-Web` (typo), `Mapupita Web`, `mapupita`… and searching one finds none of the others. On a real 266-entity graph, **158 of them (59%) had not a single relation** — for PageRank and multi-hop retrieval, they did not exist.
+
+What decides a merge is **not** the embedding centroid. That was the obvious idea and it is wrong: `M-Codes Reference Guide` and `G-Codes Reference Guide` sit at **0.811 cosine** between centroids. On a corpus about one domain, centroid similarity measures the *domain*, not the *entity* — a 0.80 threshold would have merged two different CNC guides, irreversibly.
+
+So `--apply` merges only what is **provable** (identical after normalizing case and separators). Typos and near-matches are shown, and judged one at a time with `--judge`. The old name is written to `brain_entity_aliases`, so nothing is lost: looking it up still resolves.
 
 ---
 
@@ -185,16 +194,33 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 
 ---
 
-## Measured, including what did not work
+## Measured — and the benchmark that was lying
 
-Every number here comes from `cuba-memorys eval` on a real corpus. Three of the results are negative, and they are the ones worth reading:
+Until v0.12 this section carried a line reading *"every number here is measured rather than assumed"*, and every number in it was wrong. The benchmark was broken in three ways, and finding out cost two published conclusions.
 
-**The benchmark was not deterministic.** Fusion happened in a `HashMap` and sorted by score with no tie-break; Rust randomizes that iteration order per process. Three identical runs scored 0.7389 / 0.7344 / 0.7389. **Every optimization number this project had ever recorded rested on noise.** Fixed (tie-break by id): 5/5 reproducible. Fixing it then turned two celebrated features into measured losses:
+**It had ten queries.** A 95% interval of roughly ±0.12; the smallest effect it could detect was ~0.25 nDCG. Any claim about a smaller difference was noise wearing a decimal point.
 
-- **Associative retrieval degrades all four metrics** (nDCG 0.734 → 0.705, MRR 0.833 → 0.660). A note in this repo claimed "+10 points recall@10, measured". That measurement predates the determinism fix. Off by default.
-- **The cross-encoder reranker earns nothing.** Its integration was also arithmetically incapable of working (it added `score × 0.0001` when RRF scores separate by 0.00016). Fixed so the cross-encoder actually decides the order — and it still gained **zero**, for 0.33s/query and 1.1 GB of RAM. Wired, off, and documented as a negative result.
+**Relevance was judged by substring match.** A result counted as correct if its text merely *contained* a marker word — so every observation mentioning "postgres" scored as a right answer to any question about postgres, whether it answered anything or not. That measures keyword presence, not retrieval, and it tilts the whole benchmark toward the lexical branch and against the vector one.
 
-What did work: **bge-m3** (+21.2 nDCG), **compact by default** (−40% tokens at identical quality), **conformal abstention** (100% of OOD queries caught, 0% false abstentions), **lean tool profile** (−67% catalogue).
+**nDCG normalized against what was retrieved, not what exists.** With 5 relevant documents in the corpus and 2 found, the "ideal" ranking was taken to be those 2 — so a system that missed 60% of the answer scored a perfect **1.0**. (And `R@10 = 3.125` shipped in this file. Recall is a proportion.)
+
+The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** [95% CI 0.44–0.56]. The system did not get worse. It was never 0.894.
+
+### What that cost
+
+- ~~"The cross-encoder reranker earns nothing"~~ — **it had never run.** Three bugs in series: `faro` wrapped the call in `if let Ok(..)` and dropped the error; it fed `token_type_ids` to a model that is XLM-RoBERTa and has none; it read `f16` logits as `f32`. The output was "bit for bit identical" to no reranking not because reranking changed nothing, but because it never happened. Fixed; being measured properly now.
+
+- **Associative retrieval does degrade** — but the old evidence (−0.03 at n=10) could not have shown it. On the new dataset with a **paired bootstrap** (the correct test: same queries in both arms), the interval is **[−0.051, −0.018]** and never touches zero. It improves 0 queries and hurts 23. The decision was right; the reasoning was not. *The power was never in more data — it was in using the right test.*
+
+### What survives, re-measured honestly
+
+| | |
+|---|---|
+| **`compact` by default** | **−28% tokens at identical nDCG** (paired difference: exactly 0.0000 — format cannot change which documents rank, only how they are shown). The old "−40%" came from the broken benchmark. |
+| **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
+| **`lean` tool profile** | −67% catalogue, zero functions lost. |
+| **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |
+| **The benchmark itself** | 221 queries (was 10), relevance by document **id**, bootstrap confidence intervals, and the **minimum detectable effect** printed beside every result — so nobody reads a 3-point difference as a finding again. |
 
 ---
 
@@ -227,7 +253,7 @@ git clone https://github.com/LeandroPG19/cuba-memorys.git
 cd cuba-memorys/rust && cargo build --release
 
 ./scripts/demo.sh          # runs on a throwaway Postgres it removes on exit
-./scripts/merge-gate.sh    # fmt · clippy -D warnings · 210 tests · audit · integration
+./scripts/merge-gate.sh    # fmt · clippy -D warnings · 223 tests · audit · integration
 ```
 
 Publishing is tag-driven: `v*` triggers GitHub Release binaries (5 platforms), PyPI wheels, npm, and the MCP Registry. A test pins all four files that hold a version number to the same value, because they used to drift and nothing caught it.
