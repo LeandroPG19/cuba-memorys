@@ -494,7 +494,33 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         // running it at all. Which is how this project concluded, and published, that
         // "the cross-encoder reranker earns nothing" — a feature cannot earn anything
         // when its results are thrown away.
-        match crate::search::rerank::rerank(query, &contents).await {
+        // Time-box the cross-encoder. bge-reranker-v2-m3 is XLM-RoBERTa-large, and on
+        // CPU it can spend tens of seconds on 50 candidates — past the 30 s handler
+        // timeout, which would fail the whole search rather than the reranker alone. So
+        // it gets a budget, and when it blows it, the search returns the RRF ranking
+        // (recall stage) instead of hanging: on fast hardware or a GPU the reranker
+        // runs and earns its +92% nDCG; on slow hardware the query still answers.
+        let rerank_budget = std::time::Duration::from_secs(
+            std::env::var("CUBA_RERANK_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20),
+        );
+        let rerank_result =
+            match tokio::time::timeout(rerank_budget, crate::search::rerank::rerank(query, &contents))
+                .await
+            {
+                Ok(inner) => inner,
+                Err(_) => {
+                    tracing::warn!(
+                        secs = rerank_budget.as_secs(),
+                        "el reranker excedió su presupuesto — se devuelve el ranking RRF \
+                         (subí CUBA_RERANK_TIMEOUT_SECS o usá un modelo más chico/GPU)"
+                    );
+                    Err(anyhow::anyhow!("reranker timeout"))
+                }
+            };
+        match rerank_result {
             Ok(reranked) => {
                 let original = results.clone();
                 results = reranked

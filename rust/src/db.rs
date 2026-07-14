@@ -30,13 +30,25 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
         .log_statements(tracing::log::LevelFilter::Debug)
         .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1));
 
+    // Which machine is this? Filled once, applied to every connection so that every
+    // INSERT inherits `origin_node` through its column DEFAULT (migration 0034). CUBA_
+    // NODE_NAME wins; otherwise the OS hostname, which is a sane default when two
+    // machines share a database and nobody set the name explicitly.
+    let node_name = std::env::var("CUBA_NODE_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok()) // Unix
+        .or_else(|| std::env::var("COMPUTERNAME").ok()) // Windows
+        .unwrap_or_default();
+
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .min_connections(1)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
-        .after_connect(|conn, _meta| {
+        .after_connect(move |conn, _meta| {
+            let node = node_name.clone();
             Box::pin(async move {
                 sqlx::query("SET timezone TO 'UTC'")
                     .execute(&mut *conn)
@@ -46,6 +58,13 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
                     .await
                     .ok();
                 sqlx::query("SELECT set_config('app.current_project', '', false)")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                // Provenance for every write on this connection. `false` = session
+                // scope, so it persists for the life of the pooled connection.
+                sqlx::query("SELECT set_config('cuba.node_name', $1, false)")
+                    .bind(&node)
                     .execute(&mut *conn)
                     .await
                     .ok();

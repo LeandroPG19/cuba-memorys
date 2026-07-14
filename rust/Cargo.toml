@@ -77,8 +77,18 @@ lru = "0.12"
 # Pure Rust binding wraps the zstd C library; multi-platform release builds OK.
 zstd = "0.13"
 
-# V0.8: optional Anthropic API client for cuba_juez (feature flag `anthropic-api`).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+# HTTP client. Non-optional since v0.13.2: the `models` subcommand downloads model
+# weights and the ONNX runtime cross-platform, and that is core onboarding, not an
+# opt-in. Compiling an HTTP client is not the same as making a request — `cuba_docs`
+# (feature `docs`) is the only thing that reaches the network unasked; `models` only
+# ever downloads when a person types it.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# Extracting the ONNX runtime archive that `models` fetches: .tgz on Unix, .zip on
+# Windows. Both pure-Rust so cross-compiled release builds stay clean.
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Feature `docs`: outbound documentation fetching. cuba-memorys makes NO network
 # requests without this. Read src/net/guard.rs before touching any of it.
@@ -97,11 +107,11 @@ default = []
 bitemporal = []
 graph-energy = []
 eval-benchmarks = []
-# Enables AnthropicApiJudge in cuba_juez. Adds reqwest + rustls (~150KB to binary).
-anthropic-api = ["dep:reqwest"]
+# Enables AnthropicApiJudge in cuba_juez. reqwest is now a base dependency.
+anthropic-api = []
 # `cuba_docs`: fetches library documentation over the network. OFF by default —
 # whoever does not want a memory server that talks to the internet does not get one.
-docs = ["dep:reqwest", "dep:url", "dep:html2text"]
+docs = ["dep:url", "dep:html2text"]
 # V0.9: Prometheus /metrics endpoint with RED metrics per handler.
 # Adds metrics + metrics-exporter-prometheus + hyper for the HTTP server.
 observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]

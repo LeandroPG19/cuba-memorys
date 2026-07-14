@@ -32,6 +32,11 @@ pub async fn resolve_database_url() -> String {
     if matches!(get_container_state(), ContainerState::Running) {
         return build_url();
     }
+    // A running container the daemon simply could not report is still reachable on its
+    // port. If the DB answers, use it rather than trying to provision over the top.
+    if matches!(get_container_state(), ContainerState::Unknown) && port_answers() {
+        return build_url();
+    }
 
     log("DATABASE_URL not set. Attempting automatic PostgreSQL setup...");
 
@@ -64,6 +69,21 @@ pub async fn resolve_database_url() -> String {
         ContainerState::Stopped => {
             log("Starting existing PostgreSQL container 'cuba-memorys-db'...");
             docker_start();
+        }
+        ContainerState::Unknown => {
+            // The daemon is not answering `docker ps`. Creating a container now is the
+            // one thing guaranteed to go wrong (it may already exist). If the DB port
+            // answers, use it; otherwise tell the user the daemon is down rather than
+            // colliding on the name.
+            if port_answers() {
+                log("Docker no responde, pero PostgreSQL contesta en el puerto — se usa.");
+                return build_url();
+            }
+            log("ERROR: el daemon de Docker no responde (docker ps falló).");
+            log("En Windows esto suele ser WSL2 sin arrancar: revisá que la");
+            log("'Plataforma de máquina virtual' esté activada y Docker Desktop corriendo.");
+            log("Diagnóstico: docker info");
+            std::process::exit(1);
         }
         ContainerState::NotFound => {
             log("");
@@ -120,28 +140,76 @@ fn is_docker_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Does something answer on the Postgres port? A TCP connect is the ground truth when
+/// `docker` cannot be trusted — a container the daemon won't report is still listening.
+fn port_answers() -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let addr = format!("127.0.0.1:{PG_PORT}");
+    TcpStream::connect_timeout(
+        &addr.parse().expect("host:port literal is valid"),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
+/// Is the container name already taken? Used to recover from a `docker run` that failed
+/// on collision — a container exists, so start it instead of dying.
+fn name_already_in_use() -> bool {
+    matches!(
+        get_container_state(),
+        ContainerState::Running | ContainerState::Stopped
+    )
+}
+
 enum ContainerState {
     Running,
     Stopped,
     NotFound,
+    /// The daemon did not answer. NOT the same as NotFound — this is the state that
+    /// used to be silently misread as "create a new one", producing "name already in
+    /// use" on Windows where the daemon is briefly unreachable while WSL2 comes up.
+    Unknown,
 }
 
 /// Check the state of the cuba-memorys-db container.
+///
+/// `docker ps -a` with an anchored name filter, not `inspect --format
+/// {{.State.Running}}`. The inspect form has two failure modes that both ended in a
+/// bogus `docker run`: the Go template renders differently across shells, and — worse —
+/// the old code collapsed EVERY non-success exit to `NotFound`, so a daemon that was
+/// merely slow to answer looked like "no container", and the next step tried to create
+/// one that already existed.
 fn get_container_state() -> ContainerState {
     let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}", CONTAINER_NAME])
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name=^{CONTAINER_NAME}$"),
+            "--format",
+            "{{.Status}}",
+        ])
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if state == "true" {
-                ContainerState::Running
-            } else {
-                ContainerState::Stopped
-            }
-        }
-        _ => ContainerState::NotFound,
+        Ok(o) if o.status.success() => parse_container_status(&String::from_utf8_lossy(&o.stdout)),
+        // Command ran but errored, or could not spawn at all: the daemon is not
+        // answering. Do not guess "NotFound" — that guess is what breaks.
+        _ => ContainerState::Unknown,
+    }
+}
+
+/// Read `docker ps --format {{.Status}}` output into a state. Pure, so the mapping that
+/// once sent a running container down the "create a new one" path is unit-tested.
+fn parse_container_status(stdout: &str) -> ContainerState {
+    let status = stdout.trim();
+    if status.is_empty() {
+        ContainerState::NotFound // no row matched the name filter
+    } else if status.starts_with("Up") {
+        ContainerState::Running
+    } else {
+        ContainerState::Stopped // Exited, Created, Restarting…
     }
 }
 
@@ -195,6 +263,13 @@ fn docker_create_and_start() {
         Ok(s) if s.success() => {
             log("Container created successfully.");
         }
+        // The safety net: if the name is already taken, the container exists and our
+        // state check missed it. Do not die — start what is there. This is the last
+        // line of defence against the "name already in use" the field report hit.
+        _ if name_already_in_use() => {
+            log("El contenedor ya existía — se reutiliza en vez de recrearlo.");
+            docker_start();
+        }
         _ => {
             log("ERROR: Failed to create Docker container.");
             log("Make sure Docker is running: docker info");
@@ -231,4 +306,37 @@ async fn wait_for_healthy(timeout: Duration) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mapping that broke in the field: a running container must never read as
+    /// "not found", because NotFound is what triggers `docker run` and the collision.
+    #[test]
+    fn container_status_is_read_correctly() {
+        assert!(
+            matches!(parse_container_status("Up 2 hours (healthy)"), ContainerState::Running),
+            "«Up …» es Running"
+        );
+        assert!(
+            matches!(parse_container_status("Up 3 seconds"), ContainerState::Running)
+        );
+        assert!(
+            matches!(parse_container_status("Exited (0) 5 minutes ago"), ContainerState::Stopped),
+            "«Exited …» es Stopped, no NotFound: existe, hay que arrancarlo"
+        );
+        assert!(
+            matches!(parse_container_status("Created"), ContainerState::Stopped)
+        );
+        assert!(
+            matches!(parse_container_status(""), ContainerState::NotFound),
+            "sin fila, el nombre no existe"
+        );
+        assert!(
+            matches!(parse_container_status("  \n"), ContainerState::NotFound),
+            "solo espacios = ninguna fila"
+        );
+    }
 }

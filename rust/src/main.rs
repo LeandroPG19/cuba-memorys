@@ -126,6 +126,14 @@ async fn main() {
             }
             return;
         }
+        Some("models") => {
+            if let Err(e) = cuba_memorys::models_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "models failed");
+                eprintln!("models: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("link") => {
             if let Err(e) = cuba_memorys::link_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "link failed");

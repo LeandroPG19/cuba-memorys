@@ -106,10 +106,23 @@ pub fn enabled() -> bool {
 fn get_status() -> &'static RerankerStatus {
     RERANKER_STATUS.get_or_init(|| {
         let path = RERANKER_PATH.get_or_init(|| {
-            std::env::var("CUBA_RERANKER_PATH")
+            // Explicit path wins. But when it is unset — which is the default, because
+            // nothing writes it — fall back to the cache directory the download script
+            // populates. Without this, the model can be sitting on disk and the
+            // reranker still runs as identity: the same silent gap that kept it from
+            // ever running, one layer up. A model nobody can point the binary at is a
+            // model that does not exist.
+            if let Some(p) = std::env::var("CUBA_RERANKER_PATH")
                 .ok()
                 .map(PathBuf::from)
                 .filter(|p| p.exists())
+            {
+                return Some(p);
+            }
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".cache/cuba-memorys/reranker"))
+                .filter(|p| p.join("model.onnx").exists())
         });
         match path {
             Some(p) => match init_session(p) {
@@ -208,11 +221,19 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
     Ok(indexed)
 }
 
-/// CPU-bound scoring. Tokenizes each (query, candidate) pair and runs the
-/// ONNX forward pass to extract a single relevance logit, then sigmoids
-/// to [0, 1]. One inference per candidate — bge-reranker is a cross-encoder
-/// (no batched single-tower trick).
+/// CPU-bound scoring. All (query, candidate) pairs go through the model in ONE batched
+/// forward pass, and each yields a single relevance logit, sigmoided to [0, 1].
+///
+/// It used to be one inference per candidate — a `session.run` per pair, behind the
+/// session Mutex, so 50 candidates meant 50 serialized passes. Measured, that was ~15 s
+/// for a single search: unusable to turn on by default, even though the reranker earns
+/// +92% nDCG (0.28→0.53, paired bootstrap). Batching turns those 50 locked passes into
+/// one and lets ORT fill the GEMM instead of trickling rows through it. Same lesson,
+/// same fix as `cognitive::nli::classify_batch`.
 fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
     let session_lock = RERANKER_SESSION
         .get()
         .context("reranker session not initialized")?;
@@ -223,100 +244,104 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         .get()
         .context("reranker tokenizer not initialized")?;
 
-    let mut scores = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        // bge-reranker tokenizes the pair as `[CLS] query [SEP] candidate [SEP]`.
-        // Tokenizer's encode_pair handles the [SEP]/segment ids correctly.
-        let encoding = tokenizer
-            .encode((query, candidate.as_str()), true)
-            .map_err(|e| anyhow::anyhow!("encode pair: {e}"))?;
+    // Each pair is `[CLS] query [SEP] candidate [SEP]`. encode_batch keeps the [SEP]
+    // and segment handling the tokenizer already gets right.
+    let pairs: Vec<(&str, &str)> = candidates.iter().map(|c| (query, c.as_str())).collect();
+    let encodings = tokenizer
+        .encode_batch(pairs, true)
+        .map_err(|e| anyhow::anyhow!("encode batch: {e}"))?;
 
-        let ids = encoding.get_ids();
-        let attn_mask = encoding.get_attention_mask();
-        let type_ids = encoding.get_type_ids();
-        let seq_len = ids.len();
+    let batch = encodings.len();
+    // Pad to the longest pair in THIS batch, not the model's max — a batch of short
+    // candidates stays cheap; only one that needs the length pays for it.
+    let seq = encodings
+        .iter()
+        .map(|e| e.get_ids().len())
+        .max()
+        .context("empty batch")?;
 
-        let input_ids: Vec<i64> = ids.iter().map(|&i| i as i64).collect();
-        let attn: Vec<i64> = attn_mask.iter().map(|&m| m as i64).collect();
-        let types: Vec<i64> = type_ids.iter().map(|&t| t as i64).collect();
-        let shape = vec![1i64, seq_len as i64];
-
-        let input_ids_t = ort::value::Tensor::from_array((shape.clone(), input_ids))
-            .context("input_ids tensor")?;
-        let attn_t = ort::value::Tensor::from_array((shape.clone(), attn))
-            .context("attention_mask tensor")?;
-
-        // Ask the model what it takes. Do not assume.
-        //
-        // This passed `token_type_ids` unconditionally, and every inference failed
-        // with `Invalid input name: token_type_ids` — because bge-reranker-v2-m3 is
-        // **XLM-RoBERTa**, and RoBERTa has no segment embeddings. `token_type_ids` is
-        // a BERT input. The model was built for one architecture and fed the inputs of
-        // another, so it never produced a single score.
-        //
-        // The failure was invisible: `faro` wrapped the call in `if let Ok(..)`, so
-        // the error was dropped and the RRF ranking returned untouched. The model
-        // loaded, 0.33 s per query was spent on inference that always threw, and the
-        // output was bit-for-bit identical to not reranking at all — which is exactly
-        // what this project measured, and then published as "the cross-encoder
-        // reranker earns nothing". It could not earn anything. It never ran.
-        let wants_type_ids = session
-            .inputs()
-            .iter()
-            .any(|i| i.name() == "token_type_ids");
-
-        let outputs = if wants_type_ids {
-            let type_t =
-                ort::value::Tensor::from_array((shape, types)).context("token_type_ids tensor")?;
-            session.run(ort::inputs! {
-                "input_ids" => input_ids_t,
-                "attention_mask" => attn_t,
-                "token_type_ids" => type_t,
-            })
-        } else {
-            session.run(ort::inputs! {
-                "input_ids" => input_ids_t,
-                "attention_mask" => attn_t,
-            })
+    let mut ids = Vec::with_capacity(batch * seq);
+    let mut mask = Vec::with_capacity(batch * seq);
+    let mut types = Vec::with_capacity(batch * seq);
+    for e in &encodings {
+        let (e_ids, e_mask, e_types) = (e.get_ids(), e.get_attention_mask(), e.get_type_ids());
+        for i in 0..seq {
+            // Past this pair's end: padding, and the attention mask says so, so the
+            // model never reads a shorter candidate's tail as content.
+            ids.push(*e_ids.get(i).unwrap_or(&0) as i64);
+            mask.push(*e_mask.get(i).unwrap_or(&0) as i64);
+            types.push(*e_types.get(i).unwrap_or(&0) as i64);
         }
-        .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
+    }
 
-        if outputs.len() == 0 {
-            anyhow::bail!("reranker returned no outputs");
+    let shape = vec![batch as i64, seq as i64];
+    let input_ids_t =
+        ort::value::Tensor::from_array((shape.clone(), ids)).context("input_ids tensor")?;
+    let attn_t =
+        ort::value::Tensor::from_array((shape.clone(), mask)).context("attention_mask tensor")?;
+
+    // Ask the model what it takes. bge-reranker-v2-m3 is XLM-RoBERTa and has no
+    // `token_type_ids`; feeding them (as the pre-fix code did, unconditionally) made
+    // every inference throw `Invalid input name` — invisibly, behind a swallowed error,
+    // which is how the reranker "ran" for a release without producing one score.
+    let wants_type_ids = session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids");
+
+    let outputs = if wants_type_ids {
+        let type_t =
+            ort::value::Tensor::from_array((shape, types)).context("token_type_ids tensor")?;
+        session.run(ort::inputs! {
+            "input_ids" => input_ids_t,
+            "attention_mask" => attn_t,
+            "token_type_ids" => type_t,
+        })
+    } else {
+        session.run(ort::inputs! {
+            "input_ids" => input_ids_t,
+            "attention_mask" => attn_t,
+        })
+    }
+    .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
+
+    if outputs.len() == 0 {
+        anyhow::bail!("reranker returned no outputs");
+    }
+
+    // f32 or f16 depending on the export — asking only for f32 threw on the half-
+    // precision checkpoint, silently, for the reranker's entire prior life.
+    let (out_shape, data): (Vec<i64>, Vec<f32>) = match outputs[0].try_extract_tensor::<f32>() {
+        Ok((s, d)) => (s.to_vec(), d.to_vec()),
+        Err(_) => {
+            let (s, d) = outputs[0]
+                .try_extract_tensor::<half::f16>()
+                .map_err(|e| anyhow::anyhow!("extract logits (f32 and f16): {e}"))?;
+            (s.to_vec(), d.iter().map(|h| h.to_f32()).collect())
         }
+    };
 
-        // The logits may come back as f32 or f16, depending on how the checkpoint was
-        // exported — and this asked only for f32, so a half-precision export failed
-        // with `Cannot extract Tensor<f32> from Tensor<f16>`. Behind an `if let Ok(..)`
-        // in the caller, that error vanished and the RRF order was returned untouched.
-        //
-        // Two independent bugs stood between this model and a single score: it was fed
-        // BERT's `token_type_ids` (it is XLM-RoBERTa and has none), and its output was
-        // read at the wrong precision. Both failed silently. Both had to be fixed
-        // before the reranker produced one number.
-        let (out_shape, data): (Vec<i64>, Vec<f32>) = match outputs[0].try_extract_tensor::<f32>() {
-            Ok((s, d)) => (s.to_vec(), d.to_vec()),
-            Err(_) => {
-                let (s, d) = outputs[0]
-                    .try_extract_tensor::<half::f16>()
-                    .map_err(|e| anyhow::anyhow!("extract logits (f32 and f16): {e}"))?;
-                (s.to_vec(), d.iter().map(|h| h.to_f32()).collect())
-            }
-        };
+    // Output is [batch, num_labels]: one row per candidate. num_labels is 1 (a single
+    // relevance logit) or 2 (binary head → log-odds of the positive class).
+    let num_labels = out_shape.last().copied().unwrap_or(1).max(1) as usize;
+    if data.len() < batch * num_labels {
+        anyhow::bail!(
+            "reranker returned {} values, expected {}×{}",
+            data.len(),
+            batch,
+            num_labels
+        );
+    }
 
-        // bge-reranker output: [batch=1, num_labels=1] → single logit.
-        // Some checkpoints emit [1, 2] (binary classification) — pick label 1.
-        let logit = match out_shape.as_slice() {
-            [_, 1] | [1] => data[0],
-            [_, 2] | [2] => data[1] - data[0], // log-odds of relevance
-            _ => {
-                tracing::warn!(?out_shape, "unexpected reranker output shape — taking [0]");
-                data[0]
-            }
+    let mut scores = Vec::with_capacity(batch);
+    for b in 0..batch {
+        let row = &data[b * num_labels..(b + 1) * num_labels];
+        let logit = match num_labels {
+            1 => row[0],
+            2 => row[1] - row[0], // log-odds of relevance
+            _ => row[0],
         };
-        // Sigmoid → [0, 1] relevance probability.
-        let score = 1.0_f64 / (1.0 + (-logit as f64).exp());
-        scores.push(score);
+        scores.push(1.0_f64 / (1.0 + (-logit as f64).exp())); // sigmoid → [0,1]
     }
     Ok(scores)
 }
@@ -331,18 +356,19 @@ mod tests {
 
     #[tokio::test]
     async fn identity_when_disabled() {
-        // Env var not set → enabled() = false → identity output.
-        // SAFETY: tests in this module run sequentially; no other thread
-        // mutates env. We do NOT remove CUBA_RERANKER_PATH because
-        // RERANKER_STATUS is cached after first call — the OnceLock makes
-        // this safe regardless.
+        // Skip when a model is present — since the cache fallback, `enabled()` is true
+        // wherever the reranker is installed, and calling `rerank()` there would load a
+        // 1.1 GB model just to not assert anything. The identity contract only applies
+        // when the reranker is off, so only exercise it then.
+        if enabled() {
+            eprintln!("SKIP: reranker model present; identity path not exercised");
+            return;
+        }
         let pairs = rerank("anything", &["a", "b", "c"]).await.unwrap();
         assert_eq!(pairs.len(), 3);
-        if !enabled() {
-            // Identity preserves order
-            assert_eq!(pairs[0].0, 0);
-            assert!(pairs[0].1 > pairs[1].1);
-        }
+        // Identity preserves order.
+        assert_eq!(pairs[0].0, 0);
+        assert!(pairs[0].1 > pairs[1].1);
     }
 
     #[test]

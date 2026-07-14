@@ -339,6 +339,24 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
+    // --- The reranker: loaded, or silently the identity function? ---------------
+    // It spent its entire life running as identity, and nobody knew because nothing
+    // reported it. `doctor` reports it now — a reranker that is not loaded is not an
+    // error (it is optional), but it must never be an invisible one.
+    if crate::search::rerank::enabled() {
+        checks.push(Check::ok(
+            "reranker",
+            "cargado (bge-reranker-v2-m3) — reordena los candidatos por cross-encoder",
+        ));
+    } else {
+        checks.push(Check::warn(
+            "reranker",
+            "no cargado — el ranking se devuelve tal cual (RRF, sin reordenar)",
+            "es opcional, pero si querías reordenar y no pusiste el modelo, no está \
+             pasando nada. Instalalo: cuba-memorys models reranker",
+        ));
+    }
+
     // --- The verifier: is entailment decided locally, or by a 20 s round-trip? ---
     if crate::cognitive::nli::available() {
         if crate::cognitive::nli::enabled() {
@@ -359,7 +377,7 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
             "nli_entailment",
             "sin modelo NLI local",
             "`cuba_faro mode=verify` depende de un LLM (~20 s por afirmación), y sin CLI \
-             ni sampling degrada a `unknown`. Instalalo: ./scripts/download_nli.sh",
+             ni sampling degrada a `unknown`. Instalalo: cuba-memorys models nli",
         ));
     }
 

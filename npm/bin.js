@@ -4,24 +4,25 @@
  *
  * Resolves in order:
  *   1. npm/.bin/cuba-memorys[.exe]  — what postinstall downloaded, for THIS version
- *   2. cuba-memorys in PATH         — system install / pip install, IF it matches
+ *   2. download it now              — postinstall did not run; fetch on first use
+ *   3. cuba-memorys in PATH         — system install / pip install, IF it matches
  *
- * Step 2 used to be unconditional, and that was a trap. When postinstall does not
- * run — `npm install --ignore-scripts`, standard practice in hardened CI, or a
- * download that failed — this file would spawn whatever `cuba-memorys` happened to
- * be on the PATH and say nothing. Installing 0.11.0 and silently running an 0.6.0
- * left over from an old pip install is not a fallback; it is a wrong answer
- * delivered confidently. Here it is also dangerous: the server applies migrations
- * on startup, so a stale binary does not merely misbehave — it reshapes a database
- * it was never meant to touch.
+ * Step 2 is why `npm install -g cuba-memorys` survives npm 12. Install-time lifecycle
+ * scripts are moving to off-by-default (the postinstall that downloads the binary is
+ * exactly the kind npm is disabling), and when it does not run the package ships with
+ * no binary. The field report that prompted this was a Windows box where the install
+ * "succeeded" and the command did not exist. So if the binary is missing, we fetch it
+ * here, once, on first use — the same download the postinstall would have done.
  *
- * So the PATH binary must now prove it is the version this package expects. One too
- * old to answer `--version` boots the whole server instead (exactly what 0.6.0
- * does), hits the timeout, and is refused.
+ * Step 3 must PROVE its version. Falling back to whatever `cuba-memorys` is on the PATH
+ * once silently ran a leftover 0.6.0 in place of the installed version — and this server
+ * migrates the database it connects to on startup, so the wrong binary does not merely
+ * misbehave, it reshapes a schema it was never meant to touch.
  */
 const { spawn, execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const { ensureBinary } = require("./postinstall.js");
 
 const EXPECTED = require("../package.json").version;
 const isWindows = process.platform === "win32";
@@ -43,44 +44,50 @@ function probeVersion(bin) {
   }
 }
 
-function resolveBinary() {
+async function resolveBinary() {
   if (fs.existsSync(localBin)) return localBin;
+
+  // Postinstall did not run (npm 12 default, hardened CI, ignore-scripts). Fetch the
+  // binary now — the whole point of doing this here is that it no longer depends on a
+  // lifecycle script the ecosystem is turning off.
+  try {
+    return await ensureBinary();
+  } catch (err) {
+    process.stderr.write(
+      `cuba-memorys: could not download the ${EXPECTED} binary — ${err.message}\n`
+    );
+    // The download is the primary path now; the PATH probe below is only a courtesy
+    // for people who installed the binary some other way (pip, manual, package manager).
+  }
 
   const found = probeVersion(binName);
   if (found === EXPECTED) return binName;
 
   const reason =
     found === null
-      ? "no cuba-memorys on PATH (or it is too old to report its version)"
+      ? "no cuba-memorys on PATH either (or it is too old to report its version)"
       : `PATH has cuba-memorys ${found}, but this package is ${EXPECTED}`;
 
-  // `npm rebuild` ALSO obeys ignore-scripts, so telling someone to run it when
-  // ignore-scripts is exactly what broke them sends them in a circle. It did, and the
-  // command printed here was verified against a machine with `ignore-scripts=true`
-  // set globally — which is a reasonable hardening, not a misconfiguration, and is
-  // why this path is common rather than exotic.
   process.stderr.write(
-    `cuba-memorys: cannot find the ${EXPECTED} binary — ${reason}.\n\n` +
-      `Postinstall downloads it, so this means postinstall did not run. Almost always\n` +
-      `that is npm's ignore-scripts (check: npm config get ignore-scripts).\n\n` +
-      `Fix with one of:\n` +
-      `  npm rebuild cuba-memorys --ignore-scripts=false --foreground-scripts\n` +
+    `cuba-memorys: cannot obtain the ${EXPECTED} binary — ${reason}.\n\n` +
+      `The download on first run failed (offline, or GitHub Releases unreachable).\n` +
+      `Get it another way:\n` +
       `  pip install cuba-memorys\n` +
       `  https://github.com/LeandroPG19/cuba-memorys/releases/tag/v${EXPECTED}\n\n` +
-      `(Plain \`npm rebuild\` will NOT work: it obeys ignore-scripts too.)\n\n` +
       `Refusing to run a different version: this server migrates the database it\n` +
       `connects to, so the wrong binary does not just misbehave — it rewrites schema.\n`
   );
   process.exit(1);
 }
 
-const proc = spawn(resolveBinary(), process.argv.slice(2), {
-  stdio: "inherit",
-  env: process.env,
-});
-
-proc.on("exit", (code) => process.exit(code ?? 1));
-proc.on("error", (err) => {
-  process.stderr.write(`cuba-memorys: failed to start binary — ${err.message}\n`);
-  process.exit(1);
+resolveBinary().then((bin) => {
+  const proc = spawn(bin, process.argv.slice(2), {
+    stdio: "inherit",
+    env: process.env,
+  });
+  proc.on("exit", (code) => process.exit(code ?? 1));
+  proc.on("error", (err) => {
+    process.stderr.write(`cuba-memorys: failed to start binary — ${err.message}\n`);
+    process.exit(1);
+  });
 });
