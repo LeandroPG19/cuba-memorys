@@ -339,6 +339,30 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
+    // --- The verifier: is entailment decided locally, or by a 20 s round-trip? ---
+    if crate::cognitive::nli::available() {
+        if crate::cognitive::nli::enabled() {
+            checks.push(Check::ok(
+                "nli_entailment",
+                "cargado (mDeBERTa-v3-xnli) — verify decide en ~50 ms, sin LLM",
+            ));
+        } else {
+            checks.push(Check::fail(
+                "nli_entailment",
+                "hay un modelo NLI en disco pero NO carga",
+                "verify se cae al juez LLM (~20 s por afirmación) o al heurístico, que \
+                 no decide nada. Suele ser libonnxruntime.so: comprobá ORT_DYLIB_PATH.",
+            ));
+        }
+    } else {
+        checks.push(Check::warn(
+            "nli_entailment",
+            "sin modelo NLI local",
+            "`cuba_faro mode=verify` depende de un LLM (~20 s por afirmación), y sin CLI \
+             ni sampling degrada a `unknown`. Instalalo: ./scripts/download_nli.sh",
+        ));
+    }
+
     // --- Dimension agreement: model vs column (breaks everything if off) ----
     let runtime_dim = onnx::embedding_dim() as i64;
     match sqlx::query(

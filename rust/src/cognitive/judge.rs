@@ -89,32 +89,50 @@ pub trait ContradictionJudge: Send + Sync {
 /// or a `claude` CLI subprocess; the client (Claude Desktop, Cursor, etc.)
 /// pays for the LLM call. Auto-prefers Sampling when the client advertised
 /// the `sampling` capability during initialize.
+/// V0.12: `nli` mode added — entailment decided by a local cross-encoder in
+/// milliseconds instead of a ~20 s model round-trip, and it reads Spanish (77% of
+/// the corpus this was built for). In `auto` it wraps whichever LLM judge was
+/// chosen, rather than replacing it: the NLI takes `judge_claim`, the LLM keeps
+/// `judge`. See [`NliJudge`] for why that split is not an optimization but a
+/// correctness requirement.
 pub fn resolve_judge() -> Box<dyn ContradictionJudge> {
     let mode = env::var("CUBA_JUDGE")
         .unwrap_or_else(|_| "auto".to_string())
         .to_lowercase();
     match mode.as_str() {
+        "nli" | "nli_local" | "local" => Box::new(NliJudge::new(resolve_llm_judge())),
         "mcp_sampling" | "sampling" => Box::new(MCPSamplingJudge),
         "claude_cli" | "cli" => Box::new(ClaudeCodeJudge::from_env()),
         #[cfg(feature = "anthropic-api")]
         "anthropic_api" | "api" => Box::new(AnthropicApiJudge::from_env()),
         "heuristic" => Box::new(HeuristicJudge),
         _ => {
-            // auto: prefer MCP Sampling (zero cost to user), then CLI, then API,
-            // then heuristic.
-            if crate::protocol::client_supports_sampling() {
-                return Box::new(MCPSamplingJudge);
+            let llm = resolve_llm_judge();
+            // A filesystem check, not a 323 MB load — `resolve_judge` runs on paths
+            // that never ask for entailment. The model loads on first `judge_claim`.
+            if crate::cognitive::nli::available() {
+                return Box::new(NliJudge::new(llm));
             }
-            if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
-                return Box::new(ClaudeCodeJudge::from_env());
-            }
-            #[cfg(feature = "anthropic-api")]
-            if env::var("ANTHROPIC_API_KEY").is_ok() {
-                return Box::new(AnthropicApiJudge::from_env());
-            }
-            Box::new(HeuristicJudge)
+            llm
         }
     }
+}
+
+/// The LLM tier, in preference order: MCP Sampling (the client pays, so the user
+/// pays nothing), then the CLI, then the API, then the heuristic — which decides
+/// nothing and is honest about it.
+fn resolve_llm_judge() -> Box<dyn ContradictionJudge> {
+    if crate::protocol::client_supports_sampling() {
+        return Box::new(MCPSamplingJudge);
+    }
+    if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
+        return Box::new(ClaudeCodeJudge::from_env());
+    }
+    #[cfg(feature = "anthropic-api")]
+    if env::var("ANTHROPIC_API_KEY").is_ok() {
+        return Box::new(AnthropicApiJudge::from_env());
+    }
+    Box::new(HeuristicJudge)
 }
 
 /// Default max pairs the caller should escalate (cost cap).
@@ -275,6 +293,170 @@ impl ContradictionJudge for MCPSamplingJudge {
     }
     async fn run_prompt(&self, prompt: &str) -> Result<String> {
         crate::protocol::request_sampling(prompt).await
+    }
+}
+
+/// Entailment decided locally by a 323 MB cross-encoder, in milliseconds, for free.
+///
+/// # It answers exactly one of the two questions, and delegates the other
+///
+/// `judge_claim` — *does this evidence support this claim?* — is textbook NLI, and a
+/// model trained on XNLI answers it better than a prompt does, in ~30 ms instead of
+/// ~20 s.
+///
+/// `judge` is a different question wearing similar clothes. Its taxonomy is
+/// `contradicts | supersedes | complementary | unrelated`, and **`supersedes` is not
+/// an entailment relation** — it means *this is the same fact, updated*, which takes
+/// world knowledge and a sense of time that a 3-way classifier does not have. An NLI
+/// model shown "the server runs on port 5488" and "the server runs on port 5491"
+/// reports `contradiction`, confidently and uselessly: those two memories do not
+/// conflict, the port changed.
+///
+/// Reporting a migration as a contradiction would be a regression in `cuba_juez` and
+/// `dedupe`. So this judge does not answer what it cannot answer — `judge` goes to
+/// `inner`, an LLM that can reason about time.
+pub struct NliJudge {
+    /// For `judge()` and for the case where the model fails to load at first use.
+    inner: Box<dyn ContradictionJudge>,
+    /// Send claims the NLI could not decide to `inner`? Off by default — see
+    /// [`NliJudge::new`].
+    escalate_undecided: bool,
+}
+
+impl NliJudge {
+    /// `inner` is the fallback: it takes `judge()` outright, and catches `judge_claim`
+    /// if the model turns out not to load.
+    ///
+    /// # Why undecided claims do NOT go to the LLM by default
+    ///
+    /// It is tempting — the NLI has a blind spot, the LLM does not, so hand it the hard
+    /// ones. Measured on a real 10-evidence verify, that costs:
+    ///
+    /// ```text
+    ///   NLI alone, 10 evidences ............  1.4 s
+    ///   one evidence escalated to the CLI ... 12   s
+    /// ```
+    ///
+    /// One undecided evidence in ten, and the verify goes from 5 s to 17 s. Three of
+    /// them and it blows the 30 s handler budget entirely — which is precisely how this
+    /// feature failed its first end-to-end run.
+    ///
+    /// And it buys less than it looks. An undecided NLI already returns `unknown`,
+    /// which counts for **neither** side: abstaining is *already* safe, and no false
+    /// claim gets confirmed by it. Escalation buys recall — catching a contradiction
+    /// the NLI missed — not safety. Paying twelve seconds of a user's attention for
+    /// recall on one evidence out of ten is a bad trade to make silently on their
+    /// behalf.
+    ///
+    /// So the default is fast, local, and honest about what it did not judge. Set
+    /// `CUBA_NLI_ESCALATE=1` to buy the recall back.
+    pub fn new(inner: Box<dyn ContradictionJudge>) -> Self {
+        let escalate_undecided = env::var("CUBA_NLI_ESCALATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        Self {
+            inner,
+            escalate_undecided,
+        }
+    }
+}
+
+#[async_trait]
+impl ContradictionJudge for NliJudge {
+    fn backend_name(&self) -> &'static str {
+        "nli_local"
+    }
+
+    fn model_name(&self) -> Option<String> {
+        Some("mDeBERTa-v3-base-xnli".to_string())
+    }
+
+    async fn run_prompt(&self, prompt: &str) -> Result<String> {
+        // A classifier has no prompt surface. Anything that wants free-form text out
+        // of a judge wants the LLM underneath.
+        self.inner.run_prompt(prompt).await
+    }
+
+    /// Not entailment. See the type docs — this needs to reason about time.
+    async fn judge(&self, content_a: &str, content_b: &str) -> Result<Judgment> {
+        self.inner.judge(content_a, content_b).await
+    }
+
+    async fn judge_claim(&self, claim: &str, evidence: &str) -> Result<Judgment> {
+        // Evidence is the premise, the claim is the hypothesis: NLI asks whether a
+        // reader of the former would accept the latter. Reversing them asks a
+        // different question and gets a different answer.
+        match crate::cognitive::nli::entails(evidence, claim).await {
+            Ok(v) => {
+                // Decisive? Or did three classes come out near 1/3 apiece?
+                //
+                // "The reranker is a cross-encoder" against "the reranker is a
+                // bi-encoder" scores [0.36 entail · 0.30 neutral · 0.35 contra]. The
+                // argmax says *supports* — the exact opposite of the truth — and it
+                // says it because the model does not know those two architectures are
+                // mutually exclusive. That is domain knowledge, not linguistic
+                // inference, and no amount of XNLI training supplies it.
+                //
+                // A verdict drawn from that distribution would be a coin flip wearing
+                // a confidence score, which is precisely the failure that started all
+                // of this. So an undecided NLI does not answer: it escalates to
+                // something that has read more than sentence pairs.
+                if !v.decisive {
+                    if self.escalate_undecided {
+                        tracing::debug!(
+                            probs = ?v.probs,
+                            fallback = self.inner.backend_name(),
+                            "el NLI no se decide — escala al LLM (CUBA_NLI_ESCALATE=1)"
+                        );
+                        return self.inner.judge_claim(claim, evidence).await;
+                    }
+                    // `unknown`, not `unrelated`. The two look alike downstream — both
+                    // count as no vote — but they are different findings and the caller
+                    // deserves to know which one it got. `unrelated` means the evidence
+                    // was READ and says nothing about the claim. `unknown` means no
+                    // verdict was reached at all.
+                    return Ok(Judgment {
+                        verdict: "unknown".to_string(),
+                        confidence: 0.0,
+                        reason: Some(format!(
+                            "el NLI no alcanzó un veredicto (entail={:.2} neutral={:.2} \
+                             contra={:.2}). NO cuenta como apoyo ni como contradicción. \
+                             Para que un LLM decida estos casos: CUBA_NLI_ESCALATE=1",
+                            v.probs[0], v.probs[1], v.probs[2]
+                        )),
+                        backend: self.backend_name().to_string(),
+                        model: self.model_name(),
+                    });
+                }
+
+                Ok(Judgment {
+                    verdict: v.label.as_verdict().to_string(),
+                    confidence: v.confidence,
+                    reason: Some(format!(
+                        "NLI local (mDeBERTa-xnli): {} — p(entail)={:.2} p(neutral)={:.2} \
+                         p(contra)={:.2}",
+                        v.label.as_verdict(),
+                        v.probs[0],
+                        v.probs[1],
+                        v.probs[2]
+                    )),
+                    backend: self.backend_name().to_string(),
+                    model: self.model_name(),
+                })
+            }
+            Err(e) => {
+                // v0.11.2's lesson: a judge that fails must SAY it failed. The
+                // reranker spent its whole life throwing this exact error into an
+                // `if let Ok(..)` that dropped it, and every caller read the silence
+                // as success.
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    fallback = self.inner.backend_name(),
+                    "el NLI local falló — se delega el veredicto al juez de respaldo"
+                );
+                self.inner.judge_claim(claim, evidence).await
+            }
+        }
     }
 }
 

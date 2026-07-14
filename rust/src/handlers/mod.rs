@@ -15,6 +15,8 @@ pub mod centinela;
 pub mod contradiccion;
 pub mod cronica;
 pub mod decreto;
+#[cfg(feature = "docs")]
+pub mod docs;
 pub mod eco;
 pub mod expediente;
 pub mod faro;
@@ -77,6 +79,8 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
             "cuba_juez" => juez::handle(pool, args).await,
             "cuba_pizarra" => pizarra::handle(pool, args).await,
             "cuba_archivo" => archivo::handle(pool, args).await,
+            #[cfg(feature = "docs")]
+            "cuba_docs" => docs::handle(&args).await,
             _ => {
                 tracing::warn!(tool = %tool_name, "unknown tool");
                 anyhow::bail!("Unknown tool: {tool_name}")
@@ -112,6 +116,13 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
 /// Kept next to the dispatcher so a new tool added to one and forgotten in the
 /// other is caught by a test rather than by an agent at runtime.
 pub fn is_known_tool(name: &str) -> bool {
+    // Advertised only when the feature is on, so it must be *known* only when the
+    // feature is on too — a tool the catalogue offers and the dispatcher rejects is a
+    // broken promise, and there is a test that says so.
+    #[cfg(feature = "docs")]
+    if name == "cuba_docs" {
+        return true;
+    }
     matches!(
         name,
         "cuba_alma"
