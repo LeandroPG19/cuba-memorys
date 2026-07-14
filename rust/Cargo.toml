@@ -80,6 +80,11 @@ zstd = "0.13"
 # V0.8: optional Anthropic API client for cuba_juez (feature flag `anthropic-api`).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
+# Feature `docs`: outbound documentation fetching. cuba-memorys makes NO network
+# requests without this. Read src/net/guard.rs before touching any of it.
+url = { version = "2", optional = true }
+html2text = { version = "0.12", optional = true }
+
 # V0.9: optional Prometheus metrics (feature flag `observability`).
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
@@ -94,6 +99,9 @@ graph-energy = []
 eval-benchmarks = []
 # Enables AnthropicApiJudge in cuba_juez. Adds reqwest + rustls (~150KB to binary).
 anthropic-api = ["dep:reqwest"]
+# `cuba_docs`: fetches library documentation over the network. OFF by default —
+# whoever does not want a memory server that talks to the internet does not get one.
+docs = ["dep:reqwest", "dep:url", "dep:html2text"]
 # V0.9: Prometheus /metrics endpoint with RED metrics per handler.
 # Adds metrics + metrics-exporter-prometheus + hyper for the HTTP server.
 observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]

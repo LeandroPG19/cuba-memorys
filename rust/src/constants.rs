@@ -464,6 +464,19 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                 "required": ["action"]
             }),
         ),
+        #[cfg(feature = "docs")]
+        tool_def(
+            "cuba_docs",
+            "Read a library's CURRENT documentation from its official site. Use when you are about to write code against an API you have not verified this session — a renamed function or a changed signature is the most common way generated code fails, and memory cannot save you from it because your memory of the API is the thing that is wrong. `query` filters the page to the paragraphs that mention it. Requires the `docs` Cargo feature; every request is checked against SSRF (private ranges, cloud metadata, redirects).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "library": {"type": "string", "description": "Package name only — `tokio`, `sqlx`, `fastapi`, `react`. Not a URL. Unknown names are assumed to be Rust crates and resolved on docs.rs."},
+                    "query": {"type": "string", "description": "What you need to know (e.g. `spawn_blocking`, `Depends`). Filters the page to matching paragraphs; omit for the overview."}
+                },
+                "required": ["library"]
+            }),
+        ),
         tool_def(
             "cuba_juez",
             "LLM-judge for semantically-conflicting observations (v0.8). When cosine similarity sits in the ambiguous band (0.6-0.8), heuristic detectors miss vocabulary-different conflicts (e.g. 'Postgres' vs 'MongoDB'). cuba_juez escalates a pair to a real LLM via subprocess (Claude Code CLI, $0 if you have a subscription) or — when feature 'anthropic-api' is built in — the Anthropic API directly. Verdicts are persisted in brain_judgments (UNIQUE per pair = permanent cache).",

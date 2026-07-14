@@ -18,6 +18,9 @@ pub mod export;
 pub mod graph;
 pub mod handlers;
 pub mod link_cli;
+/// Outbound network access. Absent entirely unless the `docs` feature is on.
+#[cfg(feature = "docs")]
+pub mod net;
 pub mod observability;
 pub mod project;
 pub mod protocol;
