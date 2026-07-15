@@ -1,5 +1,3 @@
--- v0.4.0: Episodic memory (Tulving 1972) — separate from semantic facts.
--- Specific temporal events with actors/artifacts. Decay via Wixted power-law.
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -26,7 +24,6 @@ BEGIN
         CREATE INDEX idx_episodes_search ON brain_episodes USING GIN(search_vector);
         CREATE INDEX idx_episodes_trgm   ON brain_episodes USING GIN(content gin_trgm_ops);
         CREATE INDEX idx_episodes_time   ON brain_episodes(started_at DESC);
-        -- HNSW vector index for episode semantic search
         CREATE INDEX idx_episodes_embedding_hnsw
             ON brain_episodes USING hnsw (embedding vector_cosine_ops)
             WITH (m = 16, ef_construction = 128);

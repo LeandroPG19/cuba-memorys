@@ -30,7 +30,6 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://cuba:memorys2026@127.0.0.1:5488/brain"
 )
 
-# One smoke call per MCP tool (25 total). Order: session first, then reads, then writes.
 TOOL_CALLS: List[Tuple[str, str, Dict[str, Any]]] = [
     ("cuba_jornada", "current", {"action": "current"}),
     ("cuba_alma", "get", {"action": "get", "name": "_e2e_cronica"}),
@@ -72,9 +71,7 @@ TOOL_CALLS: List[Tuple[str, str, Dict[str, Any]]] = [
     ("cuba_archivo", "tail", {"action": "tail", "limit": 2}),
 ]
 
-# Destructive tool — covered in e2e_all_tools.py
 SKIP_LIVE = {"cuba_forget"}
-
 
 class McpSession:
     def __init__(self) -> None:
@@ -144,7 +141,6 @@ class McpSession:
         except subprocess.TimeoutExpired:
             self.proc.kill()
 
-
 def parse_tool_result(response: Dict[str, Any]) -> Tuple[bool, str]:
     if "error" in response:
         err = response["error"]
@@ -166,7 +162,6 @@ def parse_tool_result(response: Dict[str, Any]) -> Tuple[bool, str]:
         return False, f"tool body error: {body['error']}"
     return True, "ok"
 
-
 def main() -> int:
     if not BINARY.is_file():
         print(f"error: binary not found: {BINARY}", file=sys.stderr)
@@ -184,7 +179,6 @@ def main() -> int:
     passed = 0
 
     try:
-        # Lifecycle
         init = session.request(
             "initialize",
             {
@@ -217,7 +211,6 @@ def main() -> int:
         error_id: Optional[str] = None
         live_entity = "_mcp_live_test"
 
-        # Seed entity for dependent tools (e2e cleanup may have removed _e2e_cronica).
         seed = session.request(
             "tools/call",
             {
@@ -298,7 +291,6 @@ def main() -> int:
                 failed.append(f"cuba_remedio/resolve: {detail}")
                 print(f"FAIL cuba_remedio/resolve: {detail}")
 
-        # cuba_eco: needs an observation id from cronica add
         add_obs = session.request(
             "tools/call",
             {
@@ -359,7 +351,6 @@ def main() -> int:
         return 1
     print("All live MCP tool calls OK in single session.")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

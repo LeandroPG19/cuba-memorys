@@ -19,7 +19,7 @@ function probeVersion(bin) {
     const m = out.match(/(\d+\.\d+\.\d+)/);
     return m ? m[1] : null;
   } catch {
-    return null; // ENOENT, non-zero exit, or the 5s timeout on a pre-0.11 binary
+    return null;
   }
 }
 

@@ -43,7 +43,7 @@ test("ensureBinary does NOT download when a real binary is already present", asy
   const backup = hadFile ? fs.readFileSync(dest) : null;
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(dest, "#!/bin/sh\necho present\n"); // non-empty
+    fs.writeFileSync(dest, "#!/bin/sh\necho present\n");
     let logged = "";
     const p = mod.ensureBinary((m) => (logged += m));
     return p.then((resolved) => {
@@ -64,7 +64,7 @@ test("ensureBinary treats a 0-byte binary as missing", () => {
   const backup = hadFile ? fs.readFileSync(dest) : null;
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(dest, ""); // 0 bytes
+    fs.writeFileSync(dest, "");
     assert.strictEqual(fs.statSync(dest).size, 0);
     assert.ok(fs.existsSync(dest) && fs.statSync(dest).size === 0);
   } finally {

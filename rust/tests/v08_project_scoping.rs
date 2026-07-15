@@ -1,22 +1,3 @@
-//! Integration test — V0.8 project scoping.
-//!
-//! Validates the end-to-end project isolation pipeline:
-//!   1. Migration applies idempotently (re-run init does not fail).
-//!   2. `cuba_jornada start --project NAME` upserts brain_projects + sessions.project_id.
-//!   3. Writes (cronica, alma, alarma, puente) are tagged with the active project.
-//!   4. Reads (faro, vigia summary, contradiccion, etc.) only return rows from the
-//!      active project + legacy NULL rows.
-//!   5. Kill-switch CUBA_PROJECT_FILTER=off bypasses scoping.
-//!
-//! Requires DATABASE_URL pointing at a Postgres instance with pgvector.
-//!
-//! Run with:
-//!   DATABASE_URL="postgresql://cuba:memorys2026@localhost:5488/brain" \
-//!     cargo test --test v08_project_scoping -- --ignored --nocapture
-//!
-//! All assertions live in a single #[tokio::test] (same rationale as integration.rs:
-//! shared sqlx pool runtime).
-
 use serde_json::json;
 use uuid::Uuid;
 
@@ -30,7 +11,6 @@ async fn test_project_scoping_end_to_end() {
     let url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
 
-    // 1. Schema migration — must apply cleanly twice (idempotent).
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("first init_schema");
@@ -40,7 +20,6 @@ async fn test_project_scoping_end_to_end() {
         .expect("second init_schema (idempotent)");
     println!("  ✓ project scoping migration is idempotent");
 
-    // Verify brain_projects table + project_id columns exist.
     let cols: Vec<(String,)> = sqlx::query_as(
         "SELECT table_name::text FROM information_schema.columns
          WHERE column_name = 'project_id'
@@ -73,11 +52,9 @@ async fn test_project_scoping_end_to_end() {
     assert!(projects_exists, "brain_projects table missing");
     println!("  ✓ brain_projects + project_id columns present on 6 tables");
 
-    // 2. Open two sessions, each bound to a different project.
     let project_a = unique("test_proj_a");
     let project_b = unique("test_proj_b");
 
-    // Session A
     cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_jornada",
@@ -86,7 +63,6 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("start session A");
 
-    // While session A is active, write entities/obs/relation/error scoped to A.
     let ent_a = unique("entity_a");
     cuba_memorys::handlers::dispatch(
         &pool,
@@ -119,7 +95,6 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("alarma A");
 
-    // End session A (so session B becomes the active one).
     cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_jornada",
@@ -128,7 +103,6 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("end session A");
 
-    // Session B
     cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_jornada",
@@ -160,7 +134,6 @@ async fn test_project_scoping_end_to_end() {
 
     println!("  ✓ wrote entities/observations/errors under two projects");
 
-    // 3. While session B is active, faro should NOT return Project A's content.
     let faro_b = cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_faro",
@@ -175,7 +148,6 @@ async fn test_project_scoping_end_to_end() {
     );
     println!("  ✓ faro under project B does not leak project A content");
 
-    // vigia summary under B should count only B's rows for entities/observations.
     let vigia_b =
         cuba_memorys::handlers::dispatch(&pool, "cuba_vigia", json!({"metric": "summary"}))
             .await
@@ -187,7 +159,6 @@ async fn test_project_scoping_end_to_end() {
     );
     println!("  ✓ vigia summary is project_scoped under active project");
 
-    // 4. End session B and start a vanilla one (no project) — should see both A & B.
     cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_jornada",
@@ -217,7 +188,6 @@ async fn test_project_scoping_end_to_end() {
     );
     println!("  ✓ session without project sees rows from any project");
 
-    // 5. cuba_proyecto list/stats verify counts.
     let list = cuba_memorys::handlers::dispatch(&pool, "cuba_proyecto", json!({"action": "list"}))
         .await
         .expect("proyecto list");
@@ -235,16 +205,12 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("proyecto stats A");
     let stats_a_text = extract_content_text(&stats_a);
-    // Project A had at least 1 entity + 1 observation + 1 error.
     assert!(
         stats_a_text.contains("\"entities\":1") || stats_a_text.contains("\"entities\": 1"),
         "expected exactly 1 entity in project A: {stats_a_text}"
     );
     println!("  ✓ cuba_proyecto list/stats expose per-project counters");
 
-    // 6. Kill-switch — set CUBA_PROJECT_FILTER=off, current_project_id should return None.
-    // We test the helper directly to avoid touching the running session state.
-    // SAFETY: tests run sequentially in a single tokio runtime; no other thread touches env.
     unsafe {
         std::env::set_var("CUBA_PROJECT_FILTER", "off");
     }
@@ -260,7 +226,6 @@ async fn test_project_scoping_end_to_end() {
     }
     println!("  ✓ CUBA_PROJECT_FILTER=off disables scoping");
 
-    // Cleanup: end the global session and prune created rows for re-runnability.
     cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_jornada",
@@ -285,7 +250,6 @@ async fn test_project_scoping_end_to_end() {
     println!("\n  ✅ project scoping end-to-end OK");
 }
 
-/// Pull the inner JSON text out of an MCP-format response wrapper.
 fn extract_content_text(value: &serde_json::Value) -> String {
     value
         .get("content")

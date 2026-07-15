@@ -1,5 +1,3 @@
--- Reverse 0031. Drops the policies first: the function cannot go while a policy
--- still calls it.
 DO $$
 DECLARE t TEXT;
 BEGIN

@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Run the full cuba-memorys test matrix (unit + DB integration + E2E).
-#
-# Requires:
-#   - Rust toolchain
-#   - DATABASE_URL pointing at pgvector Postgres (default :5488)
-#   - Python 3 for E2E
-#   - release binary built (or builds it)
 
 set -euo pipefail
 

@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Phase 5: migrate the pgvector embedding columns to a new dimension (e.g. 384
-# e5-small -> 1024 bge-m3). Vector CONTENT is dropped (set NULL) because you
-# cannot cast between dimensions; text/entities/facts are untouched. Re-embed
-# afterwards with `cuba_zafra reembed`.
-#
-# DESTRUCTIVE to embeddings only. Take a backup first (scripts/backup-db.sh).
-# Requires a role with DDL (superuser/owner) — pass it via DATABASE_URL.
-#
-# Usage:
-#   DATABASE_URL="postgresql://cuba:...@127.0.0.1:5488/brain_dev" \
-#     scripts/migrate-embedding-dim.sh 1024
 set -euo pipefail
 
 DIM="${1:?usage: migrate-embedding-dim.sh <DIM>}"
@@ -18,16 +7,6 @@ DIM="${1:?usage: migrate-embedding-dim.sh <DIM>}"
 echo "[migrate] target dimension: vector($DIM)"
 echo "[migrate] this drops all embedding vectors (content preserved). Ctrl-C to abort."
 
-# Every vector column, discovered — not a hand-maintained list.
-#
-# This script used to name brain_observations and brain_episodes explicitly, and
-# that is exactly how it broke: migration 0033 added brain_procedures with its own
-# vector column, the script did not know about it, and the table stayed at 384-d
-# while the rest of the corpus moved to 1024. Every INSERT into it then failed
-# with a dimension error that surfaced as an opaque "guardando el procedimiento".
-#
-# A table added tomorrow would have been forgotten the same way. So: ask the
-# catalog which columns are vectors, and migrate all of them.
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 

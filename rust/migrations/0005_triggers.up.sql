@@ -1,5 +1,3 @@
--- Prospective memory triggers (cuba_centinela).
--- "Remember to remind me about X when Y happens."
 DO $$
 BEGIN
     IF NOT EXISTS (

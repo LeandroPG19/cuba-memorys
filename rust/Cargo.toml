@@ -8,15 +8,9 @@ license = "AGPL-3.0-only"
 [dependencies]
 half = "2"
 futures = "0.3"
-# Async runtime
 tokio = { version = "1", features = ["full"] }
-# TaskTracker: lets shutdown drain in-flight background writes (see src/tasks.rs).
-# Already in the tree as a transitive dep of sqlx — no new build cost.
 tokio-util = { version = "0.7", features = ["rt"] }
 
-# PostgreSQL (compile-time checked, async, built-in pool retry)
-# V0.9: feature `migrate` enables sqlx::migrate! macro that bakes
-# rust/migrations/ into the binary at compile time.
 sqlx = { version = "0.8", features = [
     "runtime-tokio-rustls",
     "postgres",
@@ -27,79 +21,45 @@ sqlx = { version = "0.8", features = [
 ] }
 pgvector = { version = "0.4", features = ["sqlx"] }
 
-# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Embeddings (ONNX Runtime) — pinned RC (ADR audit 2026-03-14)
-# IMPORTANT: =exact pin until ort 2.0.0 stable releases. Do NOT change.
-# tls-native-vendored: statically compiles OpenSSL from source — eliminates
-# system OpenSSL dependency that breaks ARM64 cross-compilation in CI.
 ort = { version = "=2.0.0-rc.12", features = ["load-dynamic", "tls-native-vendored", "half"] }
 tokenizers = "0.21"
 
-# Logging (structured, to stderr)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
-# Error handling
 anyhow = "1"
 
-# V0.8: trait objects for cuba_juez ContradictionJudge backends
 async-trait = "0.1"
 
-# V0.9: exact token counting for cuba_faro budget enforcement (replaces 4 chars/tok heuristic).
-# Maneja español (~2.7 chars/tok), código y multilingüe correctamente.
 tiktoken-rs = "0.7"
 
-# V0.9: linear algebra for OOD Mahalanobis distance (faro abstention).
-# Pure Rust, no LAPACK dependency required.
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 
-# V0.9: SHA-256 for audit hash chain (CFR-21 Part 11 tamper-evidence).
-# Chosen over blake3 for FIPS-140 / regulatory familiarity.
 sha2 = "0.10"
 hex = "0.4"
-# NOTE: thiserror removed — zero callers found across all 37 source files (dead dep).
-# NOTE: petgraph removed — zero imports found (dead dep; graph algos use own impl).
-# NOTE: rand removed — zero imports found (dead dep).
 
-# Types
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# Cache (O(1) LRU eviction)
-# RUSTSEC-2026-0002: lru 0.12.5 has unsound IterMut. We only call .iter() (safe).
-# Update to 0.12.6+ once released, or replace with quick_cache if vuln is critical.
 lru = "0.12"
 
-# V0.8: zstd compression for cuba_sync embeddings blob.
-# Pure Rust binding wraps the zstd C library; multi-platform release builds OK.
 zstd = "0.13"
 
-# HTTP client. Non-optional since v0.13.2: the `models` subcommand downloads model
-# weights and the ONNX runtime cross-platform, and that is core onboarding, not an
-# opt-in. Compiling an HTTP client is not the same as making a request — `cuba_docs`
-# (feature `docs`) is the only thing that reaches the network unasked; `models` only
-# ever downloads when a person types it.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# Extracting the ONNX runtime archive that `models` fetches: .tgz on Unix, .zip on
-# Windows. Both pure-Rust so cross-compiled release builds stay clean.
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# Feature `docs`: outbound documentation fetching. cuba-memorys makes NO network
-# requests without this. Read src/net/guard.rs before touching any of it.
 url = { version = "2", optional = true }
 html2text = { version = "0.12", optional = true }
 
-# V0.9: optional Prometheus metrics (feature flag `observability`).
 metrics = { version = "0.24", optional = true }
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
 
-# Global allocator
 mimalloc = "0.1"
 
 [features]
@@ -107,15 +67,10 @@ default = []
 bitemporal = []
 graph-energy = []
 eval-benchmarks = []
-# Enables AnthropicApiJudge in cuba_juez. reqwest is now a base dependency.
 anthropic-api = []
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
-# `cuba_docs`: fetches library documentation over the network. OFF by default —
-# whoever does not want a memory server that talks to the internet does not get one.
 docs = ["dep:url", "dep:html2text"]
-# V0.9: Prometheus /metrics endpoint with RED metrics per handler.
-# Adds metrics + metrics-exporter-prometheus + hyper for the HTTP server.
 observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [profile.release]
@@ -125,16 +80,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# CL-001: suppress unexpected_cfg warning for kani formal verification annotations
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
-# Iteration profile: optimized enough to be representative, cheap enough not to
-# freeze the machine. `lto = "thin"` + 16 codegen units cuts peak build memory by
-# roughly 4x versus the release profile's fat LTO, at a small runtime cost.
-#
-# Use it for everything except measuring and shipping:
-#     cargo build --profile quick
 [profile.quick]
 inherits = "release"
 opt-level = 2

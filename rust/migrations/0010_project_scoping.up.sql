@@ -1,13 +1,6 @@
--- V0.8: Project scoping — brain_projects table + project_id NULL columns
--- across the 6 main tables. NULL = global (backward compat for legacy rows).
--- Filter activates only when CUBA_PROJECT_FILTER != "off" AND a session has a
--- non-null project_id.
--- Must run BEFORE the v0.8 satellite tables (snapshots, sync_state, judgments)
--- because they FK to brain_projects.
 DO $$
 DECLARE t TEXT;
 BEGIN
-    -- M1.1: brain_projects table
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.tables
         WHERE table_name = 'brain_projects'
@@ -21,7 +14,6 @@ BEGIN
         CREATE INDEX IF NOT EXISTS idx_projects_name ON brain_projects(name);
     END IF;
 
-    -- M1.2: project_id NULL FK in 6 scoped tables
     FOREACH t IN ARRAY ARRAY[
         'brain_entities','brain_observations',
         'brain_episodes','brain_sessions',
