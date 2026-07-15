@@ -6,7 +6,7 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
-## [Unreleased]
+## [0.14.0] — 2026-07-15 (Cargo `0.14.0` · npm `0.14.0` · PyPI `1.16.0`)
 
 ### Modos de funcionamiento: `CUBA_MODE=local | red | completo`
 
