@@ -102,12 +102,13 @@ fn init(dir: &std::path::Path) -> Result<()> {
         anyhow::bail!("no hay model.onnx ni model_quantized.onnx en {dir:?}");
     };
 
-    let session = Session::builder()
+    let builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(intra_threads())
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?
+        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
+    let session = crate::gpu::configure(builder)?
         .commit_from_file(&model_file)
         .map_err(|e| anyhow::anyhow!("cargando {model_file:?}: {e}"))?;
 

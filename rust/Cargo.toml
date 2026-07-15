@@ -109,6 +109,8 @@ graph-energy = []
 eval-benchmarks = []
 # Enables AnthropicApiJudge in cuba_juez. reqwest is now a base dependency.
 anthropic-api = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
 # `cuba_docs`: fetches library documentation over the network. OFF by default —
 # whoever does not want a memory server that talks to the internet does not get one.
 docs = ["dep:url", "dep:html2text"]

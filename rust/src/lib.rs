@@ -13,6 +13,7 @@ pub mod export;
 pub mod graph;
 pub mod handlers;
 pub mod link_cli;
+pub mod gpu;
 pub mod mode;
 pub mod models_cli;
 #[cfg(feature = "docs")]

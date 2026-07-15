@@ -68,12 +68,13 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
             anyhow::anyhow!("no model.onnx / model_quantized.onnx found in {model_dir:?}")
         })?;
 
-    let session = Session::builder()
+    let builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(2)
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?
+        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
+    let session = crate::gpu::configure(builder)?
         .commit_from_file(&model_file)
         .map_err(|e| anyhow::anyhow!("load model: {e}"))?;
     RERANKER_SESSION

@@ -56,15 +56,16 @@ fn cache_root() -> Result<PathBuf> {
 
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let what = args.first().map(String::as_str).unwrap_or("");
+    let gpu = args.iter().any(|a| a == "--gpu");
     match what {
         "embed" | "embeddings" | "nli" | "reranker" => {
             download_model(&spec(what).unwrap()).await?;
         }
         "runtime" => {
-            download_runtime().await?;
+            download_runtime(gpu).await?;
         }
         "all" => {
-            download_runtime().await?;
+            download_runtime(gpu).await?;
             for m in ["embed", "nli", "reranker"] {
                 download_model(&spec(m).unwrap()).await?;
             }
@@ -132,31 +133,43 @@ async fn download_model(spec: &ModelSpec) -> Result<()> {
     Ok(())
 }
 
-fn runtime_target() -> Result<(String, &'static str, &'static str)> {
+fn runtime_target(gpu: bool) -> Result<(String, &'static str, &'static str)> {
     let v = ORT_VERSION;
-    let (archive, ext, lib) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => (
+    let (archive, ext, lib) = match (std::env::consts::OS, std::env::consts::ARCH, gpu) {
+        ("linux", "x86_64", false) => (
             format!("onnxruntime-linux-x64-{v}"),
             "tgz",
             "libonnxruntime.so",
         ),
-        ("linux", "aarch64") => (
+        ("linux", "x86_64", true) => (
+            format!("onnxruntime-linux-x64-gpu-{v}"),
+            "tgz",
+            "libonnxruntime.so",
+        ),
+        ("linux", "aarch64", _) => (
             format!("onnxruntime-linux-aarch64-{v}"),
             "tgz",
             "libonnxruntime.so",
         ),
-        ("macos", "x86_64") => (
+        ("macos", "x86_64", _) => (
             format!("onnxruntime-osx-x86_64-{v}"),
             "tgz",
             "libonnxruntime.dylib",
         ),
-        ("macos", "aarch64") => (
+        ("macos", "aarch64", _) => (
             format!("onnxruntime-osx-arm64-{v}"),
             "tgz",
             "libonnxruntime.dylib",
         ),
-        ("windows", "x86_64") => (format!("onnxruntime-win-x64-{v}"), "zip", "onnxruntime.dll"),
-        (os, arch) => bail!(
+        ("windows", "x86_64", false) => {
+            (format!("onnxruntime-win-x64-{v}"), "zip", "onnxruntime.dll")
+        }
+        ("windows", "x86_64", true) => (
+            format!("onnxruntime-win-x64-gpu-{v}"),
+            "zip",
+            "onnxruntime.dll",
+        ),
+        (os, arch, _) => bail!(
             "no tengo el runtime prearmado para {os}/{arch}. Instalá onnxruntime {v} a mano \
              y apuntá ORT_DYLIB_PATH a la librería."
         ),
@@ -166,8 +179,8 @@ fn runtime_target() -> Result<(String, &'static str, &'static str)> {
     Ok((archive, ext, lib))
 }
 
-async fn download_runtime() -> Result<()> {
-    let (archive_stem, ext, lib_name) = runtime_target()?;
+async fn download_runtime(gpu: bool) -> Result<()> {
+    let (archive_stem, ext, lib_name) = runtime_target(gpu)?;
     let dir = cache_root()?.join("onnxruntime");
     std::fs::create_dir_all(&dir)?;
     let lib_dest = dir.join(lib_name);

@@ -293,6 +293,8 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
+    checks.push(Check::ok("gpu", crate::gpu::active_provider()));
+
     if crate::search::rerank::enabled() {
         checks.push(Check::ok(
             "reranker",

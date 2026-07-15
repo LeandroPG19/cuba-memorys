@@ -159,12 +159,13 @@ fn get_model_status() -> &'static ModelStatus {
 }
 
 fn init_onnx_session(model_file: &std::path::Path, model_dir: &std::path::Path) -> Result<()> {
-    let session = Session::builder()
+    let builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(2)
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?
+        .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
+    let session = crate::gpu::configure(builder)?
         .commit_from_file(model_file)
         .map_err(|e| anyhow::anyhow!("load model: {e}"))?;
 
