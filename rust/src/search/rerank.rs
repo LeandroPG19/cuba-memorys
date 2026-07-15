@@ -130,6 +130,8 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
     Ok(indexed)
 }
 
+const RERANK_CHUNK: usize = 16;
+
 fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -144,6 +146,19 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         .get()
         .context("reranker tokenizer not initialized")?;
 
+    let mut scores = Vec::with_capacity(candidates.len());
+    for chunk in candidates.chunks(RERANK_CHUNK) {
+        scores.extend(score_chunk(&mut session, tokenizer, query, chunk)?);
+    }
+    Ok(scores)
+}
+
+fn score_chunk(
+    session: &mut Session,
+    tokenizer: &tokenizers::Tokenizer,
+    query: &str,
+    candidates: &[String],
+) -> Result<Vec<f64>> {
     let pairs: Vec<(&str, &str)> = candidates.iter().map(|c| (query, c.as_str())).collect();
     let encodings = tokenizer
         .encode_batch(pairs, true)
