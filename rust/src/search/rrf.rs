@@ -1,39 +1,15 @@
-//! §A: Weighted RRF Entropy Routing.
-//!
-//! Reciprocal Rank Fusion with Shannon entropy-based dynamic weighting.
-//! V2: Post-fusion dedup removes semantic duplicates across signals.
-//! V4: k=60 constant (Cormack et al. 2009) — eliminates V3 adaptive instability.
-
 use std::collections::{HashMap, HashSet};
 
-/// Fixed RRF k constant — empirical consensus (Cormack 2009, Azure AI Search, ES 8.8+).
-///
-/// Adaptive k (V3) was removed per Gemini Deep Research audit 2026-03-14:
-/// dynamic sqrt-based k introduced non-monotonic ranking instabilities and
-/// violated determinism requirements for the MCP server.
-///
-/// Exported so callers (faro.rs inline fusion) use the same value without
-/// duplicating the literal.
 pub const RRF_K: f64 = 60.0;
 
-/// A ranked search result.
 #[derive(Clone, Debug)]
 pub struct RankedResult {
     pub id: String,
     pub content: String,
     pub score: f64,
-    pub source: String, // Which signal produced this
+    pub source: String,
 }
 
-/// §A: Compute Shannon entropy of query for dynamic weight routing.
-///
-/// V0.7 (Mejora 8a): Uses HashMap for O(n) frequency counting instead of
-/// O(n*k) nested filter per unique word.
-///
-/// V0.7+: Tokenizes by non-alphanumeric characters (consistent with
-/// `information_density` and `text_overlap`) so that "rust!" and "rust"
-/// are the same token. Avoids inflated entropy from punctuation variants
-/// in multilingual queries.
 pub fn query_entropy(query: &str) -> f64 {
     let words: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -55,16 +31,7 @@ pub fn query_entropy(query: &str) -> f64 {
     entropy
 }
 
-/// RRF fusion across N ranked signal lists.
-///
-/// Each signal can have a custom weight (§A: entropy-based).
-/// V4: Uses fixed k=60 constant — Cormack et al. 2009 consensus.
-///
-/// Score_RRF(d) = Σ weight / (60 + rank + 1)
-pub fn fuse(
-    signals: &[(Vec<RankedResult>, f64)], // (results, weight)
-    dedup_threshold: f64,
-) -> Vec<RankedResult> {
+pub fn fuse(signals: &[(Vec<RankedResult>, f64)], dedup_threshold: f64) -> Vec<RankedResult> {
     let mut scores: HashMap<String, f64> = HashMap::new();
     let mut items: HashMap<String, RankedResult> = HashMap::new();
 
@@ -78,15 +45,13 @@ pub fn fuse(
         }
     }
 
-    // Sort by fused score, then by id for deterministic tie-breaking
     let mut sorted: Vec<(String, f64)> = scores.into_iter().collect();
     sorted.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0)) // Deterministic tie-break by id
+            .then_with(|| a.0.cmp(&b.0))
     });
 
-    // V2: Post-fusion dedup by content overlap
     let mut unique: Vec<RankedResult> = Vec::new();
     for (id, score) in sorted {
         if let Some(mut item) = items.remove(&id) {
@@ -103,12 +68,6 @@ pub fn fuse(
     unique
 }
 
-/// V2: Word-overlap ratio (Jaccard-like with min denominator).
-///
-/// V0.7 (Mejora 8b): Tokenizes by non-alphanumeric characters instead of
-/// whitespace only. Fixes: "configuracion." != "configuracion" which caused
-/// false negatives in multilingual dedup detection.
-/// Lexical overlap ratio for post-fusion deduplication (used by `cuba_faro`).
 pub fn content_overlap(a: &str, b: &str) -> f64 {
     let tokenize = |s: &str| -> HashSet<String> {
         s.to_lowercase()
@@ -132,7 +91,6 @@ mod tests {
 
     #[test]
     fn test_query_entropy_uniform() {
-        // All unique words → high entropy
         let e = query_entropy("rust is fast and safe for systems programming");
         assert!(e > 2.5, "diverse query should have high entropy: got {e}");
     }
@@ -148,8 +106,6 @@ mod tests {
 
     #[test]
     fn test_query_entropy_punctuation_invariant() {
-        // "rust!" and "rust" should be the same token after non-alphanumeric split.
-        // Previously split_whitespace() treated them as distinct, inflating entropy.
         let e_clean = query_entropy("rust is fast");
         let e_punct = query_entropy("rust! is fast.");
         assert!(
@@ -160,7 +116,6 @@ mod tests {
 
     #[test]
     fn test_query_entropy_multilingual_punctuation() {
-        // Spanish query with punctuation — consistent tokenization
         let e1 = query_entropy("configuracion sistema");
         let e2 = query_entropy("configuracion. sistema,");
         assert!(
@@ -212,13 +167,11 @@ mod tests {
 
         let fused = fuse(&[(signal1, 0.5), (signal2, 0.5)], 0.75);
         assert!(!fused.is_empty());
-        // "b" appears in both signals, should rank first
         assert_eq!(fused[0].id, "b", "item in both signals should rank first");
     }
 
     #[test]
     fn test_rrf_k60_deterministic() {
-        // V4: k=60 always, deterministic scores
         let signal = vec![RankedResult {
             id: "a".into(),
             content: "alpha".into(),
@@ -227,7 +180,6 @@ mod tests {
         }];
 
         let fused = fuse(&[(signal, 1.0)], 0.75);
-        // Score should be exactly 1.0 / (RRF_K + 0 + 1.0) = 1/61
         let expected = 1.0 / (RRF_K + 1.0);
         assert!(
             (fused[0].score - expected).abs() < 1e-10,
@@ -237,11 +189,9 @@ mod tests {
         );
     }
 
-    /// RRF_K is pub so faro.rs can reference it without duplicating the literal.
     #[test]
     fn test_rrf_k_is_pub_and_canonical() {
         assert_eq!(RRF_K, 60.0, "canonical k=60 (Cormack 2009)");
-        // faro.rs inline fusion uses the same value — if changed here it propagates
         let score_rank0 = 1.0 / (RRF_K + 1.0);
         assert!(
             (score_rank0 - 1.0 / 61.0).abs() < 1e-15,

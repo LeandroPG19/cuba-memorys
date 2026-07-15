@@ -1,5 +1,3 @@
-//! Project scoping helpers (v0.8).
-
 use anyhow::Result;
 use sqlx::PgPool;
 use std::env;
@@ -7,15 +5,12 @@ use uuid::Uuid;
 
 use crate::constants::KILL_SWITCH_ENV;
 
-/// Returns true when the kill-switch env var disables all project filtering.
 pub fn filter_disabled() -> bool {
     env::var(KILL_SWITCH_ENV)
         .ok()
         .is_some_and(|v| v.eq_ignore_ascii_case("off"))
 }
 
-/// SQL fragment: restrict rows to active project + global NULL rows.
-/// Bind `$n` to `Option<Uuid>` from [`current_project_id`].
 pub fn project_scope_clause(project_param: &str) -> String {
     format!("({project_param}::uuid IS NULL OR project_id = {project_param} OR project_id IS NULL)")
 }
@@ -28,14 +23,6 @@ async fn propagate_rls_guc(pool: &PgPool, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the active project for the session **this process** opened.
-///
-/// Previously this ran `SELECT ... WHERE ended_at IS NULL ORDER BY started_at
-/// DESC LIMIT 1`, which is a global question: with several MCP clients sharing
-/// one database, the newest session anywhere won, and observations were tagged
-/// with someone else's project. See [`crate::session`].
-///
-/// No session in this process => `None` => unscoped, which is the safe answer.
 pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
     if filter_disabled() {
         propagate_rls_guc(pool, "*").await.ok();
@@ -47,7 +34,6 @@ pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
     Ok(pid)
 }
 
-/// Resolve a project name to its UUID. Returns None if not found.
 pub async fn resolve_project_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>> {
     let row: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM brain_projects WHERE name = $1")
         .bind(name)
@@ -56,7 +42,6 @@ pub async fn resolve_project_name(pool: &PgPool, name: &str) -> Result<Option<Uu
     Ok(row.map(|(id,)| id))
 }
 
-/// Resolve a project name to its UUID, creating it if missing.
 pub async fn upsert_project(pool: &PgPool, name: &str) -> Result<Uuid> {
     let row: (Uuid,) = sqlx::query_as(
         "INSERT INTO brain_projects (name) VALUES ($1)
@@ -69,7 +54,6 @@ pub async fn upsert_project(pool: &PgPool, name: &str) -> Result<Uuid> {
     Ok(row.0)
 }
 
-/// Verify an observation belongs to the current project scope (IDOR guard).
 pub async fn observation_in_scope(
     pool: &PgPool,
     observation_id: Uuid,
@@ -78,8 +62,6 @@ pub async fn observation_in_scope(
     if filter_disabled() {
         return Ok(true);
     }
-    // let-else instead of is_none() + unwrap(): the compiler now enforces what a
-    // comment used to promise.
     let Some(pid) = project_id else {
         return Ok(true);
     };

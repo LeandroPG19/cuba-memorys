@@ -41,8 +41,7 @@ DB = dict(
     host="127.0.0.1", port=5488, user="cuba", password="memorys2026", dbname="brain"
 )
 MODEL = "claude-haiku-4-5"
-random.seed(20260713)  # a dataset that changes between runs is not a benchmark
-
+random.seed(20260713)
 
 def claude(prompt: str, timeout: int = 120) -> str:
     """One CLI round-trip. `claude --output-format json` returns a report ABOUT the
@@ -62,7 +61,6 @@ def claude(prompt: str, timeout: int = 120) -> str:
     except Exception:
         return ""
 
-
 def json_from(text: str):
     """Dig a JSON value out of prose or markdown fences."""
     text = (text or "").strip()
@@ -75,13 +73,9 @@ def json_from(text: str):
                 continue
     return None
 
-
-# ── 1. Seeds ────────────────────────────────────────────────────────────────
 def fetch_seeds(n: int):
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    # Substantial enough to ask a real question about; short enough that the answer
-    # is a fact and not an essay.
     cur.execute(
         """
         SELECT o.id::text, o.content, o.observation_type
@@ -100,14 +94,12 @@ def fetch_seeds(n: int):
 
     total = sum(len(v) for v in by_type.values())
     seeds = []
-    for group in by_type.values():  # proportional, so the sample looks like the corpus
+    for group in by_type.values():
         take = max(1, round(n * len(group) / total))
         seeds.extend(random.sample(group, min(take, len(group))))
     random.shuffle(seeds)
     return seeds[:n]
 
-
-# ── 2. Questions ────────────────────────────────────────────────────────────
 QUESTION_PROMPT = """Eres una persona consultando su memoria a largo plazo.
 
 Lee esta MEMORIA y escribe DOS preguntas distintas cuya respuesta esté en ella.
@@ -127,7 +119,6 @@ MEMORIA:
 
 Responde SOLO con un array JSON: ["pregunta 1", "pregunta 2"]"""
 
-
 def make_questions(seed):
     seed_id, content, _ = seed
     out = json_from(claude(QUESTION_PROMPT.format(content=content[:1100])))
@@ -139,16 +130,12 @@ def make_questions(seed):
     for q in out:
         if not isinstance(q, str) or len(q) < 15:
             continue
-        # Reject questions built from the source's own vocabulary: those are won by
-        # lexical match alone, and a benchmark of them measures string comparison.
         words = re.findall(r"\w{5,}", q.lower())
         if words and sum(1 for w in words if w in low) / len(words) > 0.7:
             continue
         kept.append((q, seed_id))
     return kept[:2]
 
-
-# ── 3. Pool ─────────────────────────────────────────────────────────────────
 def pool_candidates(query: str, top: int = 6):
     """Wide enough to catch duplicates of the seed that a naive id-only ground truth
     would wrongly mark as misses."""
@@ -168,13 +155,6 @@ def pool_candidates(query: str, top: int = 6):
     conn.close()
     return rows
 
-
-# ── 4. Judge ────────────────────────────────────────────────────────────────
-#
-# All candidates for a query in ONE call, not one call each. The first version made
-# six LLM round-trips per question — 1,182 for the dataset — and at ~15 s of CLI
-# latency apiece it was going to take an hour and a half. Batched, it is 197 calls.
-# The judgements are independent, so nothing is lost by asking about them together.
 JUDGE_PROMPT = """¿Cuáles de estos DOCUMENTOS responden a la PREGUNTA?
 
 Un documento responde SOLO si contiene la información que la pregunta busca.
@@ -190,12 +170,10 @@ Responde SOLO con un array JSON con los NÚMEROS de los que SÍ responden.
 Si ninguno responde, devuelve [].
 Ejemplo: [1, 4]"""
 
-
 def judge_pool(item):
     query, seed_id, candidates = item
-    relevant = {seed_id}  # relevant by construction: the question came from it
+    relevant = {seed_id}
 
-    # The seed is already known to be relevant; only the rest need judging.
     others = [(cid, c) for cid, c in candidates if cid != seed_id]
     if not others:
         return query, sorted(relevant)
@@ -213,7 +191,6 @@ def judge_pool(item):
 
     return query, sorted(relevant)
 
-
 ABSTAIN_PROMPT = """Escribe 12 preguntas en español sobre temas COTIDIANOS que no
 tengan NADA que ver con: programación, software, bases de datos, ingeniería,
 manufactura, CNC ni proyectos técnicos.
@@ -223,14 +200,11 @@ Concretas y naturales.
 
 Responde SOLO con un array JSON de strings."""
 
-
 def main():
     n_seeds = int(sys.argv[1]) if len(sys.argv) > 1 else 90
     out_path = (
         sys.argv[2] if len(sys.argv) > 2 else "rust/tests/datasets/brain_qa_es.jsonl"
     )
-    # An hour of LLM calls that a crash throws away is an hour you will not spend
-    # twice. Progress lands on disk as it is produced.
     ckpt = out_path + ".partial"
 
     print(f"1. muestreando {n_seeds} observaciones semilla…", flush=True)
@@ -252,7 +226,6 @@ def main():
     print("3. reuniendo candidatos (pooling)…", flush=True)
     pool_items = [(q, sid, pool_candidates(q)) for q, sid in pairs]
 
-    # Resume: anything already judged in a previous run is not judged again.
     done: dict[str, list[str]] = {}
     if os.path.exists(ckpt):
         with open(ckpt, encoding="utf-8") as f:
@@ -326,7 +299,6 @@ def main():
     if answerable:
         avg = sum(len(r["relevant_ids"]) for r in answerable) / len(answerable)
         print(f"  media de documentos relevantes por query: {avg:.2f}")
-
 
 if __name__ == "__main__":
     main()

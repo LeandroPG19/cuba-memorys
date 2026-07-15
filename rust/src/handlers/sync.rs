@@ -1,5 +1,3 @@
-//! Handler: cuba_sync — git-friendly export/import (v0.8).
-
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::Value;
@@ -38,8 +36,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-// ── Export ──────────────────────────────────────────────────────────
-
 async fn export(
     pool: &PgPool,
     dir_arg: Option<&str>,
@@ -62,7 +58,6 @@ async fn export(
         None => None,
     };
 
-    // 1. Projects (always include all — small table, useful for cross-machine context)
     let projects: Vec<ProjectRow> = sqlx::query_as::<_, (Uuid, String, chrono::DateTime<Utc>)>(
         "SELECT id, name, created_at FROM brain_projects",
     )
@@ -76,7 +71,6 @@ async fn export(
     })
     .collect();
 
-    // 2. Entities (with their observations bundled)
     type EntityCols = (
         Uuid,
         String,
@@ -145,7 +139,6 @@ async fn export(
         .collect();
         obs_count += observations.len() as u32;
 
-        // Optional embeddings blob (only requested observations)
         if with_embeddings {
             for obs in &observations {
                 let emb: Option<pgvector::Vector> =
@@ -186,7 +179,6 @@ async fn export(
         entity_files += 1;
     }
 
-    // 3. Episodes (partitioned monthly)
     type EpCols = (
         Uuid,
         Uuid,
@@ -231,7 +223,6 @@ async fn export(
         episode_count += 1;
     }
 
-    // 4. Errors
     type ErrCols = (
         Uuid,
         String,
@@ -272,8 +263,6 @@ async fn export(
         err_count += 1;
     }
 
-    // 5. Decisions (subset of observations, but referenced as a separate index for
-    // human navigability — files live in decisions/<id>.json)
     let decisions: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, content FROM brain_observations
          WHERE observation_type = 'decision'
@@ -295,7 +284,6 @@ async fn export(
         dec_count += 1;
     }
 
-    // 6. Relations (single small array)
     let relation_rows: Vec<RelationRow> = sqlx::query_as::<
         _,
         (
@@ -340,13 +328,11 @@ async fn export(
         serde_json::to_vec_pretty(&projects)?,
     )?;
 
-    // 7. Optional embeddings blob
     if with_embeddings && !emb_blob.is_empty() {
         let compressed = crate::sync::compressor::compress(&emb_blob)?;
         std::fs::write(root.join("embeddings.bin.zst"), compressed)?;
     }
 
-    // 8. Manifest with content-derived hash
     let counts = Counts {
         entities: entity_files,
         observations: obs_count,
@@ -393,8 +379,6 @@ async fn export(
     }))
 }
 
-// ── Import ──────────────────────────────────────────────────────────
-
 async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
     let manifest_path = root.join("manifest.json");
@@ -413,7 +397,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         );
     }
 
-    // Idempotent: re-import same manifest = no-op (PRIMARY KEY conflict)
     let already: Option<(i32,)> =
         sqlx::query_as("SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1")
             .bind(&manifest.manifest_hash)
@@ -430,17 +413,14 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     let on_conflict_clause = match conflict {
         "skip" | "merge" => "DO NOTHING",
-        "overwrite" => "DO UPDATE SET", // followed below per-table
+        "overwrite" => "DO UPDATE SET",
         _ => anyhow::bail!("invalid conflict policy: {conflict}"),
     };
-    // Conservative: 'merge' and 'skip' both translate to DO NOTHING (UUID PK is stable).
-    // 'overwrite' is currently best-effort; we apply it to the main mutable fields.
-    let _ = on_conflict_clause; // placated unused-binding lint until overwrite path expands
+    let _ = on_conflict_clause;
 
     let mut tx = pool.begin().await?;
     let mut inserted = 0u32;
 
-    // 1. Projects (must come first — FK target)
     let projects_path = root.join("projects.json");
     if projects_path.exists() {
         let projects: Vec<ProjectRow> = serde_json::from_slice(&std::fs::read(projects_path)?)?;
@@ -459,7 +439,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 2. Entities + observations bundled
     let entities_dir = root.join("entities");
     if entities_dir.exists() {
         for entry in std::fs::read_dir(entities_dir)? {
@@ -510,7 +489,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 3. Episodes (recurse into yyyy-mm subdirs)
     let episodes_root = root.join("episodes");
     if episodes_root.exists() {
         for month_entry in std::fs::read_dir(episodes_root)? {
@@ -547,7 +525,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 4. Errors
     let errors_dir = root.join("errors");
     if errors_dir.exists() {
         for entry in std::fs::read_dir(errors_dir)? {
@@ -577,7 +554,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 5. Relations
     let relations_path = root.join("relations.json");
     if relations_path.exists() {
         let rels: Vec<RelationRow> = serde_json::from_slice(&std::fs::read(relations_path)?)?;
@@ -603,15 +579,11 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 6. Optional embeddings restore
     let mut embeddings_restored = 0u32;
     let blob_path = root.join("embeddings.bin.zst");
     if manifest.with_embeddings && blob_path.exists() {
         let compressed = std::fs::read(&blob_path)?;
         let raw = crate::sync::compressor::decompress(&compressed)?;
-        // Format: [16-byte UUID][dim*4 bytes f32]*. dim comes from the manifest
-        // (older manifests without it fall back to 384, the original model), so
-        // this survives a switch to bge-m3 (1024-d) instead of misparsing.
         let dim = manifest.embedding_dim.unwrap_or(384);
         let rec_size = 16 + dim * 4;
         if rec_size == 16 || raw.len() % rec_size != 0 {
@@ -623,11 +595,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             );
         } else {
             for chunk in raw.chunks_exact(rec_size) {
-                // chunks_exact(rec_size) yields slices of exactly rec_size, and
-                // rec_size > 16 is guaranteed by the length check above — so this
-                // slice is always 16 bytes. Stated as an expect() rather than an
-                // unwrap() because this parses a file from another machine, and an
-                // invariant that only lives in a maintainer's head is not one.
                 let id_bytes: [u8; 16] = chunk[..16]
                     .try_into()
                     .expect("chunks_exact guarantees rec_size > 16 bytes");
@@ -652,7 +619,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }
     }
 
-    // 7. Tracking row
     sqlx::query(
         "INSERT INTO brain_sync_state (manifest_hash, project_id, rows_inserted, source_path)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manifest_hash) DO NOTHING",
@@ -675,13 +641,10 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     }))
 }
 
-// ── Diff ────────────────────────────────────────────────────────────
-
 async fn diff(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Disk-side entity ids
     let mut on_disk: HashMap<Uuid, String> = HashMap::new();
     let entities_dir = root.join("entities");
     if entities_dir.exists() {
@@ -695,7 +658,6 @@ async fn diff(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
         }
     }
 
-    // DB-side entity ids
     let db_rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, name FROM brain_entities
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
@@ -724,8 +686,6 @@ async fn diff(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
         "common_count": on_disk.len() - only_disk.len(),
     }))
 }
-
-// ── Status ──────────────────────────────────────────────────────────
 
 async fn status(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;

@@ -1,34 +1,23 @@
-//! Database abstraction layer — sqlx PgPool + sqlx-migrate + pgvector.
-//!
-//! V0.9: migrated from ad-hoc idempotent CREATE IF NOT EXISTS to versioned
-//! `sqlx::migrate!()` against `rust/migrations/`. All migrations are still
-//! idempotent (DO $$ ... IF NOT EXISTS ... END $$) so legacy DBs (v0.7/v0.8)
-//! that already have schema applied remain compatible:
-//!
-//! - Fresh DB: `_sqlx_migrations` table is empty → all migrations run in order (0001→0025).
-//! - Legacy v0.8 DB: `_sqlx_migrations` is empty BUT schema exists → migrations
-//!   re-run safely because every block checks `information_schema` first.
-//!
-//! After this PR, v0.9.x adds new migrations as files `00{14,15,...}_<name>.up.sql`
-//! without touching this file again.
-
 use anyhow::{Context, Result};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
 use std::str::FromStr;
 use std::time::Duration;
 
-/// Compile-time embedded migrations from `rust/migrations/`.
-/// sqlx-macros walks the directory and bakes the SQL into the binary,
-/// so the deployed artifact does not need filesystem access.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Create and initialize the database connection pool.
 pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     let connect_options = PgConnectOptions::from_str(database_url)
         .context("invalid DATABASE_URL")?
         .log_statements(tracing::log::LevelFilter::Debug)
         .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1));
+
+    let node_name = std::env::var("CUBA_NODE_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_default();
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -36,7 +25,8 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
-        .after_connect(|conn, _meta| {
+        .after_connect(move |conn, _meta| {
+            let node = node_name.clone();
             Box::pin(async move {
                 sqlx::query("SET timezone TO 'UTC'")
                     .execute(&mut *conn)
@@ -46,6 +36,11 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
                     .await
                     .ok();
                 sqlx::query("SELECT set_config('app.current_project', '', false)")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                sqlx::query("SELECT set_config('cuba.node_name', $1, false)")
+                    .bind(&node)
                     .execute(&mut *conn)
                     .await
                     .ok();
@@ -63,29 +58,12 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     Ok(pool)
 }
 
-/// Initialize database schema via sqlx-migrate.
-///
-/// V0.9 change: replaces ~10 hand-rolled `sqlx::raw_sql(MIGRATION_X)` calls
-/// with a single `MIGRATOR.run(pool)` against versioned files.
-///
-/// Behavior:
-/// 1. Run all pending migrations (order: 0001 → 0013) from `rust/migrations/`.
-///    Each is idempotent so legacy DBs are not affected.
-/// 2. Force `SET timezone TO 'UTC'` for exponential decay + REM consistency (FIX R-004).
-/// 3. Probe pgvector extension and configure ef_search if present.
 pub async fn init_schema(pool: &PgPool) -> Result<()> {
-    // Bug 0.7: when the app runs as a NON-superuser (NOSUPERUSER, no CREATE on
-    // schema public), it must NOT run migrations — DDL is a deploy-time task for
-    // an admin role (cuba). `CUBA_SKIP_MIGRATIONS=1` skips the migrator and just
-    // asserts the schema was already migrated, so RLS/audit stay enforced at
-    // runtime without granting the app DDL privileges.
     let skip = std::env::var("CUBA_SKIP_MIGRATIONS")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false);
 
     if skip {
-        // Read-only sanity check: the schema must already be present. Fail loudly
-        // (never silently) if an admin has not applied migrations first.
         let applied: Option<(i64,)> =
             sqlx::query_as("SELECT MAX(version) FROM _sqlx_migrations WHERE success = TRUE")
                 .fetch_optional(pool)
@@ -113,7 +91,6 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
         tracing::info!("sqlx migrations applied");
     }
 
-    // FIX R-004: Force UTC timezone for exponential decay + REM consistency
     sqlx::query("SET timezone TO 'UTC'")
         .execute(pool)
         .await
@@ -121,7 +98,6 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
 
     tracing::info!("schema initialized (timezone=UTC)");
 
-    // Check pgvector extension
     let pgvector_check: Option<(String,)> =
         sqlx::query_as("SELECT extname::text FROM pg_extension WHERE extname = 'vector'")
             .fetch_optional(pool)
@@ -129,7 +105,6 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
 
     if pgvector_check.is_some() {
         tracing::info!("pgvector extension detected");
-        // P4: Set ef_search=100 for better recall (default 40, pgvector benchmarks 2025)
         sqlx::query("SET hnsw.ef_search = 100")
             .execute(pool)
             .await
@@ -141,19 +116,6 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Refuse to serve with a model whose dimension disagrees with the column.
-///
-/// The server used to start happily in this state. It would answer every query,
-/// return ten confident rows, and be silently wrong: pgvector rejects a
-/// comparison between a 384-d query and a 1024-d column, the vector branch fails,
-/// and the hybrid search collapses into a lexical one. Nothing in any response
-/// said so — which is the same failure mode as the original "dead vector branch"
-/// bug, arriving by a different road.
-///
-/// A server that cannot do its job must say so at startup, not degrade quietly
-/// for weeks. Only enforced when a real ONNX model is loaded: with no model there
-/// is no vector branch to break, and a lexical-only server is a legitimate (if
-/// diminished) thing to be.
 pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
     if !crate::embeddings::onnx::is_model_loaded() {
         return Ok(());
@@ -161,16 +123,6 @@ pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
     let runtime_dim = crate::embeddings::onnx::embedding_dim();
     let expected = format!("vector({runtime_dim})");
 
-    // EVERY vector column, asked of the catalog — not just brain_observations.
-    //
-    // Checking one table was not enough, and the gap bit immediately: migration
-    // 0033 added brain_procedures with its own vector column, the migration script
-    // (which also had a hand-written list) left it at 384-d while everything else
-    // moved to 1024, and this check waved it through because it only ever looked
-    // at brain_observations. Every INSERT into that table then failed with a
-    // dimension error, surfacing as an opaque "guardando el procedimiento".
-    //
-    // A table added tomorrow would be missed the same way. So: discover them.
     let columns: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod)::text
          FROM pg_attribute a
@@ -186,7 +138,6 @@ pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
     .await
     .context("reading the vector column types")?;
 
-    // No vector columns yet (fresh database, migrations about to run).
     if columns.is_empty() {
         return Ok(());
     }
@@ -215,8 +166,6 @@ pub async fn assert_embedding_dim(pool: &PgPool) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Compile-time check that the migrator exists and resolved the directory.
-    /// If migrations are missing, sqlx::migrate! macro fails to compile.
     #[test]
     fn migrator_loaded() {
         let count = MIGRATOR.iter().count();
@@ -226,7 +175,6 @@ mod tests {
         );
     }
 
-    /// Verify migrations are applied in monotonic version order.
     #[test]
     fn migrations_in_order() {
         let versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();

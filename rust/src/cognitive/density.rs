@@ -1,18 +1,3 @@
-//! Shannon information density — FIX B5.
-//!
-//! FIX B5: H_max uses log2(n_unique) (vocabulary size), not log2(n_words).
-//! This gives correct normalized entropy.
-
-/// Compute normalized Shannon information density of text.
-///
-/// Returns value in [0, 1]:
-/// - 0.0 = completely repetitive (1 unique word)
-/// - 1.0 = maximum diversity (all words unique)
-///
-/// FIX B5: Denominator uses unique word count, not total word count.
-/// V0.7 (Mejora 10): Tokenizes by non-alphanumeric characters to prevent
-/// punctuation from inflating vocabulary ("hello," != "hello" bug).
-/// Also uses HashMap for O(n) frequency counting.
 pub fn information_density(text: &str) -> f64 {
     let words: Vec<&str> = text
         .split(|c: char| !c.is_alphanumeric())
@@ -23,7 +8,6 @@ pub fn information_density(text: &str) -> f64 {
         return 0.0;
     }
 
-    // O(n) frequency counting via HashMap
     let mut freq_map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for w in &words {
         *freq_map.entry(w).or_default() += 1;
@@ -31,10 +15,9 @@ pub fn information_density(text: &str) -> f64 {
     let vocab_size = freq_map.len();
 
     if vocab_size <= 1 {
-        return 0.0; // All same word
+        return 0.0;
     }
 
-    // Shannon entropy H = -Σ p(w) * log2(p(w))
     let mut entropy = 0.0;
     for &count in freq_map.values() {
         let p = count as f64 / total as f64;
@@ -43,7 +26,6 @@ pub fn information_density(text: &str) -> f64 {
         }
     }
 
-    // FIX B5: Normalize by log2(vocab_size), not log2(total_words)
     let h_max = (vocab_size as f64).log2();
     if h_max == 0.0 {
         return 0.0;
@@ -76,7 +58,6 @@ mod tests {
 
     #[test]
     fn test_density_mixed() {
-        // Non-uniform distribution: "fast" appears 5x, rest 1x each → skewed entropy
         let d = information_density("fast fast fast fast fast safe modern language");
         assert!(
             d > 0.3 && d < 0.9,

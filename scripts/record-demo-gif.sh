@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Record scripts/demo.sh → assets/demo.gif (asciinema + agg)
-#
-# No DATABASE_URL here, deliberately. This script used to export one pointing at
-# the real brain on :5488, which meant recording the README GIF wrote entities into
-# a live memory database and ran PageRank over it. demo.sh now starts and destroys
-# its own throwaway Postgres; the recorder's job is to record, not to choose a
-# database.
-#
-# The output filename is stable — assets/demo.gif, not assets/demo-v0.11.gif. The
-# old scheme kept one 773 KB file per release AND a duplicate under the plain name,
-# so the repo grew a GIF every version and the README had to be edited to match.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

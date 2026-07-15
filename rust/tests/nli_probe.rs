@@ -1,7 +1,3 @@
-//! Diagnóstico, no aserción: ¿está el modelo viendo un PAR, y qué distribución emite?
-//!
-//! Se ejecuta con `cargo test --test nli_probe -- --nocapture`.
-
 use cuba_memorys::cognitive::nli;
 
 #[tokio::test]
@@ -13,7 +9,6 @@ async fn probe() {
         return;
     }
 
-    // ¿El tokenizer une premisa e hipótesis con el separador que el modelo espera?
     let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap())
         .join(".cache/cuba-memorys/models-nli");
     let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).unwrap();
@@ -27,9 +22,6 @@ async fn probe() {
     eprintln!("tokens   = {:?}", enc.get_tokens());
     eprintln!("type_ids = {:?}", enc.get_type_ids());
 
-    // ¿Qué le pasa al modelo cuando le doy un fragmento SIN SUJETO?
-    // El español es pro-drop: al partir por frases, "Usa PostgreSQL..." pierde de quién
-    // habla. Esto es lo que la descomposición está fabricando de verdad.
     eprintln!("\n=== FRAGMENTOS SIN SUJETO (el peligro de descomponer) ===");
     for (p, h) in [
         (
@@ -59,8 +51,6 @@ async fn probe() {
         }
     }
 
-    // ¿Y si NO descompongo? Premisas multi-frase enteras, de una sola pasada.
-    // La regla de proporción dirigida quizá ya no necesitaba la descomposición.
     eprintln!("\n=== PREMISA ENTERA, SIN DESCOMPONER (multi-frase) ===");
     const MULTI: &str = "cuba-memorys es un servidor MCP de memoria escrito en Rust. \
                          Usa PostgreSQL con pgvector para la búsqueda semántica.";
@@ -117,7 +107,6 @@ async fn probe() {
         ),
         ("A man is eating an apple.", "A man is eating fruit."),
         ("A man is eating an apple.", "Nobody is eating."),
-        // Los casos exactos que fallaron en el suite:
         (EV, "cuba-memorys está escrito en Rust"),
         (EV, "cuba-memorys está escrito en Java"),
         (EV, "la paella es un plato valenciano"),
@@ -129,15 +118,11 @@ async fn probe() {
             "The reranker runs as a separate ONNX session and is disabled by default.",
             "The reranker is enabled by default.",
         ),
-        // Premisa multi-frase: aquí la descomposición SÍ debe ganar algo.
         (
             "cuba-memorys es un servidor MCP. Está escrito en Rust. Usa PostgreSQL con \
              pgvector para la búsqueda semántica.",
             "cuba-memorys está escrito en Java",
         ),
-        // === CARACTERIZANDO EL PUNTO CIEGO ===
-        // Sustitución de un término técnico dentro del MISMO marco sintáctico.
-        // ¿Falla siempre, o sólo cuando los términos son jerga que el modelo no vio?
         (
             "The reranker is a cross-encoder.",
             "The reranker is a bi-encoder.",

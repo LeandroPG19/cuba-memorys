@@ -1,24 +1,8 @@
-//! `cuba-memorys dashboard` — one self-contained HTML file: what the brain
-//! knows, and whether it is healthy.
-//!
-//! The Obsidian export (see [`crate::export`]) already makes the *graph*
-//! browsable. What no surface shows is the system's own state: which invariants
-//! hold, how much of the corpus is reachable, what is silently degraded. That is
-//! what this renders — the same checks `doctor` runs, plus the shape of the
-//! corpus, in something you can look at.
-//!
-//! No web server, no dependency, no network: a single file with inline CSS and
-//! JS that opens with a double-click. A dashboard that needs a daemon running is
-//! a dashboard you will not open.
-
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
 use crate::doctor::{self, Status};
 
-/// HTML-escape. The corpus is arbitrary text written by agents — it contains
-/// angle brackets, quotes and, in this repo's own memories, fragments of code.
-/// Interpolated raw, one observation could rewrite the page.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -70,7 +54,6 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
         ("sano", "ok")
     };
 
-    // --- health rows ---
     let mut health = String::new();
     for c in &checks {
         let cls = match c.status {
@@ -90,7 +73,6 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
         ));
     }
 
-    // --- corpus shape ---
     let row = sqlx::query(
         "SELECT (SELECT count(*) FROM brain_observations)::bigint AS obs,
                 (SELECT count(*) FROM brain_entities)::bigint AS ent,
@@ -110,7 +92,6 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
     let connected = ent - isolated;
     let pct_conn = if ent > 0 { connected * 100 / ent } else { 0 };
 
-    // --- top entities ---
     let top = sqlx::query(
         "SELECT e.name, e.entity_type, e.importance,
                 (SELECT count(*) FROM brain_observations o WHERE o.entity_id = e.id)::bigint AS n,
@@ -140,7 +121,6 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
         ));
     }
 
-    // --- searchable payload: recent observations ---
     let recent = sqlx::query(
         "SELECT e.name AS entity, o.content, o.observation_type, o.created_at::date::text AS d
          FROM brain_observations o JOIN brain_entities e ON e.id = o.entity_id
@@ -159,8 +139,6 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
             })
         })
         .collect();
-    // Serialized as JSON, then embedded in a <script type="application/json">
-    // block — `</script>` inside a memory would otherwise close the tag early.
     let payload = serde_json::to_string(&items)?.replace("</", "<\\/");
 
     Ok(format!(
@@ -258,7 +236,7 @@ async fn render(pool: &PgPool, url: &str) -> Result<String> {
 </div>
 <script type="application/json" id=data>{payload}</script>
 <script>
-  const DATA = JSON.parse(document.getElementById('data').textContent.replace(/<\\\//g, '</'));
+  const DATA = JSON.parse(document.getElementById('data').textContent.replace(/<\\\
   const q = document.getElementById('q'), hits = document.getElementById('hits');
   function draw(list) {{
     hits.replaceChildren(...list.slice(0, 60).map(o => {{
@@ -289,7 +267,6 @@ mod tests {
 
     #[test]
     fn a_memory_cannot_rewrite_the_page() {
-        // Agents write arbitrary text; this repo's own memories contain code.
         let hostile = r#"<script>alert('xss')</script>"#;
         let safe = esc(hostile);
         assert!(!safe.contains("<script>"));

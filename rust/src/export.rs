@@ -1,17 +1,3 @@
-//! `cuba-memorys export --obsidian <dir>` — make the graph visible.
-//!
-//! Engram exports a knowledge graph it does not actually have: its "graph" *is*
-//! the Obsidian wikilinks it writes out, computed nowhere. cuba has the exact
-//! opposite problem — it runs Louvain community detection, PageRank centrality
-//! and Hebbian edge weights, and then shows none of it to anyone.
-//!
-//! This closes that gap with zero new infrastructure: a folder of markdown you
-//! open in Obsidian, where the graph view is drawn from wikilinks that mirror
-//! the real `brain_relations` edges, and each note carries its community and
-//! centrality in the frontmatter.
-//!
-//! Strictly read-only: it issues `SELECT`s and writes files outside the database.
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -20,9 +6,6 @@ use sqlx::{PgPool, Row};
 
 use crate::graph::community;
 
-/// Obsidian resolves `[[Foo]]` to the note named `Foo.md`, so the link text and
-/// the file name must agree. Entity names are free text (they contain `/`, `:`,
-/// quotes), so both go through this.
 fn safe_note_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -39,7 +22,6 @@ fn safe_note_name(name: &str) -> String {
     }
 }
 
-/// YAML frontmatter is not markdown: a stray `"` or newline breaks the parse.
 fn yaml_escape(s: &str) -> String {
     format!(
         "\"{}\"",
@@ -49,11 +31,6 @@ fn yaml_escape(s: &str) -> String {
     )
 }
 
-/// Observation text is free-form and *already contains* `[[wikilinks]]` — the
-/// memory files use them to cross-reference each other. Dumped raw, Obsidian
-/// turns each one into a phantom node, which is exactly the lie this exporter
-/// exists to avoid: the graph must show the real `brain_relations` edges and
-/// nothing else. Escaping keeps the text readable and the graph honest.
 fn neutralize_wikilinks(s: &str) -> String {
     s.replace("[[", "\\[\\[").replace("]]", "\\]\\]")
 }
@@ -123,7 +100,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
     std::fs::create_dir_all(dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
 
-    // --- entities ---
     let entities: Vec<Entity> = sqlx::query(
         "SELECT id, name, entity_type, importance, access_count
          FROM brain_entities ORDER BY importance DESC",
@@ -147,7 +123,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
 
     let by_id: HashMap<uuid::Uuid, &Entity> = entities.iter().map(|e| (e.id, e)).collect();
 
-    // --- relations ---
     let relations: Vec<Relation> =
         sqlx::query("SELECT from_entity, to_entity, relation_type, strength FROM brain_relations")
             .fetch_all(pool)
@@ -162,7 +137,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
             })
             .collect();
 
-    // --- observations, grouped by entity ---
     let mut obs_by_entity: HashMap<uuid::Uuid, Vec<Observation>> = HashMap::new();
     let obs_rows = sqlx::query(
         "SELECT entity_id, content, observation_type, created_at::date::text AS created_at, importance
@@ -181,8 +155,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
         });
     }
 
-    // --- communities: the Louvain partition cuba already computes ---
-    // Maps entity NAME → community id (community::detect returns names).
     let mut community_of: HashMap<String, usize> = HashMap::new();
     match community::detect(pool).await {
         Ok(communities) => {
@@ -197,7 +169,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
         }
     }
 
-    // --- one note per entity ---
     for e in &entities {
         let note = safe_note_name(&e.name);
         let mut md = String::new();
@@ -215,8 +186,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
 
         md.push_str(&format!("# {}\n\n", e.name));
 
-        // Outgoing and incoming edges become wikilinks — this is what Obsidian
-        // draws in its graph view.
         let out: Vec<&Relation> = relations.iter().filter(|r| r.from == e.id).collect();
         let inc: Vec<&Relation> = relations.iter().filter(|r| r.to == e.id).collect();
         if !out.is_empty() || !inc.is_empty() {
@@ -272,7 +241,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
             .with_context(|| format!("no se pudo escribir la nota de «{}»", e.name))?;
     }
 
-    // --- index ---
     let mut idx = String::new();
     idx.push_str("# Cerebro (cuba-memorys)\n\n");
     idx.push_str(&format!(
@@ -304,10 +272,6 @@ pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
             }
         }
 
-        // A Louvain "community" of one entity is not a community — it is an
-        // entity with no edges. Listing 150 of them as sections buries the real
-        // clusters. Rank by size, and report the isolated ones as the structural
-        // finding they are.
         let mut groups: Vec<(usize, Vec<&str>)> = by_community.into_iter().collect();
         groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
         let (real, isolated): (Vec<_>, Vec<_>) = groups.into_iter().partition(|(_, m)| m.len() > 1);
@@ -364,7 +328,6 @@ mod tests {
         assert_eq!(safe_note_name("cuba-memorys"), "cuba-memorys");
         assert_eq!(safe_note_name("proyectos/MCP"), "proyectos-MCP");
         assert_eq!(safe_note_name("a:b*c?d"), "a-b-c-d");
-        // Obsidian would read these as link syntax inside a link.
         assert_eq!(safe_note_name("[[raro]]"), "--raro--");
         assert_eq!(safe_note_name("   "), "sin-nombre");
     }
@@ -378,9 +341,6 @@ mod tests {
 
     #[test]
     fn observation_text_cannot_forge_graph_edges() {
-        // Memories cross-reference each other with [[wikilinks]]. Left raw, each
-        // one becomes a phantom node in Obsidian's graph — an edge that exists in
-        // no `brain_relations` row.
         assert_eq!(
             neutralize_wikilinks("ver [[otra-memoria]] para el detalle"),
             "ver \\[\\[otra-memoria\\]\\] para el detalle"

@@ -1,19 +1,3 @@
-//! Handler: cuba_pizarra — Working memory buffer (v0.9).
-//!
-//! Inspired by Baddeley 1992 working memory: a TTL-bounded scratchpad
-//! orthogonal to episodic (`brain_episodes`) and semantic (`brain_observations`)
-//! memory. Entries auto-expire on read and are bulk-purged by `cuba_zafra`.
-//!
-//! Use cases:
-//! - Inter-step plan state during long-horizon agent tasks.
-//! - Tentative observations the agent is not yet ready to commit.
-//! - Cross-tool-call reminders inside a single session.
-//!
-//! Actions:
-//! - `write {content, tag?, ttl_seconds?}` — store, default TTL 3600s.
-//! - `read {tag?}` — return non-expired entries, optionally filtered by tag.
-//! - `clear {tag?}` — delete entries (all in session, or by tag).
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -50,8 +34,6 @@ async fn write(pool: &PgPool, args: &Value) -> Result<Value> {
     let project_id = crate::project::current_project_id(pool).await?;
     let session_id = crate::session::session_id();
 
-    // expires_at computed in SQL with make_interval to avoid the GENERATED
-    // ALWAYS … STORED limitation (interval coercion is not IMMUTABLE).
     let row: (Uuid,) = sqlx::query_as(
         "INSERT INTO brain_wm (session_id, project_id, content, tag, ttl_seconds, expires_at)
          VALUES ($1, $2, $3, $4, $5, NOW() + make_interval(secs => $5::float8))
@@ -145,7 +127,6 @@ async fn clear(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Garbage-collect expired entries. Called by `cuba_zafra` REM cycle.
 pub async fn purge_expired(pool: &PgPool) -> Result<u64> {
     let result = sqlx::query("DELETE FROM brain_wm WHERE expires_at <= NOW()")
         .execute(pool)

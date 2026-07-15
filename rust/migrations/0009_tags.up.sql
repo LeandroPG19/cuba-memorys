@@ -1,5 +1,3 @@
--- V0.6: Auto-tagging — keyword tags array on observations.
--- Lets cuba_faro filter by tag (exact match against auto-extracted tags).
 DO $$
 BEGIN
     IF NOT EXISTS (

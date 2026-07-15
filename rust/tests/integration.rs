@@ -1,19 +1,6 @@
-//! Integration tests — require a running PostgreSQL instance.
-//!
-//! Set DATABASE_URL env var to run:
-//!   DATABASE_URL="postgresql://user:pass@localhost:5433/cuba_memorys_test" \
-//!     cargo test --test integration -- --ignored
-//!
-//! Tests are #[ignore] by default (no DB in CI).
-//!
-//! CRITICAL: All tests run in a SINGLE #[tokio::test] to share one Tokio runtime.
-//! Multiple #[tokio::test] functions create separate runtimes, and sqlx pool
-//! connections from runtime A become zombies in runtime B → pool timeout.
-
 use serde_json::json;
 use uuid::Uuid;
 
-/// Generate unique entity names per test run (avoid collisions).
 fn unique_name(prefix: &str) -> String {
     format!("{}_{}", prefix, &Uuid::new_v4().to_string()[..8])
 }
@@ -27,7 +14,6 @@ async fn test_all_integration() {
         .await
         .expect("Failed to connect to test database");
 
-    // ── 1. Schema validation ──────────────────────────────────────
     println!("  [1/7] Schema validation...");
     {
         let tables: Vec<(String,)> = sqlx::query_as(
@@ -55,7 +41,6 @@ async fn test_all_integration() {
         );
     }
 
-    // ── 2. pgvector extension ─────────────────────────────────────
     println!("  [2/7] pgvector extension...");
     {
         let row: (bool,) =
@@ -67,7 +52,6 @@ async fn test_all_integration() {
         println!("  ✓ pgvector extension detected");
     }
 
-    // ── 3. alma CRUD ──────────────────────────────────────────────
     println!("  [3/7] alma create + get...");
     {
         let name = unique_name("alma");
@@ -94,7 +78,6 @@ async fn test_all_integration() {
         println!("  ✓ alma create + get OK (entity: {name})");
     }
 
-    // ── 4. cronica add + list ─────────────────────────────────────
     println!("  [4/7] cronica add + list...");
     {
         let name = unique_name("cronica");
@@ -127,7 +110,6 @@ async fn test_all_integration() {
         println!("  ✓ cronica add + list OK (entity: {name})");
     }
 
-    // ── 5. faro search ────────────────────────────────────────────
     println!("  [5/7] faro search...");
     {
         let name = unique_name("faro");
@@ -155,7 +137,6 @@ async fn test_all_integration() {
         println!("  ✓ faro search OK");
     }
 
-    // ── 6. jornada lifecycle ──────────────────────────────────────
     println!("  [6/7] jornada lifecycle...");
     {
         let result = cuba_memorys::handlers::dispatch(
@@ -192,7 +173,6 @@ async fn test_all_integration() {
         println!("  ✓ jornada start + current + end OK");
     }
 
-    // ── 7. vigia summary ──────────────────────────────────────────
     println!("  [7/7] vigia summary...");
     {
         let result =
@@ -210,6 +190,5 @@ async fn test_all_integration() {
     println!("  ✅ ALL 7 INTEGRATION TESTS PASSED");
     println!("  ═══════════════════════════════════════════");
 
-    // Clean shutdown
     pool.close().await;
 }

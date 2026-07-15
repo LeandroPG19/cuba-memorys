@@ -1,16 +1,9 @@
-//! Handler: cuba_expediente — Search past errors/solutions.
-//!
-//! FIX A-001: SQL injection remediated — all queries use parameterized binds.
-//! FIX A-002: UTF-8 safe truncation via zafra::safe_truncate.
-//! FIX A-007: Complex tuple replaced with named struct.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
 
 use super::zafra::safe_truncate;
 
-/// Named result struct replacing bare tuple (FIX A-007: clippy::type_complexity).
 struct ErrorRow {
     id: uuid::Uuid,
     error_type: String,
@@ -49,15 +42,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("query is required");
     }
 
-    // V0.8: project_id FK is the canonical scoping primitive (filtered always).
-    // The legacy `project` TEXT column is still honored when explicitly passed
-    // (back-compat with v0.7 callers that filter by project_name string).
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // FIX A-001: Parameterized query builder — eliminates CWE-89 SQL injection.
-    // All user-supplied values use $N bind parameters instead of format!().
-    // V0.8: $3 = legacy project text filter (NULL = no filter on text column),
-    //       $4 = current project_id FK (NULL = no scoping).
     let errors = if resolved_only {
         sqlx::query_as::<_, ErrorRow>(
             "SELECT id, error_type, error_message, solution, resolved, project,
@@ -91,7 +77,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .await?
     };
 
-    // FIX A-002: safe_truncate prevents panic on multi-byte UTF-8
     let results: Vec<Value> = errors
         .iter()
         .map(|row| {
@@ -107,15 +92,10 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         })
         .collect();
 
-    // Anti-repetition guard
     let mut response =
         serde_json::json!({"query": query, "results": results, "count": results.len()});
 
     if let Some(action) = proposed_action {
-        // FIX: Match against error_message, not solution.
-        // solution is NULL on unresolved errors (resolved=false), so
-        // similarity(solution, $1) was always NULL > 0.5 → false → never triggered.
-        // V0.8: anti-repetition guard scoped to current project.
         let failed_similar: Vec<(String,)> = sqlx::query_as(
             "SELECT error_message FROM brain_errors
              WHERE resolved = false AND similarity(error_message, $1) > 0.5

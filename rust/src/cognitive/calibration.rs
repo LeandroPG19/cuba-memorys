@@ -63,7 +63,6 @@ mod tests {
         cal.update(true);
         cal.update(true);
         cal.update(false);
-        // prior (1,1) + 2 successes + 1 failure → (3, 2) → E[p] = 3/5
         assert!((cal.expected_probability() - 0.6).abs() < 0.02);
     }
 }

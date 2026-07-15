@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# Full logical backup of the cuba-memorys PostgreSQL database (schema + data).
-# Uses pg_dump custom format (-Fc) for compression and pg_restore compatibility.
-#
-# Usage:
-#   ./scripts/backup-db.sh
-#   DATABASE_URL=postgresql://cuba:pass@host:5488/brain ./scripts/backup-db.sh
-#   BACKUP_DIR=/path/to/backups ./scripts/backup-db.sh
-#
-# When the host pg_dump version does not match PG18 in Docker, the script uses
-# `docker exec cuba-memorys-db` automatically if that container is running.
 
 set -euo pipefail
 
@@ -78,7 +68,7 @@ echo "Wrote metadata $META"
 echo "Backup size: $SIZE_BYTES bytes ($(du -h "$OUT" | cut -f1))"
 
 mapfile -t OLD < <(ls -1t "$BACKUP_DIR"/brain_*.dump 2>/dev/null || true)
-if ((${#OLD[@]} > KEEP_COUNT)); then
+if ((${
   for f in "${OLD[@]:KEEP_COUNT}"; do
     base="${f%.dump}"
     rm -f "$f" "${base}.meta.json"

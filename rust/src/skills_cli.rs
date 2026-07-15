@@ -1,30 +1,9 @@
-//! `cuba-memorys skills` — turn procedural memory into Claude Code Skills.
-//!
-//! A Skill is a folder with a `SKILL.md` whose frontmatter carries a `name` and a
-//! `description`. The agent sees only those two lines until the description
-//! matches what it is doing, and only then does it read the body. That is
-//! progressive disclosure, and it is exactly the shape procedural memory wants:
-//! a project has a dozen procedures, and an agent needs one of them.
-//!
-//! So the two halves fit together without either knowing about the other. cuba
-//! learns *how things are done here* — and learns which recipes actually work,
-//! because it records outcomes. This command projects that knowledge into the
-//! format the agent already knows how to load lazily.
-//!
-//! What makes this more than a file dump: a generated Skill carries its own track
-//! record. "Worked 47 of 50 times" is in the body, so the agent knows what it is
-//! trusting. A recipe that has never been run says so.
-
 use anyhow::{Context, Result};
 
 use crate::handlers::receta;
 
-/// Skills whose reliability is below this are exported with a warning rather than
-/// silently presented as advice. Untried is not the same as unreliable, and both
-/// are different from proven — the file should say which one it is.
 const TRUSTED: f64 = 0.5;
 
-/// Slugify for a directory name. Skills live in `<dir>/<slug>/SKILL.md`.
 fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -45,8 +24,6 @@ fn slug(name: &str) -> String {
     }
 }
 
-/// YAML frontmatter is not markdown: a stray quote or newline breaks the parse,
-/// and a broken Skill is one the agent silently never loads.
 fn yaml_quote(s: &str) -> String {
     format!(
         "\"{}\"",
@@ -122,8 +99,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         std::fs::create_dir_all(&folder)
             .with_context(|| format!("no se pudo crear {}", folder.display()))?;
 
-        // The description is the ONLY thing the agent reads until it decides this
-        // Skill is relevant, so it must say when to use it — not what it is.
         let description = if trigger.is_empty() {
             format!("Cómo: {name}.")
         } else {
@@ -137,8 +112,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         body.push_str("---\n\n");
         body.push_str(&format!("# {name}\n\n"));
 
-        // The track record, up front. An agent about to run a recipe deserves to
-        // know whether the recipe has ever worked.
         let total = successes + failures;
         if total == 0 {
             body.push_str(
@@ -150,12 +123,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             let rate = successes as f64 / total as f64;
             let pct = rate * 100.0;
 
-            // Two very different failures collapse into one low Wilson bound, and
-            // the file must not confuse them. A procedure with 3 of 4 successes is
-            // not "failing more than it works" — it simply has not been run enough
-            // for anyone to promise anything. Saying otherwise would slander a
-            // recipe that is probably fine, and an agent that reads it would
-            // distrust something it should just verify.
             let (mark, caveat) = if reliability >= TRUSTED {
                 ("Probado", None)
             } else if rate < 0.5 {
@@ -205,8 +172,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 
     println!("{written} Skill(s) escritas en {dir}");
     if skipped > 0 {
-        // Never truncate silently: a skipped procedure is one the agent will not
-        // find, and it should be a decision, not a surprise.
         println!("{skipped} omitida(s) por fiabilidad < {min_reliability:.2}");
     }
     println!("\nEl agente las carga solas: ve el nombre y la descripción, y lee el cuerpo");
@@ -229,14 +194,8 @@ mod tests {
         assert_eq!(slug("¿cómo?"), "c-mo");
     }
 
-    /// 3-of-4 is not "failing more than it works" — it is "not run enough yet".
-    /// Both land under the Wilson threshold, and the file must not slander a
-    /// recipe that is probably fine.
     #[test]
     fn low_confidence_is_not_the_same_as_a_bad_procedure() {
-        /// The classification the SKILL.md body makes. Mirrors the branch in
-        /// run_cli: reliability decides trust, but the raw rate decides whether
-        /// an untrusted procedure is *bad* or merely *unproven*.
         fn verdict(successes: i64, failures: i64) -> &'static str {
             let total = successes + failures;
             if total == 0 {
@@ -253,9 +212,6 @@ mod tests {
             }
         }
 
-        // Both fall under the Wilson threshold — but for opposite reasons, and
-        // calling the first one "failing more than it works" would slander a
-        // recipe that is probably fine.
         assert_eq!(verdict(3, 1), "sin evidencia suficiente");
         assert_eq!(verdict(1, 9), "poco fiable");
         assert_eq!(verdict(0, 0), "sin historial");
@@ -264,7 +220,6 @@ mod tests {
 
     #[test]
     fn frontmatter_cannot_be_broken_by_a_procedure_name() {
-        // A Skill whose YAML does not parse is one the agent silently never loads.
         assert_eq!(yaml_quote("simple"), "\"simple\"");
         assert_eq!(yaml_quote("con \"comillas\""), "\"con \\\"comillas\\\"\"");
         assert_eq!(yaml_quote("dos\nlíneas"), "\"dos líneas\"");

@@ -1,28 +1,3 @@
-//! Maximal Marginal Relevance (MMR) — Carbonell-Goldstein, SIGIR 1998.
-//!
-//! Diversifies a top-K retrieval list by penalizing redundancy between candidates:
-//!
-//!   `score(d) = λ · sim(q, d) − (1 − λ) · max_{d' ∈ S} sim(d, d')`
-//!
-//! where `S` is the set of already-selected results and λ ∈ [0, 1] balances
-//! relevance vs diversity. λ=0.7 is a sensible default for memory retrieval —
-//! prioritize semantic similarity to the query while still cutting near-duplicates.
-//!
-//! Trade-offs:
-//! - λ=1.0: pure relevance, equivalent to no MMR (top-K by sim).
-//! - λ=0.5: balanced — typical for exploratory search.
-//! - λ=0.0: pure diversity — selects the most spread-out candidates.
-
-/// One-shot greedy MMR re-ranking.
-///
-/// `relevance` is the precomputed `sim(q, d)` for every candidate, in the
-/// same order as `pairwise_sim` rows/columns. `pairwise_sim[i][j]` is
-/// `sim(d_i, d_j)`, expected symmetric with 1.0 on the diagonal.
-///
-/// Returns the indices of the selected `top_k` candidates in MMR order.
-///
-/// Complexity: O(K² · N) which is fine for the typical fanout where N≤50
-/// and K≤10. For larger N use a heap-based variant (out of scope here).
 pub fn mmr_select(
     relevance: &[f64],
     pairwise_sim: &[Vec<f64>],
@@ -67,7 +42,6 @@ pub fn mmr_select(
     selected
 }
 
-/// Default lambda value recommended for memory retrieval.
 pub const DEFAULT_LAMBDA: f64 = 0.7;
 
 #[cfg(test)]
@@ -92,8 +66,6 @@ mod tests {
 
     #[test]
     fn lambda_zero_diversifies_with_redundant_candidates() {
-        // Candidates 0 and 1 are highly similar (sim 0.95) — MMR with λ=0
-        // must prefer 0 then jump to 2 instead of picking 1.
         let rel = vec![0.9, 0.85, 0.5, 0.4];
         let mut sim = identity_sim(4);
         sim[0][1] = 0.95;
@@ -111,15 +83,12 @@ mod tests {
 
     #[test]
     fn balanced_lambda_picks_diverse_top() {
-        // Two near-duplicates with high relevance vs one slightly worse but distinct.
         let rel = vec![0.9, 0.88, 0.7];
         let mut sim = identity_sim(3);
         sim[0][1] = 0.99;
         sim[1][0] = 0.99;
         let picks = mmr_select(&rel, &sim, 0.5, 2);
         assert_eq!(picks[0], 0, "top relevance wins first");
-        // λ=0.5 with sim 0.99 between 0 and 1: candidate 1 score = 0.5·0.88 - 0.5·0.99 = -0.055
-        // candidate 2 score = 0.5·0.7 - 0.5·0.0 = 0.35 → picks 2.
         assert_eq!(picks[1], 2, "diversity should beat near-duplicate");
     }
 

@@ -1,10 +1,3 @@
-//! Handler: cuba_zafra — Memory maintenance and consolidation.
-//!
-//! FIX R-001: safe_truncate() for UTF-8 char boundary safety.
-//! FIX R-002: merge loop wrapped in transaction for atomicity.
-//! V3: decay action now uses exponential decay on importance (replaces FSRS-6).
-//!     importance * EXP(-0.693 * days / halflife) — simple, auditable, effective.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -12,9 +5,6 @@ use sqlx::PgPool;
 async fn refresh_ood_cache(pool: &PgPool, project_id: Option<uuid::Uuid>) -> Result<()> {
     use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats};
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
-        // Unbiased and deterministic — see the note in faro::check_ood. Fitting
-        // the corpus distribution on its most-important 500 rows described a
-        // distribution the queries were never drawn from.
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
@@ -38,17 +28,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     match action {
         "decay" => {
-            // V4: Stratified exponential decay — different halflife per observation_type.
-            // fact/preference: 30d  |  error/solution: 14d  |  context/tool_usage: 7d
-            // decision/lesson: ∞ (never decay — protected by WHERE clause).
-            //
-            // V0.9: Testing effect (Karpicke-Roediger Science 2008) — frequently
-            // accessed observations decay slower:
-            //   effective_halflife = base_halflife · (1 + ln(1 + access_count))
-            // An observation accessed 50× has ≈4× longer effective halflife than
-            // one accessed 0×. Implements retrieval-induced consolidation.
-            //
-            // Override with halflife_days to apply a global halflife (backward compat).
             let global_override = args.get("halflife_days").and_then(|v| v.as_f64());
             let result = if let Some(halflife) = global_override {
                 sqlx::query(
@@ -122,7 +101,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .get("similarity_threshold")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.8);
-            // P2 FIX: Batch merge — find duplicates in one query, merge in batch
             let dupes: Vec<(uuid::Uuid, uuid::Uuid, f64)> = sqlx::query_as(
                 "SELECT a.id, b.id, similarity(a.content, b.content)::float8 AS sim
                  FROM brain_observations a JOIN brain_observations b ON a.entity_id = b.entity_id AND a.id < b.id
@@ -130,7 +108,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  LIMIT 100"
             ).bind(sim_threshold).fetch_all(pool).await?;
 
-            // FIX R-002: Atomic transaction — all-or-nothing merge
             let mut tx = pool
                 .begin()
                 .await
@@ -204,10 +181,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                     .bind(entity_name)
                     .fetch_one(pool)
                     .await?;
-            // Mark old observations as superseded
             let marked = sqlx::query("UPDATE brain_observations SET observation_type = 'superseded' WHERE entity_id = $1 AND observation_type != 'superseded'")
                 .bind(entity_id.0).execute(pool).await?;
-            // Insert new summary
             sqlx::query("INSERT INTO brain_observations (entity_id, content, observation_type, source) VALUES ($1, $2, 'fact', 'consolidation')")
                 .bind(entity_id.0).bind(summary).execute(pool).await?;
             Ok(
@@ -221,7 +196,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                  WHERE similarity(a.content, b.content) > 0.7 AND a.observation_type != 'superseded' AND b.observation_type != 'superseded'
                  ORDER BY sim DESC LIMIT 20"
             ).fetch_all(pool).await?;
-            // FIX R-001: safe_truncate prevents panic on multi-byte UTF-8
             let results: Vec<Value> = dupes
                 .iter()
                 .map(|(a, b, s)| {
@@ -244,15 +218,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             )
         }
         "decay_episodes" => {
-            // Power-law decay for episodic memories (Wixted 2004).
-            // I(t) = 0.5 / (1 + c·t)^β — computed from creation time, NOT from current importance.
-            //
-            // FIX: Previous version used `importance / POWER(...)` which compounds multiplicatively
-            // on each invocation (double-decay bug). This version computes the target importance
-            // directly from the initial value (0.5) and age, making it IDEMPOTENT — calling it
-            // twice produces the same result.
-            //
-            // Default: c=0.1, β=0.5 (Wixted & Ebbesen 1991 calibration).
             let c = args.get("c").and_then(|v| v.as_f64()).unwrap_or(0.1);
             let beta = args.get("beta").and_then(|v| v.as_f64()).unwrap_or(0.5);
             let result = sqlx::query(
@@ -279,11 +244,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             }))
         }
         "reembed" => {
-            // Re-encode all observations using the current ONNX model (embed_passage prefix).
-            // Run this after switching embedding models to ensure consistency.
-
-            // Require a real ONNX model — reembed with hash fallback embeddings
-            // would replace valid ONNX vectors with semantically meaningless hashes.
             if !crate::embeddings::onnx::is_model_loaded() {
                 return Ok(serde_json::json!({
                     "action": "reembed",
@@ -297,7 +257,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(500);
             let current_model = crate::embeddings::onnx::current_model();
-            // V0.6: Only re-encode observations with stale/missing model or embedding
             let obs: Vec<(uuid::Uuid, String)> = sqlx::query_as(
                 "SELECT id, content FROM brain_observations
                  WHERE observation_type != 'superseded'
@@ -313,15 +272,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             let total = obs.len();
             let mut updated = 0u32;
 
-            // V0.9.2: progress notifications. Token derived from action +
-            // batch size — clients use it to correlate intermediate progress
-            // with the final tools/call response.
             let progress_token = args
                 .get("_meta")
                 .and_then(|m| m.get("progressToken"))
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| format!("zafra_reembed_{}", batch_size));
-            let progress_step = (total / 20).max(1); // ~5% increments
+            let progress_step = (total / 20).max(1);
 
             for (i, (obs_id, content)) in obs.into_iter().enumerate() {
                 match crate::embeddings::onnx::embed_passage(&content).await {
@@ -366,17 +322,10 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// FIX R-001: Truncate string to max_bytes at a valid UTF-8 char boundary.
-///
-/// Rust `&str[..n]` panics if `n` is not a char boundary (e.g., slicing
-/// mid-emoji or mid-accent). This function walks backwards to find the
-/// nearest valid boundary. O(1) amortized — max 4 bytes backtrack (max
-/// UTF-8 char width).
 pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    // Walk backwards to find a valid char boundary (max 4 steps)
     let mut end = max_bytes;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;

@@ -1,8 +1,3 @@
-//! MCP JSON-RPC protocol handler — stdin/stdout transport.
-//!
-//! FIX B4: REM session protection uses exact entity_id match (not ILIKE).
-//! FIX V2: tokio::time::timeout(30s) on every handler dispatch.
-
 use crate::db;
 use crate::handlers;
 
@@ -13,9 +8,6 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// MCP protocol timeout per handler request. Default 30s; override with
-/// `CUBA_HANDLER_TIMEOUT_SECS` for long maintenance ops (e.g. a full bge-m3
-/// reembed of the corpus, which exceeds 30s).
 fn handler_timeout() -> Duration {
     std::env::var("CUBA_HANDLER_TIMEOUT_SECS")
         .ok()
@@ -25,20 +17,10 @@ fn handler_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(30))
 }
 
-/// REM sleep interval (4 hours).
 const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
 
-// ── JSON-RPC Types ───────────────────────────────────────────────
-
-/// An inbound JSON-RPC envelope.
-///
-/// `jsonrpc` and `params` are never read directly — the dispatcher works from
-/// `method` and pulls arguments out of the raw `Value`. They are declared anyway
-/// because their presence is what makes serde REJECT a malformed envelope at the
-/// door: drop them and a request missing `jsonrpc` would deserialize happily and
-/// fail somewhere deeper, with a worse error. The fields are the validation.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // see above: these fields validate the shape, they are not read
+#[allow(dead_code)]
 struct JsonRpcRequest {
     jsonrpc: String,
     id: Option<Value>,
@@ -47,58 +29,27 @@ struct JsonRpcRequest {
     params: Option<Value>,
 }
 
-// V0.9.2: JsonRpcResponse / JsonRpcError structs removed — every outbound
-// envelope is built ad-hoc with serde_json::json!() and pushed to the
-// OUTBOUND mpsc channel. Keeps the surface narrow and avoids the temptation
-// to construct envelopes from places that should not.
-
-// ── V0.9.1: Client capability tracking ───────────────────────────
-
-/// Captured at `initialize` time. Read from any handler/judge backend.
 static CLIENT_SUPPORTS_SAMPLING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// True if the client advertised `capabilities.sampling` during initialize.
-/// Used by `cuba_juez` resolver to prefer MCP Sampling over CLI/API.
 pub fn client_supports_sampling() -> bool {
     CLIENT_SUPPORTS_SAMPLING.load(std::sync::atomic::Ordering::Relaxed)
 }
-
-// ── V0.9.2: Server-initiated request correlator ──────────────────
-// Sampling, progress, cancellation all need the server to write to stdout
-// from arbitrary async tasks (not just from the request handler chain).
-// We solve this with:
-//   1. An mpsc<Value> channel — every code path that wants to write to
-//      stdout sends its serialized JSON-RPC value there. A single writer
-//      task owns stdout and drains the channel sequentially (preventing
-//      interleaved writes, which would corrupt the JSONL stream).
-//   2. A pending-requests map keyed by request id, with a oneshot::Sender
-//      per id. When the client responds to a server-initiated request,
-//      the dispatcher routes the value into the matching oneshot.
 
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-/// Per-process global writer queue. All outbound JSON-RPC messages go through
-/// this; a single writer task owns stdout.
 static OUTBOUND: OnceLock<mpsc::UnboundedSender<Value>> = OnceLock::new();
 
-/// Pending server→client requests awaiting a response. Keyed by id.
 static PENDING: OnceLock<Mutex<std::collections::HashMap<u64, oneshot::Sender<Value>>>> =
     OnceLock::new();
 
-/// Monotonic request id generator for server-initiated requests. We use the
-/// `srv_<n>` namespace so client-initiated ids can never collide.
 static NEXT_SERVER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Per-handler-call cancellation token. Set by the dispatcher when handling
-/// `tools/call`, looked up by `notifications/cancelled`. Map keys are the
-/// JSON-RPC request id encoded as a string.
 static CANCEL_TOKENS: OnceLock<Mutex<std::collections::HashMap<String, CancelToken>>> =
     OnceLock::new();
 
-/// Thin wrapper so cancellation propagates across `tokio::select!` arms.
 #[derive(Clone, Default)]
 pub struct CancelToken {
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -126,18 +77,10 @@ fn cancel_tokens() -> &'static Mutex<std::collections::HashMap<String, CancelTok
     CANCEL_TOKENS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Request the connected client to call its LLM via `sampling/createMessage`.
-/// Returns the model's reply text.
-///
-/// V0.9.2: real implementation — issues a server→client request through the
-/// outbound channel and awaits the matching response on a oneshot. Falls
-/// back to a structured error if the client did not advertise `sampling`.
 pub async fn request_sampling(prompt: &str) -> anyhow::Result<String> {
     request_sampling_max(prompt, 256).await
 }
 
-/// Like [`request_sampling`] but with a caller-chosen `max_tokens` budget.
-/// Fact extraction needs a larger reply than the judge's 256-token verdict.
 pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Result<String> {
     if !client_supports_sampling() {
         anyhow::bail!(
@@ -172,25 +115,21 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
         .send(req)
         .map_err(|_| anyhow::anyhow!("outbound channel closed"))?;
 
-    // 30s ceiling to match HANDLER_TIMEOUT — no judge call should hang the agent.
     let response = match tokio::time::timeout(handler_timeout(), rx).await {
         Ok(Ok(v)) => v,
         Ok(Err(_)) => anyhow::bail!("sampling response channel dropped"),
         Err(_) => {
-            // Clean up pending entry so the map doesn't grow unbounded
             pending().lock().await.remove(&id);
             anyhow::bail!("sampling timed out after 30s");
         }
     };
 
-    // MCP spec: response.result.content.text is the model's reply
     let text = response
         .get("result")
         .and_then(|r| r.get("content"))
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
         .or_else(|| {
-            // Some clients return error in standard JSON-RPC error envelope
             response
                 .get("error")
                 .and_then(|e| e.get("message"))
@@ -200,8 +139,6 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
     Ok(text.to_string())
 }
 
-/// Send a `notifications/progress` to the client for a long-running tool call.
-/// Best-effort — if outbound is closed (server shutting down) this is a no-op.
 pub fn notify_progress(token: &str, progress: f64, total: Option<f64>, message: Option<&str>) {
     let mut params = serde_json::json!({
         "progressToken": token,
@@ -223,8 +160,6 @@ pub fn notify_progress(token: &str, progress: f64, total: Option<f64>, message: 
     }
 }
 
-/// Register a cancellation token for the given client request id. Returned
-/// token is shared with the running handler via `tokio::select!`.
 pub async fn register_cancel_token(request_id: &Value) -> CancelToken {
     let token = CancelToken::default();
     let key = request_id.to_string();
@@ -232,17 +167,11 @@ pub async fn register_cancel_token(request_id: &Value) -> CancelToken {
     token
 }
 
-/// Drop the token for `request_id`. Called once the handler completes.
 pub async fn unregister_cancel_token(request_id: &Value) {
     let key = request_id.to_string();
     cancel_tokens().lock().await.remove(&key);
 }
 
-// ── MCP Protocol Constants ───────────────────────────────────────
-
-/// Server capabilities advertised during initialize.
-/// V0.9: announces `resources` capability for `cuba://` URI scheme
-/// (read-only entity/snapshot/project introspection without invoking tools).
 fn server_info() -> Value {
     serde_json::json!({
         "protocolVersion": "2024-11-05",
@@ -257,41 +186,20 @@ fn server_info() -> Value {
     })
 }
 
-// ── Main Protocol Loop ──────────────────────────────────────────
-
-/// Run the MCP protocol over stdin/stdout.
-///
-/// V0.9.2: refactored to support server-initiated requests (sampling) +
-/// progress notifications + cancellation. Three concurrent tasks share
-/// stdio:
-///
-/// 1. **Reader** task: reads JSON-RPC from stdin. Distinguishes:
-///    - Client request (has `method`, has `id`) → spawn handler, response
-///      goes to outbound channel.
-///    - Client notification (has `method`, no `id`) → fire-and-forget.
-///    - Client response to a server-initiated request (has `id`, no
-///      `method`) → routed via PENDING map.
-/// 2. **Writer** task: drains the outbound channel and writes serially to
-///    stdout. Single owner of stdout — no interleaving.
-/// 3. **Handler** tasks (spawned per request): run the dispatch and push
-///    their JSON-RPC response into outbound when done.
 pub async fn run_mcp() -> Result<()> {
     let database_url = crate::setup::resolve_database_url().await;
     let pool = db::create_pool(&database_url).await?;
 
-    // REM daemon (preserved from V0.7).
     let rem_pool = pool.clone();
     let rem_handle = tokio::spawn(async move {
         rem_daemon(rem_pool).await;
     });
 
-    // Outbound channel — every code path that wants to write to stdout sends here.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
     OUTBOUND
         .set(out_tx)
         .map_err(|_| anyhow::anyhow!("OUTBOUND already initialized"))?;
 
-    // Writer task: single owner of stdout.
     let writer_handle = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(msg) = out_rx.recv().await {
@@ -314,10 +222,6 @@ pub async fn run_mcp() -> Result<()> {
         }
     });
 
-    // Reader loop. We track every spawned handler in a JoinSet so we can
-    // drain them on EOF — without this, MCP clients that pipe a batch of
-    // requests and close stdin lose responses for any handler still
-    // executing when the read returns None.
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
     let mut lines = reader.lines();
@@ -331,9 +235,6 @@ pub async fn run_mcp() -> Result<()> {
             continue;
         }
 
-        // First parse generically — could be a request OR a response from
-        // a server-initiated call (sampling). Responses have `id` + `result`
-        // or `error` and lack `method`.
         let parsed: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
@@ -350,7 +251,6 @@ pub async fn run_mcp() -> Result<()> {
         let has_method = parsed.get("method").and_then(|v| v.as_str()).is_some();
         let id_value = parsed.get("id").cloned();
 
-        // Server-initiated response routing (sampling, list_roots, etc.)
         if !has_method
             && let Some(idv) = id_value.as_ref()
             && let Some(srv_id) = idv
@@ -366,7 +266,6 @@ pub async fn run_mcp() -> Result<()> {
             continue;
         }
 
-        // Otherwise it's a client request or notification.
         let request: JsonRpcRequest = match serde_json::from_value(parsed) {
             Ok(r) => r,
             Err(e) => {
@@ -399,15 +298,6 @@ pub async fn run_mcp() -> Result<()> {
                     "result": v,
                 }),
                 Err(e) => {
-                    // `{e:#}` — the whole anyhow chain, not just the outermost
-                    // context. `e.to_string()` prints only the top frame, so a
-                    // handler that wraps a database error with
-                    // .context("guardando el procedimiento") reported exactly
-                    // that string and nothing else: the agent saw a label, and
-                    // the cause (a pgvector dimension mismatch) never left the
-                    // process. An error message that hides why is barely an error
-                    // message, and this repo has spent enough time paying for
-                    // silent failures.
                     let chain = format!("{e:#}");
                     tracing::error!(error = %chain, "handler failed");
                     serde_json::json!({
@@ -421,10 +311,6 @@ pub async fn run_mcp() -> Result<()> {
         });
     }
 
-    // Stdin EOF — client disconnected. Drain in-flight handlers (giving each
-    // a generous window to finish) before closing the writer. Without this
-    // wait the writer would be aborted while handlers are still trying to
-    // push their responses onto the channel.
     tracing::info!(
         "stdin closed — draining {} in-flight handlers",
         in_flight.len()
@@ -432,29 +318,20 @@ pub async fn run_mcp() -> Result<()> {
     let drain = async { while in_flight.join_next().await.is_some() {} };
     let _ = tokio::time::timeout(handler_timeout() * 2, drain).await;
 
-    // Close the outbound channel by dropping the cached sender so the writer
-    // task observes channel-empty and exits naturally.
     if let Some(tx) = OUTBOUND.get() {
-        // Drop our sender clone owned by `outbound()`. The reader loop is
-        // the only other holder, and it's about to exit.
-        let _ = tx; // sender is in OnceLock — kept alive for the writer drain
+        let _ = tx;
     }
 
     rem_handle.abort();
-    // Give the writer a brief grace period to flush remaining envelopes.
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), writer_handle).await;
     tracing::info!("REM daemon + writer drained, shutting down");
 
     Ok(())
 }
 
-/// Route a JSON-RPC request to the appropriate handler.
 async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value> {
     match request.method.as_str() {
-        // MCP lifecycle
         "initialize" => {
-            // V0.9: capture client capabilities for downstream feature gating.
-            // Specifically `capabilities.sampling` enables MCPSamplingJudge.
             if let Some(params) = &request.params {
                 let sampling_advertised = params
                     .get("capabilities")
@@ -470,7 +347,6 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
         }
         "initialized" | "notifications/initialized" => Ok(Value::Null),
         "notifications/cancelled" => {
-            // V0.9.2: signal the matching CancelToken so the handler unwinds.
             if let Some(params) = &request.params
                 && let Some(req_id) = params.get("requestId")
             {
@@ -484,17 +360,10 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
         }
         "ping" => Ok(serde_json::json!({})),
 
-        // Tool listing. Honours CUBA_TOOL_PROFILE: all 25 schemas ride in the
-        // agent's context every session, and most are maintenance surfaces it
-        // never calls mid-task. Defaults to `full`, so nothing shrinks on upgrade.
         "tools/list" => Ok(serde_json::json!({
             "tools": crate::constants::tools_for_profile()
         })),
 
-        // V0.9: MCP Resources — read-only URI scheme cuba://
-        // - cuba://entity/<name>      → entity + recent observations as JSON
-        // - cuba://project/<name>     → project metadata + counts
-        // - cuba://snapshot/<id>      → compaction snapshot markdown
         "resources/list" => list_resources(pool).await,
         "resources/read" => {
             let params = request.params.unwrap_or(Value::Null);
@@ -502,7 +371,6 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
             read_resource(pool, uri).await
         }
 
-        // Tool execution with timeout (V2) + V0.9.2 cancellation token.
         "tools/call" => {
             let req_id = request.id.clone().unwrap_or(Value::Null);
             let params = request.params.unwrap_or(Value::Null);
@@ -518,8 +386,6 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
 
             tracing::info!(tool = %tool_name, "executing tool");
 
-            // V0.9.2: register cancellation token so notifications/cancelled
-            // can interrupt long-running handlers via tokio::select!.
             let token = register_cancel_token(&req_id).await;
             let cancel_fut = async {
                 while !token.cancelled() {
@@ -555,21 +421,14 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
     }
 }
 
-// ── REM Sleep Daemon ────────────────────────────────────────────
-
-/// Background daemon that runs memory consolidation every 4 hours.
-///
-/// FIX B4: Session protection uses exact entity associations, not ILIKE.
 async fn rem_daemon(pool: PgPool) {
     let mut interval = tokio::time::interval(REM_INTERVAL);
-    // Skip the first tick (fires immediately)
     interval.tick().await;
 
     loop {
         interval.tick().await;
         tracing::info!("REM sleep cycle starting");
 
-        // Run consolidation in a spawned task (I/O-bound: DB queries + graph ops)
         let pool_clone = pool.clone();
         let result = tokio::spawn(async move { run_rem_consolidation(&pool_clone).await }).await;
 
@@ -581,15 +440,7 @@ async fn rem_daemon(pool: PgPool) {
     }
 }
 
-/// Execute REM sleep consolidation steps.
-///
-/// Steps: decay → PageRank → TF-IDF.
-/// NOTE: Neighbor Diffusion removed — duplicates PageRank topology propagation
-/// with N+1 pattern (120 queries/cycle for 20 seeds × 6 neighbors each).
 async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
-    // 1. Get this process's session goals (for session protection - FIX B4).
-    // Scoped to crate::session: REM must not shield another client's entities
-    // from decay, nor leave ours unprotected because they opened a session later.
     let active_session: Option<(uuid::Uuid, Vec<String>)> = match crate::session::session_id() {
         Some(sid) => {
             let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
@@ -607,9 +458,7 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         None => None,
     };
 
-    // 2. Get entities to protect from decay (FIX B4: exact entity_ids, not ILIKE)
     let protected_entity_ids: Vec<uuid::Uuid> = if let Some((_session_id, _)) = &active_session {
-        // Protect entities accessed during active session (last 8h)
         sqlx::query_scalar(
             "SELECT DISTINCT entity_id FROM brain_observations
              WHERE created_at > NOW() - INTERVAL '8 hours'",
@@ -620,13 +469,6 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         vec![]
     };
 
-    // 3. V4: Stratified exponential decay — different halflife per observation_type.
-    //    fact/preference: 30d | error/solution: 14d | context/tool_usage: 7d
-    //    decision/lesson: never (protected by WHERE clause).
-    // Anchor on GREATEST(last_accessed, last_decayed_at) so repeated REM cycles
-    // decay only the incremental idle time (migration 0028). The access_count
-    // term stretches the effective half-life for frequently-used memories,
-    // matching the manual cuba_zafra decay and the V4 spec in the README.
     let stratified_decay_sql = "UPDATE brain_observations SET
         importance = GREATEST(
             importance * EXP(-0.693
@@ -669,7 +511,6 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "stratified exponential decay applied"
     );
 
-    // 3b. Episode power-law decay (Wixted 2004) — idempotent from initial=0.5
     let episode_decayed = sqlx::query(
         "UPDATE brain_episodes SET
             importance = GREATEST(
@@ -681,30 +522,23 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await
     .map(|r| r.rows_affected())
-    .unwrap_or(0); // Non-fatal: episodes table may not exist on old DBs
+    .unwrap_or(0);
     tracing::info!(
         episode_decayed_count = episode_decayed,
         "episode power-law decay applied"
     );
 
-    // 4. PageRank (batch — P1 fix)
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
-    // 5. TF-IDF index: BM25 index is in-memory, rebuilt on demand per REM cycle
-    // (no persistent index to rebuild — Bm25Index lives in handler state)
     tracing::info!("REM consolidation complete");
 
     Ok(())
 }
 
-// ── V0.9: MCP Resources implementation ──────────────────────────
-
-/// List recently active entities, projects and snapshots as cuba:// URIs.
 async fn list_resources(pool: &PgPool) -> Result<Value> {
     let mut resources: Vec<Value> = Vec::new();
 
-    // Top 50 entities by access_count
     let entities: Vec<(String, String)> = sqlx::query_as(
         "SELECT name, entity_type FROM brain_entities
          ORDER BY access_count DESC NULLS LAST, updated_at DESC NULLS LAST
@@ -722,7 +556,6 @@ async fn list_resources(pool: &PgPool) -> Result<Value> {
         }));
     }
 
-    // All projects
     let projects: Vec<(String,)> =
         sqlx::query_as("SELECT name FROM brain_projects ORDER BY last_active_at DESC LIMIT 100")
             .fetch_all(pool)
@@ -737,7 +570,6 @@ async fn list_resources(pool: &PgPool) -> Result<Value> {
         }));
     }
 
-    // Recent compaction snapshots
     let snapshots: Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, created_at FROM brain_compaction_snapshots
          ORDER BY created_at DESC LIMIT 20",
@@ -757,7 +589,6 @@ async fn list_resources(pool: &PgPool) -> Result<Value> {
     Ok(serde_json::json!({"resources": resources}))
 }
 
-/// Read a single cuba:// URI. Returns the standard MCP `contents` envelope.
 async fn read_resource(pool: &PgPool, uri: &str) -> Result<Value> {
     let stripped = uri
         .strip_prefix("cuba://")

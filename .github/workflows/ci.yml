@@ -63,6 +63,13 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+      # The npm wrapper is how most people install this, and it once shipped a package
+      # whose binary was never fetched. This smoke test loads bin.js/postinstall.js and
+      # checks the fetch-on-first-use wiring without needing a network or a release —
+      # a broken require or a renamed export here breaks every `npm install`.
+      - name: npm wrapper smoke test
+        run: node npm/install.test.js
+
   e2e:
     name: E2E Tests
     needs: check

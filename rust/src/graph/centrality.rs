@@ -1,14 +1,8 @@
-//! Betweenness centrality (Brandes algorithm).
-//!
-//! Finds bridge entities that connect different communities.
-
 use anyhow::Result;
 use sqlx::PgPool;
 use std::collections::{HashMap, VecDeque};
 
-/// Compute betweenness centrality and return top entities.
 pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String, f64)>> {
-    // Fetch graph
     let edges: Vec<(uuid::Uuid, uuid::Uuid)> =
         sqlx::query_as("SELECT from_entity, to_entity FROM brain_relations")
             .fetch_all(pool)
@@ -22,7 +16,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
         return Ok(vec![]);
     }
 
-    // Map entity_id → index
     let mut id_to_idx: HashMap<uuid::Uuid, usize> = HashMap::new();
     let mut names: Vec<String> = Vec::new();
     for (i, (id, name)) in entities.iter().enumerate() {
@@ -31,7 +24,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
     }
     let n = names.len();
 
-    // Build adjacency (undirected)
     let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
     for (from, to) in &edges {
         if let (Some(&fi), Some(&ti)) = (id_to_idx.get(from), id_to_idx.get(to)) {
@@ -40,10 +32,8 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
         }
     }
 
-    // Brandes algorithm for betweenness centrality
     let mut betweenness: Vec<f64> = vec![0.0; n];
 
-    // Pre-allocate per-source vectors ONCE (reused across all sources)
     let mut stack: Vec<usize> = Vec::with_capacity(n);
     let mut pred: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
     let mut sigma: Vec<f64> = vec![0.0; n];
@@ -51,7 +41,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
     let mut delta: Vec<f64> = vec![0.0; n];
 
     for s in 0..n {
-        // Reset for this source (O(n) fill instead of O(n) alloc)
         stack.clear();
         for p in pred.iter_mut() {
             p.clear();
@@ -66,7 +55,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
         let mut queue: VecDeque<usize> = VecDeque::new();
         queue.push_back(s);
 
-        // BFS
         while let Some(v) = queue.pop_front() {
             stack.push(v);
             for &w in &adj[v] {
@@ -81,7 +69,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
             }
         }
 
-        // Accumulation
         while let Some(w) = stack.pop() {
             for &v in &pred[w] {
                 delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
@@ -92,9 +79,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
         }
     }
 
-    // Normalize (undirected Brandes: divide by (n-1)(n-2)/2)
-    // Each shortest path s→t is counted once from s and once from t,
-    // so raw betweenness is doubled for undirected graphs.
     let norm = if n > 2 {
         ((n - 1) * (n - 2)) as f64 / 2.0
     } else {
@@ -104,7 +88,6 @@ pub async fn compute_bridges(pool: &PgPool, top_k: usize) -> Result<Vec<(String,
         *b /= norm;
     }
 
-    // Sort and return top_k
     let mut ranked: Vec<(String, f64)> = names
         .into_iter()
         .zip(betweenness)

@@ -1,8 +1,3 @@
-//! Handler: cuba_ingesta — Bulk knowledge ingestion.
-//!
-//! Accepts structured arrays or long text for batch observation creation.
-//! Internally uses the same dedup and embedding pipeline as cronica.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -18,15 +13,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// v0.11: LLM-powered fact extraction (closes the extraction gap; mem0/Zep have
-/// it, cuba did not). Instead of the heuristic paragraph split of `parse`, it
-/// asks the *calling client's* LLM — via MCP Sampling, so $0 and no API key — to
-/// distill the salient, durable facts from a turn/conversation as structured
-/// items, then feeds them through the same dedup + PE-gating + embedding
-/// pipeline as `ingest`. Additive only: it never deletes.
-///
-/// Degrades honestly: if the client did not advertise `sampling`, it says so and
-/// points at `parse` (the heuristic fallback) rather than silently doing nothing.
 async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     let text = args
         .get("text")
@@ -55,7 +41,6 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or("");
     let prompt = build_extraction_prompt(text, hint);
 
-    // Larger reply budget than the judge — a turn can yield several facts.
     let reply = crate::protocol::request_sampling_max(&prompt, 1024)
         .await
         .context("MCP sampling for auto_extract failed")?;
@@ -71,26 +56,16 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         }));
     }
 
-    // Phase 4 (opt-in): knowledge-update. Before ingesting, ask the judge whether
-    // each new fact SUPERSEDES an existing, related-but-not-duplicate observation;
-    // if so, mark the old one superseded (never deleted). This is exactly the
-    // "invalidate on update" that makes Zep/Graphiti win LongMemEval, built on
-    // cuba's bitemporal supersede. Default off — pure ADD otherwise.
     let supersede_conflicts = args
         .get("supersede_conflicts")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // Phase 1.2: the judge classifies each candidate vs its most similar existing
-    // fact into an explicit ADD/UPDATE/DELETE/NOOP operation (the LLM decides, not
-    // a cosine threshold). UPDATE supersedes the old row; the new fact is ingested
-    // by the pipeline below regardless (Add/Update both keep the new fact).
     let ops = if supersede_conflicts {
         resolve_conflicts(pool, &items).await
     } else {
         crate::cognitive::memory_op::OpBreakdown::default()
     };
 
-    // Reuse the ingest path: validation + dedup + PE-gating + embedding.
     let ingest_args = serde_json::json!({ "action": "ingest", "items": items });
     let result = ingest(pool, &ingest_args).await?;
 
@@ -99,8 +74,6 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         obj.insert("action".to_string(), serde_json::json!("auto_extract"));
         obj.insert("extracted".to_string(), serde_json::json!(extracted));
         if supersede_conflicts {
-            // Back-compat: `superseded` is the UPDATE count; `operations` is the
-            // full ADD/UPDATE/DELETE/NOOP breakdown of the judge's decisions.
             obj.insert("superseded".to_string(), serde_json::json!(ops.update));
             obj.insert("operations".to_string(), ops.to_json());
         }
@@ -108,27 +81,14 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     Ok(response)
 }
 
-/// Phase 1.2 (builds on Phase 4): for each candidate fact, find the most similar
-/// existing observation of the same entity in the "related but not a duplicate"
-/// band, ask the LLM judge to classify the relationship, and map it to an
-/// explicit ADD/UPDATE/DELETE/NOOP operation ([`crate::cognitive::memory_op`]).
-/// An UPDATE supersedes the old row (data-safe: only ever sets
-/// observation_type='superseded' — the row is retained, never deleted).
-///
-/// The candidate is always ingested afterwards by the pipeline, so ADD and UPDATE
-/// both keep the new fact; the difference is whether the old one is superseded.
-/// Best-effort per item. Returns the operation breakdown.
 async fn resolve_conflicts(
     pool: &PgPool,
     items: &[Value],
 ) -> crate::cognitive::memory_op::OpBreakdown {
     use crate::cognitive::memory_op::{MemoryOp, OpBreakdown};
 
-    // Below the dup threshold (0.85, already blocked) but related enough to
-    // possibly conflict. Unrelated facts never reach the judge.
     const REL_LO: f64 = 0.30;
     const REL_HI: f64 = 0.85;
-    // Minimum judge confidence to act on (supersede). Below this → Noop.
     const CONF_FLOOR: f64 = 0.5;
 
     let judge = crate::cognitive::judge::resolve_judge();
@@ -142,7 +102,6 @@ async fn resolve_conflicts(
             continue;
         };
 
-        // Most similar existing, non-superseded observation of this entity.
         let candidate: Option<(uuid::Uuid, String, f64)> = sqlx::query_as(
             "SELECT o.id, o.content, similarity(o.content, $2)::float8 AS sim
              FROM brain_observations o
@@ -158,17 +117,15 @@ async fn resolve_conflicts(
         .ok()
         .flatten();
 
-        // No related prior fact (or out of band) → this is a free ADD.
         let Some((old_id, old_content, sim)) = candidate else {
             ops.record(MemoryOp::Add);
             continue;
         };
         if !(REL_LO..REL_HI).contains(&sim) {
             ops.record(MemoryOp::Add);
-            continue; // unrelated, or a near-duplicate the dedup gate handles
+            continue;
         }
 
-        // The LLM judge — not a cosine threshold — decides the operation.
         let op = match judge.judge(content, &old_content).await {
             Ok(j) => MemoryOp::from_judgment(&j.verdict, j.confidence, CONF_FLOOR),
             Err(e) => {
@@ -189,7 +146,6 @@ async fn resolve_conflicts(
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::info!(old_id = %old_id, op = op.as_str(), "auto_extract superseded a stale observation");
                 }
-                // Row already superseded by a concurrent op → downgrade to Noop.
                 Ok(_) => {
                     ops.record(MemoryOp::Noop);
                     continue;
@@ -206,8 +162,6 @@ async fn resolve_conflicts(
     ops
 }
 
-/// Build the extraction instruction for the client LLM. Asks for STRICT JSON so
-/// `parse_extracted_items` can recover it even if the model adds prose/fences.
 fn build_extraction_prompt(text: &str, hint: &str) -> String {
     let hint_line = if hint.is_empty() {
         String::new()
@@ -229,10 +183,7 @@ fn build_extraction_prompt(text: &str, hint: &str) -> String {
     )
 }
 
-/// Recover the JSON array from an LLM reply that may wrap it in ```json fences
-/// or surrounding prose. Returns ingest-ready items (invalid rows dropped).
 fn parse_extracted_items(reply: &str) -> Vec<Value> {
-    // Isolate the outermost [...] span so stray prose/fences don't break parsing.
     let slice = match (reply.find('['), reply.rfind(']')) {
         (Some(a), Some(b)) if b > a => &reply[a..=b],
         _ => return Vec::new(),
@@ -278,10 +229,6 @@ fn parse_extracted_items(reply: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Ingest an array of structured items.
-///
-/// Each item: { entity_name, content, observation_type? }
-/// Internally validates, ensures entities, and batch-inserts with dedup.
 async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
     let items = args
         .get("items")
@@ -295,7 +242,6 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("ingest limit is 200 items per call (got {})", items.len());
     }
 
-    // Build batch_add-compatible observations array
     let observations: Vec<Value> = items
         .iter()
         .filter_map(|item| {
@@ -323,7 +269,6 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let skipped = items.len() - observations.len();
 
-    // Delegate to cronica::handle with batch_add action
     let batch_args = serde_json::json!({
         "action": "batch_add",
         "observations": observations
@@ -331,7 +276,6 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let result = super::cronica::handle(pool, batch_args).await?;
 
-    // Augment response with ingesta metadata
     let mut response = result;
     if let Some(obj) = response.as_object_mut() {
         obj.insert("action".to_string(), serde_json::json!("ingest"));
@@ -342,10 +286,6 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
     Ok(response)
 }
 
-/// Parse long text into observations by splitting on double-newlines.
-///
-/// Each paragraph becomes an observation attached to the specified entity.
-/// Auto-classifies paragraphs by keyword heuristics.
 async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
     let entity_name = args
         .get("entity_name")
@@ -360,11 +300,10 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("text is required for parse action");
     }
 
-    // Split on double-newline (paragraph boundaries)
     let paragraphs: Vec<&str> = text
         .split("\n\n")
         .map(|p| p.trim())
-        .filter(|p| p.len() > 10) // Skip very short fragments
+        .filter(|p| p.len() > 10)
         .collect();
 
     if paragraphs.is_empty() {
@@ -376,7 +315,6 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
         }));
     }
 
-    // Build items with auto-classification
     let items: Vec<Value> = paragraphs
         .iter()
         .map(|p| {
@@ -392,7 +330,6 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let parsed_count = items.len();
 
-    // Delegate to ingest
     let ingest_args = serde_json::json!({
         "action": "ingest",
         "items": items
@@ -409,7 +346,6 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
     Ok(response)
 }
 
-/// Auto-classify a paragraph by keyword heuristics.
 fn classify_paragraph(text: &str) -> &'static str {
     let lower = text.to_lowercase();
     if lower.contains("decided") || lower.contains("decision") || lower.contains("chose") {

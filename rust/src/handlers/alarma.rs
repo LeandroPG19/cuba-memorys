@@ -1,5 +1,3 @@
-//! Handler: cuba_alarma — Error reporting with pattern detection.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -28,11 +26,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("error_message is required");
     }
 
-    // V0.8: Resolve current project_id (FK). Coexists with project TEXT column
-    // (legacy filter); FK is the new canonical scoping primitive.
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Insert error (FIX A-003: safe_truncate prevents UTF-8 panic)
     let row: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_errors (error_type, error_message, context, project, project_id) VALUES ($1, $2, $3, $4, $5) RETURNING id"
     )
@@ -45,8 +40,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to insert error")?;
 
-    // Pattern detection: check for similar errors (≥3 = warning).
-    // Exclude the just-inserted error (id != $3) to avoid self-match.
     let similar_count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM brain_errors WHERE similarity(error_message, $1) > 0.5 AND project = $2 AND id != $3"
     )
@@ -56,7 +49,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .fetch_one(pool)
     .await?;
 
-    // Hebbian: boost synapse_weight on similar errors (excluding self)
     if similar_count.0 >= 3 {
         sqlx::query(
             "UPDATE brain_errors SET synapse_weight = LEAST(synapse_weight + 0.1, 5.0)
@@ -83,7 +75,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         ));
     }
 
-    // Centinela: check on_error_match triggers
     let triggered = crate::handlers::centinela::check_triggers(pool, error_type, "on_error_match")
         .await
         .unwrap_or_default();

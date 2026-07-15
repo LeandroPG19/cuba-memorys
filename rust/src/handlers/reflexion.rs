@@ -1,14 +1,3 @@
-//! Handler: cuba_reflexion — Knowledge gap detection.
-//!
-//! Analyzes the knowledge graph for structural gaps:
-//!   1. Isolated entities (no relations)
-//!   2. Underconnected hubs (high importance, low degree)
-//!   3. Type silos (entity types with no cross-connections)
-//!   4. Observation gaps (entities with many facts but no decisions/lessons)
-//!   5. Density anomalies (z-score outliers in obs/relation counts)
-//!
-//! All operations are READ-ONLY — no data is modified.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -25,7 +14,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 }
 
 async fn analyze(pool: &PgPool) -> Result<Value> {
-    // V0.8: resolve project once and pass to each scan
     let project_id = crate::project::current_project_id(pool).await?;
 
     let (isolated, underconnected, type_silos, obs_gaps, density_anomalies) = tokio::try_join!(
@@ -36,7 +24,6 @@ async fn analyze(pool: &PgPool) -> Result<Value> {
         find_density_anomalies(pool, project_id),
     )?;
 
-    // Build human-readable recommendations
     let mut recommendations: Vec<String> = Vec::new();
 
     for (name, entity_type) in &isolated {
@@ -108,7 +95,6 @@ async fn analyze(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// 1. Entities with no relations at all.
 async fn find_isolated(
     pool: &PgPool,
     project_id: Option<uuid::Uuid>,
@@ -128,7 +114,6 @@ async fn find_isolated(
     Ok(rows)
 }
 
-/// 2. High-importance entities with fewer than 3 relations (knowledge islands).
 async fn find_underconnected(
     pool: &PgPool,
     project_id: Option<uuid::Uuid>,
@@ -154,12 +139,10 @@ async fn find_underconnected(
     Ok(rows)
 }
 
-/// 3. Pairs of entity types with no cross-connections (silos).
 async fn find_type_silos(
     pool: &PgPool,
     project_id: Option<uuid::Uuid>,
 ) -> Result<Vec<(String, String)>> {
-    // Get all entity types present (project-scoped)
     let types: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT entity_type FROM brain_entities
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
@@ -169,7 +152,6 @@ async fn find_type_silos(
     .fetch_all(pool)
     .await?;
 
-    // Get all connected type pairs (project-scoped on both entities)
     let connected: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT LEAST(e1.entity_type, e2.entity_type),
                          GREATEST(e1.entity_type, e2.entity_type)
@@ -184,7 +166,6 @@ async fn find_type_silos(
     .fetch_all(pool)
     .await?;
 
-    // Find missing pairs from cartesian product
     let mut silos: Vec<(String, String)> = Vec::new();
     for (i, (t1,)) in types.iter().enumerate() {
         for (t2,) in types.iter().skip(i + 1) {
@@ -195,12 +176,10 @@ async fn find_type_silos(
             }
         }
     }
-    // Limit to most informative
     silos.truncate(10);
     Ok(silos)
 }
 
-/// 4. Entities with many facts but no decisions or lessons recorded.
 async fn find_observation_gaps(
     pool: &PgPool,
     project_id: Option<uuid::Uuid>,
@@ -227,7 +206,6 @@ async fn find_observation_gaps(
     Ok(rows)
 }
 
-/// 5. Statistical outliers by observation/relation count (|z-score| > 2.0).
 async fn find_density_anomalies(
     pool: &PgPool,
     project_id: Option<uuid::Uuid>,

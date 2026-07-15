@@ -9,42 +9,19 @@ use super::metrics::{
 };
 use crate::eval::metrics::{calculate_exact_match, calculate_f1_score};
 
-/// Bootstrap resamples. 2000 is the usual floor for a stable 95% interval and costs
-/// microseconds — the expensive part of this benchmark is the retrieval, not the
-/// statistics.
 const BOOTSTRAP_ITERATIONS: usize = 2000;
 
-/// What the eval actually switches on.
-///
-/// This exists because the previous signature hard-coded `rerank: false` and
-/// never passed `abstain_ood` at all. Two features were being measured with the
-/// switch off, and then reported as scoring zero — which read as "they do not
-/// work" when it meant "they never ran".
 #[derive(Debug, Clone)]
 pub struct EvalConfig {
     pub k: usize,
-    /// Multi-hop associative expansion (v0.11).
     pub associative: bool,
-    /// Let the OOD gate fire, so abstention can actually be measured.
     pub abstain: bool,
-    /// Run the cross-encoder reranker.
     pub rerank: bool,
-    /// Response shape — and therefore what the token cost actually is.
     pub format: String,
 }
 
 impl Default for EvalConfig {
     fn default() -> Self {
-        // Everything off, and `verbose`, so the baseline stays comparable with
-        // what was already measured (nDCG@10 = 0.7389). The CLI flags turn each
-        // one on for an A/B.
-        //
-        // `verbose` specifically, even though the handler now defaults to
-        // compact: relevance is judged by looking for markers in the returned
-        // text, and compact truncates that text to 200 chars. Grading on the
-        // truncated shape would score a marker at character 300 as a miss —
-        // penalizing the *presentation* format for a retrieval that was correct.
-        // `--format compact` then measures what the saving actually costs.
         Self {
             k: 10,
             associative: false,
@@ -65,49 +42,22 @@ pub struct EvalReport {
     pub recall_at_k: f64,
     pub mean_exact_match: f32,
     pub mean_f1: f32,
-    /// Mean tokens the response actually costs the agent's context, counted with
-    /// tiktoken (cl100k_base) over the serialized payload — not the retrieved
-    /// text alone. Quality per token is the axis the field competes on now
-    /// (Mem0 advertises 93.4% on LongMemEval under 7k tokens per retrieval);
-    /// an optimization that improves nDCG while doubling cost is not a win, and
-    /// without this number you cannot tell the two apart.
     pub mean_response_tokens: f64,
-    /// Worst-case cost. The mean hides the query that blows the context.
     pub max_response_tokens: usize,
-    /// Per-ability breakdown (LongMemEval-style question types). Empty when the
-    /// dataset carries no ability labels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_ability: Vec<AbilityScore>,
-    /// Fraction of abstention samples where the system correctly retrieved
-    /// nothing relevant. None when the dataset has no abstention samples.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abstention_accuracy: Option<f64>,
-    /// False abstentions: answerable queries the system wrongly declined.
-    /// Abstention with no such counterweight is trivially maximized by refusing
-    /// to answer anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub false_abstention_rate: Option<f64>,
 
-    /// 95% bootstrap interval around `ndcg_at_k`. A mean without one is a point
-    /// estimate that invites exactly the mistake this project already made twice:
-    /// reading a 3-point difference as a regression when the interval was ±12.
     pub ndcg_ci95: (f64, f64),
-    /// The smallest true difference this sample size can detect (80% power, α=.05).
-    /// **Read this before believing any A/B on this dataset.** If a comparison shows
-    /// a gap smaller than this, the honest report is "could not measure", not "no
-    /// effect".
     pub minimum_detectable_effect: f64,
-    /// nDCG per query, in dataset order. Kept so failures can be inspected instead
-    /// of averaged away — the mean tells you the score, never which query broke.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_query_ndcg: Vec<f64>,
-    /// True when every scorable sample carried `relevant_ids`. When false, some
-    /// queries were graded by substring match — a laxer criterion whose numbers are
-    /// NOT comparable to id-scored ones.
     pub scored_by_id: bool,
 }
 
-/// Retrieval quality for one LongMemEval ability (question type).
 #[derive(Debug, Clone, Serialize)]
 pub struct AbilityScore {
     pub ability: String,
@@ -140,10 +90,6 @@ impl BenchmarkHarness {
     }
 }
 
-/// Run hybrid `cuba_faro` per sample and aggregate IR metrics.
-///
-/// `associative` toggles the v0.11 multi-hop expansion so the two configs can
-/// be compared on the same dataset.
 pub async fn run_faro_eval(
     pool: &PgPool,
     samples: &[EvaluationSample],
@@ -180,24 +126,18 @@ pub async fn run_faro_eval(
     let mut em_sum = 0.0_f32;
     let mut f1_sum = 0.0_f32;
 
-    // Every scorable sample must carry ids, or the whole run is graded on the laxer
-    // substring criterion and its numbers cannot be compared with an id-scored run.
     let all_by_id = samples
         .iter()
         .filter(|s| !s.abstain)
         .all(|s| s.scored_by_id());
 
-    // Cost, measured on the payload the agent would actually receive.
     let mut token_sum = 0usize;
     let mut token_max = 0usize;
 
-    // Per-ability accumulators: (count, ndcg_sum, recall_sum).
     use std::collections::BTreeMap;
     let mut per_ability: BTreeMap<String, (usize, f64, f64)> = BTreeMap::new();
-    // Abstention: count samples and how many correctly retrieved nothing relevant.
     let mut abstain_total = 0usize;
     let mut abstain_correct = 0usize;
-    // The counterweight: answerable queries the system wrongly declined.
     let mut answerable_total = 0usize;
     let mut false_abstentions = 0usize;
 
@@ -212,15 +152,12 @@ pub async fn run_faro_eval(
             "associative": cfg.associative,
             "abstain_ood": cfg.abstain,
             "format": cfg.format,
-            // Do not apply the Testing Effect boost — the benchmark must not
-            // mutate the corpus it is measuring.
             "track_access": false
         });
         let response = crate::handlers::faro::handle(pool, args)
             .await
             .context("faro handle failed during eval")?;
 
-        // Exactly what the response costs in the agent's context.
         let cost = crate::search::budget::count_tokens(&response.to_string());
         token_sum += cost;
         token_max = token_max.max(cost);
@@ -228,10 +165,6 @@ pub async fn run_faro_eval(
         let ranked = extract_ranked(&response);
         let rels: Vec<bool> = ranked.iter().map(|hit| hit.is_relevant(sample)).collect();
 
-        // Abstention samples are scored differently: success = the system returned
-        // NOTHING for an out-of-domain query (OOD gate / empty result), rather than
-        // fabricating a top-k of loosely-related rows. Measures whether cuba
-        // actually declines instead of always emitting k hits.
         if sample.abstain {
             abstain_total += 1;
             if ranked.is_empty() {
@@ -245,22 +178,15 @@ pub async fn run_faro_eval(
                         .unwrap_or_else(|| "abstention".into()),
                 )
                 .or_insert((0, 0.0, 0.0));
-            e.0 += 1; // count only; ndcg/recall undefined for abstention
+            e.0 += 1;
             continue;
         }
 
-        // An answerable query that came back empty is a FALSE abstention. Without
-        // tracking these, "abstention accuracy" is trivially maximized by a system
-        // that refuses to answer anything at all.
         answerable_total += 1;
         if ranked.is_empty() {
             false_abstentions += 1;
         }
 
-        // The denominator that makes both metrics mean what they say: how many
-        // documents in the CORPUS answer this query — including the ones retrieval
-        // missed. Grading against only what was found is how a system that recovered
-        // 2 of 5 relevant documents used to score a perfect nDCG.
         let total_rel = sample.relevant_count();
         let s_ndcg = ndcg_at_k(&rels, k, total_rel);
         let s_recall = recall_at_k(&rels, total_rel, k);
@@ -284,8 +210,6 @@ pub async fn run_faro_eval(
         }
     }
 
-    // Denominator for corpus-wide IR means excludes abstention samples (they have
-    // no relevant docs to rank).
     let scored = (samples.len() - abstain_total).max(1);
 
     let n = samples.len();
@@ -297,7 +221,6 @@ pub async fn run_faro_eval(
     let ability_scores: Vec<AbilityScore> = per_ability
         .into_iter()
         .map(|(ability, (count, nd, rc))| {
-            // Abstention rows contribute count only; guard the divisor.
             let denom = count.max(1) as f64;
             AbilityScore {
                 ability,
@@ -348,19 +271,12 @@ pub async fn run_faro_eval(
     })
 }
 
-/// One retrieved result: its id, and its text.
 struct Hit {
     id: Option<String>,
     content: String,
 }
 
 impl Hit {
-    /// Relevant iff the ground truth says so.
-    ///
-    /// By id when the dataset provides one — a result is the answer, or it is not.
-    /// By substring only for pre-v0.12 datasets, where "relevant" meant "mentions
-    /// the word", which counted every observation containing "postgres" as a correct
-    /// answer to a question about postgres, whether it answered anything or not.
     fn is_relevant(&self, sample: &EvaluationSample) -> bool {
         if sample.scored_by_id() {
             return self
@@ -380,8 +296,6 @@ fn extract_ranked(response: &Value) -> Vec<Hit> {
         .and_then(|v| v.as_array());
     if let Some(arr) = results {
         for item in arr {
-            // `id` is present in both shapes. It was missing from compact until
-            // v0.11.1, which is precisely why compact could not be graded by id.
             let id = item.get("id").and_then(|v| v.as_str()).map(str::to_string);
             let content = item
                 .get("content")
@@ -425,24 +339,18 @@ mod tests {
         }
     }
 
-    /// The whole point of v0.12: a document is the answer, or it is not. Mentioning
-    /// the topic is not answering the question.
     #[test]
     fn id_scoring_does_not_reward_merely_being_on_topic() {
         let sample = sample_by_id(&["the-answer"]);
 
         assert!(hit("the-answer", "cuba-memorys está escrito en Rust").is_relevant(&sample));
 
-        // Same subject, same vocabulary, says nothing about the language. Under the
-        // old substring rule with marker "cuba-memorys" this scored as a hit.
         assert!(
             !hit("some-other-row", "cuba-memorys usa PostgreSQL con pgvector").is_relevant(&sample),
             "an on-topic document that is not the answer must not count as relevant"
         );
     }
 
-    /// Legacy datasets still load, and still score the lax way — which is exactly
-    /// why the harness reports `scored_by_id: false` and warns.
     #[test]
     fn marker_scoring_survives_for_old_datasets() {
         let legacy = EvaluationSample {
@@ -458,16 +366,11 @@ mod tests {
         assert!(!hit("y", "todo ok").is_relevant(&legacy));
     }
 
-    /// Recall's denominator is the number of relevant DOCUMENTS, not of markers.
-    /// The old code used `relevant_markers.len()`, which is how R@10 = 3.125 — a
-    /// value a proportion cannot take — ended up in the README.
     #[test]
     fn relevant_count_is_the_size_of_the_ground_truth() {
         assert_eq!(sample_by_id(&["a", "b", "c"]).relevant_count(), 3);
     }
 
-    /// `id` must survive extraction from BOTH response shapes. Grading by id is
-    /// impossible otherwise — and compact carried no id at all until v0.11.1.
     #[test]
     fn ids_are_extracted_from_verbose_and_compact() {
         let verbose = serde_json::json!({

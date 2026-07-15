@@ -95,7 +95,6 @@ impl FactBuilder {
     }
 }
 
-/// Mirror a semantic observation into `brain_facts` (best-effort).
 pub async fn append_observation_fact(
     pool: &PgPool,
     entity_id: uuid::Uuid,

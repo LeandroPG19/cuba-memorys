@@ -1,5 +1,3 @@
-//! Handler: cuba_vigia — Knowledge graph analytics.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -21,10 +19,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// V0.9: Structural centrality ranking — combines harmonic (Boldi-Vigna 2014),
-/// closeness (Bavelas 1950) and k-core (Seidman 1983 / Batagelj-Zaversnik 2003).
-/// Useful for identifying the "backbone" of the project graph that
-/// `cuba_forget` should refuse to delete.
 async fn structural(pool: &PgPool) -> Result<Value> {
     let centrality = crate::graph::closeness::compute_top(pool, 20).await?;
     let kcore = crate::graph::kcore::compute_top(pool, 20).await?;
@@ -41,7 +35,6 @@ async fn structural(pool: &PgPool) -> Result<Value> {
 }
 
 async fn summary(pool: &PgPool) -> Result<Value> {
-    // V0.8: scope counts to active project (None = no filter)
     let project_id = crate::project::current_project_id(pool).await?;
 
     let entities: (i64,) = sqlx::query_as(
@@ -80,7 +73,6 @@ async fn summary(pool: &PgPool) -> Result<Value> {
     .bind(project_id)
     .fetch_one(pool)
     .await?;
-    // Episodes — non-fatal if table doesn't exist on older DBs
     let episodes: i64 = sqlx::query_as::<_, (i64,)>(
         "SELECT COUNT(*) FROM brain_episodes
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
@@ -106,7 +98,6 @@ async fn summary(pool: &PgPool) -> Result<Value> {
 }
 
 async fn health(pool: &PgPool) -> Result<Value> {
-    // V0.8: scope per-project where meaningful (DB size and resolution-rate stay global).
     let project_id = crate::project::current_project_id(pool).await?;
 
     let avg_importance: (Option<f64>,) = sqlx::query_as(
@@ -140,7 +131,6 @@ async fn health(pool: &PgPool) -> Result<Value> {
             .fetch_one(pool)
             .await?;
 
-    // Entropy diversity — Shannon entropy of entity types (project-scoped)
     let type_counts: Vec<(String, i64)> = sqlx::query_as(
         "SELECT entity_type, COUNT(*) FROM brain_entities
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
@@ -157,7 +147,6 @@ async fn health(pool: &PgPool) -> Result<Value> {
         (type_counts.len() as f64).log2().max(0.001)
     };
 
-    // Observation type entropy (project-scoped)
     let obs_counts: Vec<(String, i64)> = sqlx::query_as(
         "SELECT observation_type, COUNT(*) FROM brain_observations
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
@@ -176,7 +165,6 @@ async fn health(pool: &PgPool) -> Result<Value> {
     let diversity_score =
         ((entity_entropy / max_entity_entropy) + (obs_entropy / max_obs_entropy)) / 2.0;
 
-    // Error metrics — resolution rate and MTTR (project-scoped)
     let err_stats: (i64, i64, Option<f64>) = sqlx::query_as(
         "SELECT \
             (SELECT COUNT(*) FROM brain_errors WHERE resolved \
@@ -197,7 +185,6 @@ async fn health(pool: &PgPool) -> Result<Value> {
         0.0
     };
 
-    // V0.6: Enhanced health metrics — null embeddings, active triggers, table sizes
     let null_embeddings: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM brain_observations
          WHERE embedding IS NULL AND observation_type != 'superseded'
@@ -253,10 +240,8 @@ async fn health(pool: &PgPool) -> Result<Value> {
 }
 
 async fn drift(pool: &PgPool) -> Result<Value> {
-    // V0.8: scope drift detection per project
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Recent (7 days) vs historical (7-37 days) error distribution
     let recent: Vec<(String, i64)> = sqlx::query_as(
         "SELECT error_type, COUNT(*) FROM brain_errors \
          WHERE created_at > NOW() - INTERVAL '7 days' \
@@ -277,7 +262,6 @@ async fn drift(pool: &PgPool) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
-    // Chi-squared test
     let hist_map: std::collections::HashMap<String, f64> = historical.into_iter().collect();
     let mut chi_squared = 0.0;
     let mut categories = 0u32;
@@ -292,7 +276,6 @@ async fn drift(pool: &PgPool) -> Result<Value> {
     }
 
     let df = (categories as i32 - 1).max(1);
-    // Simplified p-value approximation (Wilson-Hilferty for chi-squared CDF)
     let p_value = chi2_survival(chi_squared, df as f64);
 
     let drift_data: Vec<Value> = recent
@@ -357,7 +340,6 @@ async fn communities(pool: &PgPool) -> Result<Value> {
     }
 }
 
-/// Betweenness centrality via Brandes algorithm (replaces SQL COUNT proxy).
 async fn bridges(pool: &PgPool) -> Result<Value> {
     match crate::graph::centrality::compute_bridges(pool, 10).await {
         Ok(ranked) => {
@@ -379,7 +361,6 @@ async fn bridges(pool: &PgPool) -> Result<Value> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Brandes centrality failed, using SQL fallback");
-            // V0.8: filter SQL fallback by current project
             let project_id = crate::project::current_project_id(pool).await?;
             let bridges: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT e.name, COUNT(r.id) as connection_count FROM brain_entities e
@@ -404,9 +385,6 @@ async fn bridges(pool: &PgPool) -> Result<Value> {
     }
 }
 
-// ── Utility Functions ───────────────────────────────────────────
-
-/// Shannon entropy H = -Σ p·log₂(p) for a distribution.
 fn compute_entropy(counts: &[(String, i64)]) -> f64 {
     let total: f64 = counts.iter().map(|(_, c)| *c as f64).sum();
     if total <= 0.0 {
@@ -422,8 +400,6 @@ fn compute_entropy(counts: &[(String, i64)]) -> f64 {
     entropy
 }
 
-/// Approximate chi-squared survival function (1 - CDF).
-/// Uses Wilson-Hilferty normal approximation.
 fn chi2_survival(x: f64, df: f64) -> f64 {
     if x <= 0.0 || df <= 0.0 {
         return 1.0;
@@ -432,7 +408,6 @@ fn chi2_survival(x: f64, df: f64) -> f64 {
     0.5 * erfc_approx(z / std::f64::consts::SQRT_2)
 }
 
-/// Approximate complementary error function (Abramowitz & Stegun 7.1.26).
 fn erfc_approx(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
     let poly = t

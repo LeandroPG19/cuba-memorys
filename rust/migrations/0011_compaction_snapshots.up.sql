@@ -1,6 +1,3 @@
--- V0.8: Compaction-survival snapshots — agents call cuba_pre_compact(snapshot)
--- before /compact and cuba_pre_compact(restore) post-compact to reinject context.
--- Depends on 0010 for brain_projects FK.
 DO $$
 BEGIN
     IF NOT EXISTS (

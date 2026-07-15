@@ -11,7 +11,7 @@
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
-Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **14 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
+Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **16 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
 
 <p align="center">
   <img src="assets/demo.gif" alt="cuba-memorys terminal demo — hybrid search, claim verification with an LLM judge, procedural memory, and the CLI" width="760" />
@@ -61,19 +61,42 @@ Needs the `vector` and `pg_trgm` extensions. `cuba-memorys doctor` will tell you
 </details>
 
 <details>
-<summary><b>Semantic embeddings (recommended)</b></summary>
+<summary><b>Semantic embeddings & models (recommended)</b></summary>
 
 Without a model, embeddings are hash-based: deterministic, and semantically meaningless. Search still works through the lexical and BM25 branches, but nothing understands *meaning*.
 
+One command installs the models and the ONNX runtime, on any OS — no shell scripts, no manual `ORT_DYLIB_PATH`:
+
 ```bash
-./rust/scripts/download_model.sh                      # ~113 MB, multilingual-e5-small (384-d)
-export ONNX_MODEL_PATH="$HOME/.cache/cuba-memorys/models"
-export ORT_DYLIB_PATH="/path/to/libonnxruntime.so"    # BOTH are required
+cuba-memorys models all          # embeddings + NLI + reranker + runtime
+cuba-memorys models embed        # just the embeddings model (~113 MB)
+cuba-memorys models all --gpu    # GPU runtime, if you have one
+cuba-memorys doctor              # confirms what loaded
 ```
 
-**bge-m3 (1024-d) is better than e5-small**, though the size of the gap is no longer claimed: the +21 nDCG figure that used to sit here came from a benchmark that scored relevance by substring match. It needs a dimension migration (`scripts/migrate-embedding-dim.sh 1024`) and `CUBA_EMBED_MODEL=bge-m3 CUBA_POOLING=cls`.
+Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models` downloads only when you run it — nothing is fetched behind your back.
 
-Set `ONNX_MODEL_PATH` without `ORT_DYLIB_PATH` and the server tells you and degrades to lexical search. (Until v0.11.2 it hung silently instead. That was the worst bug in this project's history.)
+**bge-m3 (1024-d) is better than e5-small** for Spanish, though the size of the gap is no longer claimed (the old +21 nDCG figure came from a broken benchmark). It needs a dimension migration (`scripts/migrate-embedding-dim.sh 1024`) and `CUBA_EMBED_MODEL=bge-m3 CUBA_POOLING=cls`.
+</details>
+
+<details>
+<summary><b>Modes: local · red · completo</b></summary>
+
+`CUBA_MODE` is a preset that sets the database, the models, and outbound network together, so you pick one name instead of lining up a dozen env vars:
+
+| `CUBA_MODE` | Database | Capabilities | Network out |
+|---|---|---|---|
+| `local` (default) | Docker on this machine | embeddings + NLI as installed | none |
+| `red` | shared managed Postgres (set `DATABASE_URL` with `sslmode=require`) | + provenance per node, real-time sync between machines | none |
+| `completo` | whatever `DATABASE_URL` implies | **+ reranker (GPU if present) + `cuba_docs`** | `cuba_docs` |
+
+**Two machines, one memory.** Point both at the same managed Postgres (Neon or Supabase free tier both have pgvector and fit the 36 MB corpus many times over), give each a name with `CUBA_NODE_NAME`, and `CUBA_MODE=red`. What one writes, the other reads; every memory records which machine it came from (`origin_node`). Do **not** expose your own Postgres port to the internet — use a managed provider's TLS, or a private network like [Tailscale](https://tailscale.com).
+
+**Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
+
+**Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+92% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
+
+Individual env vars (`CUBA_DOCS`, `CUBA_RERANKER_PATH`, …) always override the preset.
 </details>
 
 ---
@@ -111,7 +134,7 @@ Entailment is a different question from similarity, and it needs something that 
 
 Being on-topic is not support, and `unrelated` counts for **neither** side.
 
-The judge is **mDeBERTa-v3-base-xnli** running locally on ONNX: 100 languages, ~50 ms per verdict, no API key, no network, no cost. That matters here — about 75% of this corpus is Spanish, and the English-only NLI models everyone reaches for first would have silently failed on three memories out of four. Install it with `./rust/scripts/download_nli.sh`; `cuba-memorys doctor` will tell you whether it loaded.
+The judge is **mDeBERTa-v3-base-xnli** running locally on ONNX: 100 languages, ~50 ms per verdict, no API key, no network, no cost. That matters here — about 75% of this corpus is Spanish, and the English-only NLI models everyone reaches for first would have silently failed on three memories out of four. Install it with `cuba-memorys models nli`; `cuba-memorys doctor` will tell you whether it loaded.
 
 Without it, verification falls back to an LLM (your MCP client's own model via sampling, a local `claude` CLI, or the Anthropic API) — and with none of those, to an honest `unknown` rather than an invented verdict.
 
@@ -189,13 +212,16 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 
 | Variable | Default | What it does |
 |---|---|---|
-| `DATABASE_URL` | auto (Docker) | PostgreSQL connection |
-| `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | — | Semantic embeddings. **Both or neither.** |
-| `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the +21 nDCG model |
+| `CUBA_MODE` | `local` | `local` / `red` (shared cloud DB) / `completo` (everything + GPU). A preset for the rest. |
+| `CUBA_NODE_NAME` | hostname | Names this machine in `origin_node` — which computer wrote each memory |
+| `DATABASE_URL` | auto (Docker) | PostgreSQL connection. Set it (external + TLS) for `red` mode. |
+| `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | auto (`~/.cache`) | Semantic embeddings. `cuba-memorys models` sets these up for you. |
+| `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the stronger Spanish model |
 | `CUBA_TOOL_PROFILE` | `full` | `lean` → 2 tools, 67% smaller catalogue, nothing lost |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
-| `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`download_nli.sh`) |
+| `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
+| `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+92% nDCG); on CPU it falls back to RRF past the budget |
 | `CUBA_DOCS` | **off** | `1` enables `cuba_docs`, the only tool that leaves your machine. Unset, it is not even advertised. |
 | `CUBA_COMPACT_CHARS` | `1200` | Compact truncation (measured knee) |
 | `CUBA_OOD_THRESHOLD` | calibrated | Override the abstention threshold |

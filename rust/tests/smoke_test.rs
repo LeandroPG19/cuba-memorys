@@ -1,21 +1,5 @@
-//! MCP Protocol Smoke Tests.
-//!
-//! Validates JSON-RPC message format, tool definitions, and
-//! protocol invariants without requiring a live database.
-
 use serde_json::{Value, json};
 
-/// Every tool a client may already depend on is still defined.
-///
-/// This used to assert an exact count — `assert_eq!(tools.len(), 25)` — and that
-/// is the wrong invariant. It says nothing about which tools exist, and it breaks
-/// on the one change that is always safe: ADDING a tool. It failed the release for
-/// exactly that reason, having spent its life protecting nothing.
-///
-/// What actually matters to a client is that a tool it calls today still exists
-/// tomorrow. So: assert presence, not arity. Removing or renaming one of these
-/// breaks the MCP API and this test says so; adding a new one does not, and it
-/// stays quiet.
 #[test]
 fn test_all_tools_defined() {
     let tools = cuba_memorys::constants::tool_definitions();
@@ -25,7 +9,6 @@ fn test_all_tools_defined() {
         .filter_map(|t: &Value| t.get("name").and_then(|n: &Value| n.as_str()))
         .collect();
 
-    // The published MCP surface. Removing any of these is a breaking change.
     let expected = [
         "cuba_alma",
         "cuba_cronica",
@@ -52,7 +35,6 @@ fn test_all_tools_defined() {
         "cuba_juez",
         "cuba_pizarra",
         "cuba_archivo",
-        // v0.11: procedural memory.
         "cuba_receta",
     ];
 
@@ -60,15 +42,12 @@ fn test_all_tools_defined() {
         assert!(tool_names.contains(name), "Missing tool definition: {name}");
     }
 
-    // Two tools with the same name would make dispatch ambiguous, and the
-    // client would silently get whichever one serde happened to serialize last.
     let mut seen = std::collections::HashSet::new();
     for name in &tool_names {
         assert!(seen.insert(*name), "duplicate tool definition: {name}");
     }
 }
 
-/// Verify tool definitions have correct MCP schema structure.
 #[test]
 fn test_tool_schema_structure() {
     let tools = cuba_memorys::constants::tool_definitions();
@@ -102,7 +81,6 @@ fn test_tool_schema_structure() {
     }
 }
 
-/// Verify JSON-RPC request parsing.
 #[test]
 fn test_jsonrpc_request_format() {
     let request = json!({
@@ -124,7 +102,6 @@ fn test_jsonrpc_request_format() {
     assert!(request["params"]["arguments"].is_object());
 }
 
-/// Verify JSON-RPC response format.
 #[test]
 fn test_jsonrpc_response_format() {
     let response = json!({
@@ -145,7 +122,6 @@ fn test_jsonrpc_response_format() {
     assert_eq!(content[0]["type"], "text");
 }
 
-/// Verify error response format.
 #[test]
 fn test_jsonrpc_error_format() {
     let error = json!({
@@ -161,29 +137,15 @@ fn test_jsonrpc_error_format() {
     assert!(error["error"]["message"].is_string());
 }
 
-/// Validate constant threshold relationships.
 #[test]
 fn test_threshold_invariants() {
     use cuba_memorys::constants::*;
 
-    // Hierarchy: REINFORCE (0.92) > DEDUP (0.85) > UPDATE (0.75)
     const _: () = assert!(PRED_ERROR_REINFORCE > DEDUP_THRESHOLD);
     const _: () = assert!(DEDUP_THRESHOLD > PRED_ERROR_UPDATE);
     const _: () = assert!(HEBBIAN_ACCESS_BOOST > 0.0 && HEBBIAN_ACCESS_BOOST < 0.1);
 }
 
-/// Every advertised tool is actually dispatchable.
-///
-/// The previous version of this test was named `test_handler_dispatch_coverage`
-/// and checked that a hard-coded list of names started with `cuba_` and was
-/// lowercase. It never touched the dispatcher. A tool could be advertised in
-/// `tools/list` with no arm in `dispatch` — the client would call it, get
-/// "unknown tool" at runtime, and this test would still be green.
-///
-/// It now asserts the real invariant: whatever the server ADVERTISES, it can
-/// SERVE. That is the contract a client relies on, and the only way to break it
-/// is to add a tool definition and forget the handler — which is exactly the
-/// mistake worth catching.
 #[test]
 fn advertised_tools_are_all_dispatchable() {
     let tools = cuba_memorys::constants::tool_definitions();
@@ -200,7 +162,6 @@ fn advertised_tools_are_all_dispatchable() {
              un cliente que la llame recibiría 'unknown tool' en runtime"
         );
 
-        // MCP naming convention, kept as a cheap guard against typos.
         assert!(name.starts_with("cuba_"), "{name}: prefijo inesperado");
         assert!(
             name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
@@ -209,7 +170,6 @@ fn advertised_tools_are_all_dispatchable() {
     }
 }
 
-/// Verify SQL schema file contains required elements.
 #[test]
 fn test_schema_sql_content() {
     let schema = include_str!("../src/schema.sql");
@@ -232,7 +192,6 @@ fn test_schema_sql_content() {
     assert!(schema.contains("pg_trgm"), "Missing pg_trgm");
     assert!(schema.contains("embedding"), "Missing embedding column");
     assert!(schema.contains("importance"), "Missing importance column");
-    // V0.6 schema additions
     assert!(
         schema.contains("embedding_model"),
         "Missing embedding_model column"
@@ -243,15 +202,12 @@ fn test_schema_sql_content() {
         schema.contains("idx_obs_high_importance"),
         "Missing partial importance index"
     );
-    // idx_obs_tags is created in db.rs migration (not base schema) to avoid
-    // forward-reference on existing DBs where tags column doesn't exist yet
     assert!(
         schema.contains("tags TEXT[]"),
         "Missing tags column definition"
     );
 }
 
-/// Verify cognitive module constants are valid.
 #[test]
 fn test_cognitive_constants_valid() {
     use cuba_memorys::constants::*;
@@ -260,7 +216,6 @@ fn test_cognitive_constants_valid() {
     const _: () = assert!(BCM_THROTTLE_SCALE > 0.0 && BCM_THROTTLE_SCALE <= 1.0);
 }
 
-/// Verify cache constants.
 #[test]
 fn test_cache_constants_valid() {
     use cuba_memorys::constants::*;
@@ -268,7 +223,6 @@ fn test_cache_constants_valid() {
     const _: () = assert!(CACHE_TTL_SECS > 0);
 }
 
-/// Verify all valid types lists are populated.
 #[test]
 fn test_valid_types_lists() {
     use cuba_memorys::constants::*;
@@ -284,18 +238,15 @@ fn test_valid_types_lists() {
     assert!(VALID_RELATION_TYPES.contains(&"uses"));
 }
 
-/// V0.6: Verify importance priors produce expected values.
 #[test]
 fn test_importance_priors() {
     use cuba_memorys::constants::importance_prior;
 
-    // Fixed priors for high-value types
     assert!((importance_prior("decision", 0.5) - 0.8).abs() < f64::EPSILON);
     assert!((importance_prior("lesson", 0.5) - 0.75).abs() < f64::EPSILON);
     assert!((importance_prior("error", 0.5) - 0.7).abs() < f64::EPSILON);
     assert!((importance_prior("solution", 0.5) - 0.7).abs() < f64::EPSILON);
 
-    // Density-scaled priors
     let fact_high = importance_prior("fact", 1.0);
     let fact_low = importance_prior("fact", 0.2);
     assert!(
@@ -307,23 +258,12 @@ fn test_importance_priors() {
     let ctx = importance_prior("context", 1.0);
     assert!(ctx <= 0.7, "context importance capped at 0.7");
 
-    // Clamp lower bound
     assert!(importance_prior("fact", 0.0) >= 0.1);
     assert!(importance_prior("context", 0.0) >= 0.1);
 }
 
-/// The model tag follows the environment, because the environment is what decides
-/// which model actually runs.
-///
-/// This test used to assert `CURRENT_MODEL == "multilingual-e5-small"` — it pinned
-/// the constant, and in doing so pinned the bug: four write sites reached for that
-/// constant while every read site called `current_model()`, so a bge-m3 corpus
-/// stamped every new row "multilingual-e5-small" and made it permanently, silently
-/// stale. A test that asserts a constant exists proves nothing about the value that
-/// reaches the database.
 #[test]
 fn model_tag_follows_the_environment() {
-    // SAFETY: the only test in this binary that touches CUBA_EMBED_MODEL.
     unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
     assert_eq!(
         cuba_memorys::embeddings::onnx::current_model(),

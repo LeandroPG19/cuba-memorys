@@ -1,9 +1,7 @@
-//! Thin zstd wrapper for the optional embeddings.bin.zst blob.
-
 use anyhow::{Context, Result};
 use std::io::Write;
 
-const COMPRESSION_LEVEL: i32 = 11; // 0..22; 11 is a good size/speed balance for floats.
+const COMPRESSION_LEVEL: i32 = 11;
 
 pub fn compress(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut encoder =

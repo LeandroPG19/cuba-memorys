@@ -1,9 +1,3 @@
-//! Handler: cuba_calibrar — Bayesian confidence calibration.
-//!
-//! Tracks verify predictions from faro, marks outcomes, and computes
-//! P(correct | grounding_level) via Beta distribution (Bayesian update).
-//! Closes the feedback loop between `faro verify` and `eco correct`.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -21,14 +15,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// V0.9: Formal calibration metrics — Brier score + Expected Calibration Error.
-///
-/// Brier (1950) score = (1/N) · Σ (p_i − o_i)²
-///   Lower is better. 0 = perfect, 0.25 = always-50% baseline.
-///
-/// Expected Calibration Error (ECE, Naeini-Cooper-Hauskrecht AAAI 2015):
-///   ECE = Σ (|B_k|/N) · |acc(B_k) − conf(B_k)|
-///   over equal-width bins of confidence. Lower is better.
 async fn metrics(pool: &PgPool) -> Result<Value> {
     type Row = (f64, String);
     let rows: Vec<Row> = sqlx::query_as(
@@ -50,7 +36,6 @@ async fn metrics(pool: &PgPool) -> Result<Value> {
     }
 
     let n = rows.len() as f64;
-    // Brier score
     let brier: f64 = rows
         .iter()
         .map(|(p, outcome)| {
@@ -60,7 +45,6 @@ async fn metrics(pool: &PgPool) -> Result<Value> {
         .sum::<f64>()
         / n;
 
-    // ECE with 10 equal-width bins on [0, 1]
     const N_BINS: usize = 10;
     let mut bin_n = [0u32; N_BINS];
     let mut bin_acc_sum = [0.0_f64; N_BINS];
@@ -102,9 +86,6 @@ async fn metrics(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// V0.9: Per-source credibility statistics (Yin-Han-Yu IEEE TKDE 2008).
-/// Returns Beta(α, β) parameters and posterior P(correct) per observation
-/// source. Sources with low p_correct are down-weighted in `cuba_faro`.
 async fn trust_stats(pool: &PgPool) -> Result<Value> {
     type Row = (String, f64, f64, chrono::DateTime<chrono::Utc>);
     let rows: Vec<Row> = sqlx::query_as(
@@ -120,8 +101,7 @@ async fn trust_stats(pool: &PgPool) -> Result<Value> {
         .iter()
         .map(|(source, alpha, beta, updated_at)| {
             let p_correct = alpha / (alpha + beta);
-            let total = alpha + beta - 2.0; // resolved outcomes (subtract Beta(1,1) prior)
-            // Beta variance = αβ / ((α+β)² · (α+β+1)) — narrows as data grows
+            let total = alpha + beta - 2.0;
             let variance = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
             serde_json::json!({
                 "source": source,
@@ -142,10 +122,6 @@ async fn trust_stats(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// Calibration statistics — P(correct) per grounding_level via Beta distribution.
-///
-/// Beta(alpha, beta): alpha = correct+1 (prior), beta = incorrect+1 (prior).
-/// P(correct) = alpha / (alpha + beta).
 async fn stats(pool: &PgPool) -> Result<Value> {
     type StatRow = (String, i64, i64, f64);
     let rows: Vec<StatRow> = sqlx::query_as(
@@ -176,7 +152,6 @@ async fn stats(pool: &PgPool) -> Result<Value> {
         })
         .collect();
 
-    // Overall stats
     let total: Option<(i64, i64, i64)> = sqlx::query_as(
         "SELECT COUNT(*),
                 COUNT(*) FILTER (WHERE outcome = 'correct'),
@@ -202,7 +177,6 @@ async fn stats(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// Show recent verify log entries with outcomes.
 async fn history(pool: &PgPool, args: &Value) -> Result<Value> {
     let limit = args
         .get("limit")
@@ -252,13 +226,6 @@ async fn history(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Resolve a verify log entry as correct or incorrect.
-///
-/// V0.9: also updates Beta(α, β) per source on `brain_source_trust`. Sources
-/// of the top observation supporting the verified claim get their posterior
-/// updated:
-///   correct   → α += 1
-///   incorrect → β += 1
 async fn resolve(pool: &PgPool, args: &Value) -> Result<Value> {
     let verify_id = args.get("verify_id").and_then(|v| v.as_str()).unwrap_or("");
     let outcome = args.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
@@ -269,7 +236,6 @@ async fn resolve(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("outcome must be 'correct' or 'incorrect'");
     }
 
-    // First fetch the entity to identify which source supported the claim.
     let entity_row: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT entity_name FROM brain_verify_log WHERE id = $1 AND outcome = 'pending'",
     )
@@ -290,10 +256,6 @@ async fn resolve(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("Verify log entry not found or already resolved");
     }
 
-    // V0.9: update Beta posteriors of sources that supported this claim.
-    // We update *all distinct sources* of active observations on the linked
-    // entity — proxy for "which sources informed this claim". Coarse but
-    // correctly-shaped: a wrong source eventually accumulates β.
     let mut sources_updated = 0u32;
     if let Some(ref ename) = entity_name {
         let sources: Vec<(String,)> = sqlx::query_as(

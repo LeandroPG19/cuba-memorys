@@ -1,5 +1,3 @@
-//! Global OOD statistics cache — refreshed by `cuba_zafra`, read by `cuba_faro`.
-
 use std::sync::RwLock;
 
 use uuid::Uuid;

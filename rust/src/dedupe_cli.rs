@@ -1,55 +1,8 @@
-//! `cuba-memorys dedupe` — find and merge entities that are the same thing.
-//!
-//! ## The problem, measured
-//!
-//! `cuba_alma create` inserts with `ON CONFLICT (name)`. A different string is a
-//! different entity, full stop. So one project accumulates:
-//!
-//! ```text
-//! Mapupita-Web (92 obs)   Mapupitta-Web (60)   Mapupita Web (3)   mapupita (34)
-//! Mapupita Web - Sistema de Inventario (39)    … 32 more
-//! ```
-//!
-//! Searching one finds none of the others. On the live brain: **266 entities, 158 of
-//! them (59%) with not a single relation** — for the graph, for PageRank, for
-//! multi-hop retrieval, they do not exist.
-//!
-//! The infrastructure to fix this was already here and never wired up:
-//! `brain_entity_aliases` has a schema, indexes, and a `resolve_entity()` that
-//! matches exactly and fuzzily. It has zero rows, and nothing calls the function.
-//!
-//! ## What decides a merge
-//!
-//! **Not the embedding centroid.** That was the obvious idea and it is wrong, which
-//! this only knows because it was measured before being trusted:
-//!
-//! ```text
-//! M-Codes Reference Guide  vs  G-Codes Reference Guide   →  cosine 0.811
-//! ```
-//!
-//! Two different CNC reference guides, and the centroids say "same thing". In a
-//! corpus concentrated on one domain, everything sounds alike; centroid similarity
-//! measures the domain, not the entity. Trusting a 0.80 threshold would have merged
-//! them irreversibly.
-//!
-//! So merging is split by what can actually be proven:
-//!
-//! * **EXACT** — identical after normalizing case and separators
-//!   (`Mapupita-Web` ≡ `Mapupita Web` ≡ `mapupita_web`). Provable. Merged with
-//!   `--apply`, no questions.
-//! * **LIKELY** — near-identical names (typos: `Mapupitta-Web`). NOT merged
-//!   automatically. Shown, and judged by an LLM with `--judge`, or by you.
-//!
-//! Merging entities is destructive and irreversible. Anything that cannot be proven
-//! gets asked, not guessed.
-
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Trigram similarity above which two names are worth *looking at*. Not merging —
-/// looking at. `M-Codes` and `G-Codes` sit at 0.88.
 const NAME_CANDIDATE_THRESHOLD: f64 = 0.70;
 
 #[derive(Debug, Clone)]
@@ -61,7 +14,6 @@ struct Entity {
 
 #[derive(Debug)]
 struct Group {
-    /// The one that survives: most observations wins (ties break by older id).
     winner: Entity,
     losers: Vec<Entity>,
 }
@@ -72,7 +24,6 @@ impl Group {
     }
 }
 
-/// Case and separators removed. `Mapupita-Web` → `mapupitaweb`.
 fn normalize(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric())
@@ -128,7 +79,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 
     println!("{} entidades en el grafo\n", entities.len());
 
-    // ── EXACT: same after normalization. Provable. ───────────────────────────
     let mut by_key: HashMap<String, Vec<Entity>> = HashMap::new();
     for e in &entities {
         by_key
@@ -141,7 +91,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .into_values()
         .filter(|v| v.len() > 1)
         .map(|mut v| {
-            // Most observations wins. It is the one already carrying the history.
             v.sort_by(|a, b| b.obs.cmp(&a.obs).then(a.id.cmp(&b.id)));
             let winner = v.remove(0);
             Group { winner, losers: v }
@@ -168,12 +117,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
     println!();
 
-    // ── LIKELY: near-identical names. NOT provable. ──────────────────────────
-    //
-    // Trigram similarity on the name, and nothing else. The centroid of an entity's
-    // embeddings was the natural second signal and it does not work: on a corpus
-    // about one domain, "M-Codes Reference Guide" and "G-Codes Reference Guide" have
-    // 0.811 cosine between their centroids. It measures the topic, not the entity.
     let merged_ids: std::collections::HashSet<Uuid> = exact
         .iter()
         .flat_map(|g| g.losers.iter().map(|l| l.id))
@@ -191,14 +134,13 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     .context("buscando nombres parecidos")?
     .into_iter()
     .filter_map(|(a_id, b_id, sim)| {
-        // Skip pairs already covered by an exact merge.
         if merged_ids.contains(&a_id) || merged_ids.contains(&b_id) {
             return None;
         }
         let a = entities.iter().find(|e| e.id == a_id)?.clone();
         let b = entities.iter().find(|e| e.id == b_id)?.clone();
         if normalize(&a.name) == normalize(&b.name) {
-            return None; // already exact
+            return None;
         }
         Some((a, b, sim))
     })
@@ -224,11 +166,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
     println!();
 
-    // ── Apply ───────────────────────────────────────────────────────────────
-    //
-    // The judge runs in dry-run too. Seeing what it would decide, BEFORE anything is
-    // destroyed, is the entire point of having a dry-run: a verdict you cannot
-    // inspect until after the merge is a verdict you cannot refuse.
     let mut to_merge: Vec<Group> = exact;
 
     if judge && !likely.is_empty() {
@@ -278,12 +215,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Move everything that points at `loser` to `winner`, in one transaction, then
-/// record the old name as an alias and delete the entity.
-///
-/// Seven tables reference an entity. Missing one leaves a dangling row or a silent
-/// data loss, so they are all here, and they are all inside the same transaction:
-/// a half-merged entity is worse than an un-merged one.
 async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<()> {
     let mut tx = pool.begin().await.context("abriendo transacción")?;
 
@@ -308,10 +239,6 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
         .await
         .context("moviendo hechos")?;
 
-    // Relations need care: redirecting an edge can create a self-loop (A→A) or a
-    // duplicate of an edge the winner already has. Both are dropped rather than
-    // written, because a graph with a node pointing at itself scores strangely in
-    // PageRank and tells the reader nothing.
     for col in ["from_entity", "to_entity"] {
         sqlx::query(&format!(
             "UPDATE brain_relations SET {col} = $1
@@ -331,7 +258,6 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
         .with_context(|| format!("redirigiendo relaciones ({col})"))?;
     }
 
-    // Whatever could not be redirected (would have duplicated), and any self-loop.
     sqlx::query("DELETE FROM brain_relations WHERE from_entity = $1 OR to_entity = $1")
         .bind(loser.id)
         .execute(&mut *tx)
@@ -342,15 +268,12 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
         .await
         .context("limpiando auto-relaciones")?;
 
-    // Graph metrics are derived; they get recomputed. Deleting is correct.
     sqlx::query("DELETE FROM brain_node_metrics WHERE node_id = $1")
         .bind(loser.id)
         .execute(&mut *tx)
         .await
         .ok();
 
-    // The alias is the whole reason this is not lossy. `resolve_entity()` already
-    // reads this table (exact, then fuzzy) — it has simply never had a row to read.
     sqlx::query(
         "INSERT INTO brain_entity_aliases (entity_id, alias_text, language_code)
          VALUES ($1, $2, 'es')
@@ -362,7 +285,6 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
     .await
     .context("registrando el alias")?;
 
-    // Any alias the loser had is inherited, not dropped.
     sqlx::query("UPDATE brain_entity_aliases SET entity_id = $1 WHERE entity_id = $2")
         .bind(winner.id)
         .bind(loser.id)
@@ -380,23 +302,6 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
     Ok(())
 }
 
-/// The prompt matters more than the model here.
-///
-/// The first version reused `judge_claim` — "«Mapupitta-Web» and «Mapupita-Web» are
-/// the same entity; here is evidence" — and the judge replied:
-///
-/// > *distintas — hay registros de memoria SEPARADOS para cada una, lo que sugiere
-/// > que se rastrean como entidades diferentes*
-///
-/// Which is circular. They are stored separately **because the bug stored them
-/// separately**; treating that separation as proof of distinctness assumes the
-/// conclusion. The model was shown the symptom and asked to diagnose the disease,
-/// and it named the symptom.
-///
-/// So the prompt says the quiet part out loud: being stored apart proves nothing,
-/// that is the very thing under investigation. And it points at where the evidence
-/// actually lives — one of these names may simply be misspelled, which you can see
-/// without reading a single memory.
 fn build_same_entity_prompt(a: &Entity, b: &Entity, sa: &str, sb: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nonce: u32 = SystemTime::now()
@@ -434,9 +339,6 @@ Respondé SOLO con una línea JSON:\n\
     )
 }
 
-/// Ask a judge whether two near-identical names are the same thing. The names alone
-/// cannot decide it — one letter separates a typo from a different entity — but the
-/// name is where most of the evidence is.
 async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Result<Vec<Group>> {
     let judge = crate::cognitive::judge::resolve_judge();
     let mut out = Vec::new();
@@ -462,7 +364,6 @@ async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Resul
         let raw = match judge.run_prompt(&prompt).await {
             Ok(r) => r,
             Err(e) => {
-                // A judge that cannot be reached must not become a judge that agrees.
                 tracing::warn!(error = %format!("{e:#}"), "juez no disponible");
                 println!(
                     "  ? sin veredicto: «{}» / «{}» — NO se fusiona",
@@ -501,11 +402,7 @@ async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Resul
     Ok(out)
 }
 
-/// `Some(true)` = same entity. `Some(false)` = different. `None` = unreadable, which
-/// is treated as "different" by the caller: an unparseable answer must never merge.
 fn parse_same_entity(raw: &str) -> (Option<bool>, Option<String>) {
-    // Same envelope problem as the judge: `claude --output-format json` returns a
-    // report ABOUT the call, with the answer as a string inside it.
     let inner = serde_json::from_str::<serde_json::Value>(raw.trim())
         .ok()
         .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
@@ -544,14 +441,11 @@ mod tests {
         assert_eq!(normalize("MAPUPITA.WEB"), "mapupitaweb");
     }
 
-    /// The typo does NOT normalize to the same key — and that is correct. A typo is
-    /// not provably the same entity; it goes to the judge, not to `--apply`.
     #[test]
     fn a_typo_is_not_an_exact_match() {
         assert_ne!(normalize("Mapupitta-Web"), normalize("Mapupita-Web"));
     }
 
-    /// The pair that keeps this honest. One character apart, and opposites.
     #[test]
     fn near_identical_names_can_be_different_things() {
         assert_ne!(
@@ -569,10 +463,6 @@ mod tests {
         }
     }
 
-    /// The prompt must explicitly disarm the circular argument, because the model
-    /// reached for it unprompted: it called `Mapupitta-Web` and `Mapupita-Web`
-    /// different entities on the grounds that they had *separate memory records* —
-    /// which is the bug, offered as proof that there is no bug.
     #[test]
     fn the_prompt_forbids_the_circular_argument() {
         let p = build_same_entity_prompt(
@@ -589,7 +479,6 @@ mod tests {
             p.contains("ERROR TIPOGRÁFICO"),
             "and must point at the name, where the evidence for a typo actually lives"
         );
-        // The traps it must be warned about, by name.
         assert!(p.contains("M-Codes") && p.contains("issue-134"));
     }
 
@@ -601,8 +490,6 @@ mod tests {
         assert!(r.unwrap().contains("typo"));
     }
 
-    /// An answer that cannot be read must never merge. Silence is not consent, and a
-    /// merge cannot be undone.
     #[test]
     fn an_unreadable_answer_never_merges() {
         assert_eq!(parse_same_entity("el modelo divagó").0, None);

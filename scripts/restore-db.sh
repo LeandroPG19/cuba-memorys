@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
-# Restore a pg_dump custom-format backup produced by backup-db.sh.
-#
-# Usage:
-#   ./scripts/restore-db.sh backups/brain_20260603T120000Z.dump
-#   DATABASE_URL=postgresql://cuba:pass@host:5488/brain ./scripts/restore-db.sh path/to.dump
-#
-# WARNING: --clean drops existing objects before restore. Stop cuba-memorys MCP
-# while restoring to avoid concurrent writes.
 
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
+if [[ $
   echo "usage: $0 <brain_*.dump>" >&2
   exit 1
 fi

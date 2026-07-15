@@ -1,63 +1,25 @@
-//! `cuba-memorys setup` — declarative MCP client registration.
-//!
-//! This exists because of a bug that cost real recall. `~/.mcp.json` had
-//! `ONNX_MODEL_PATH` set; `~/.claude.json` did not. Every MCP process spawned
-//! from the second config ran with no embedding model, so the vector branch of
-//! the hybrid search returned an empty vec — silently. Retrieval degraded to
-//! lexical-only and nothing in any response said so.
-//!
-//! Hand-maintaining N copies of the same env block across N clients is how that
-//! happens. So this module does two things:
-//!
-//!   `setup check`  — audits every client config it can find and reports the
-//!                    ones that are missing vars, or that disagree with each other.
-//!   `setup <target>` — writes the correct block, with the binary's own absolute
-//!                    path, plan-first, backing the file up before touching it.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-/// Env vars an MCP process needs to run cuba-memorys at full strength.
-/// Missing `ONNX_MODEL_PATH` or `ORT_DYLIB_PATH` does not fail — it degrades.
 const REQUIRED_ENV: [&str; 3] = ["DATABASE_URL", "ONNX_MODEL_PATH", "ORT_DYLIB_PATH"];
 
-/// Vars that must AGREE across every config, even when absent from some.
-///
-/// The embedding dimension is the one that matters most and the one this audit
-/// originally missed. Two clients pointing at the same database with different
-/// `CUBA_EMBEDDING_DIM` is not a cosmetic inconsistency: the one whose dimension
-/// disagrees with the column cannot run a vector comparison at all, so its hybrid
-/// search silently becomes lexical. It happened — a stale project-level
-/// `.mcp.json` kept spawning 384-d servers against a 1024-d column while the
-/// audit reported "all consistent", because it was not looking at this var, and
-/// not looking in that file.
 const MUST_AGREE: [&str; 2] = ["CUBA_EMBEDDING_DIM", "CUBA_EMBED_MODEL"];
 
 fn home() -> PathBuf {
     std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from)
 }
 
-/// Client configs we know how to read and write.
 fn known_targets() -> Vec<(&'static str, PathBuf)> {
     vec![
         ("claude", home().join(".claude.json")),
         ("mcp", home().join(".mcp.json")),
         ("cursor", home().join(".cursor").join("mcp.json")),
-        // Warp keeps its own MCP config, and it was quietly launching a 384-d
-        // server against a 1024-d column while this audit reported all clear —
-        // because it was not on the list.
         ("warp", home().join(".warp").join(".mcp.json")),
     ]
 }
 
-/// Project-level `.mcp.json` files, which spawn servers just like the global
-/// ones and were invisible to this audit.
-///
-/// Bounded on purpose: a shallow walk of the usual project roots rather than a
-/// scan of the whole home directory. Missing a config in an unusual place is a
-/// gap; hanging for a minute on every `setup check` is a bug.
 fn project_configs() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let roots = [home().join("proyectos"), home().join("projects")];
@@ -71,7 +33,6 @@ fn project_configs() -> Vec<(String, PathBuf)> {
             if !dir.is_dir() {
                 continue;
             }
-            // The project itself, and one level of nesting (monorepos, MCP/ dirs).
             let mut candidates = vec![dir.join(".mcp.json")];
             if let Ok(subs) = std::fs::read_dir(&dir) {
                 for sub in subs.flatten().take(100) {
@@ -94,10 +55,7 @@ fn project_configs() -> Vec<(String, PathBuf)> {
     out
 }
 
-/// The block a client needs to spawn this exact binary, correctly.
 fn desired_config() -> Result<Value> {
-    // The binary's own path — not `which`, not a relative path. A client that
-    // resolves the command differently is how you end up running a stale binary.
     let exe = std::env::current_exe().context("no se pudo resolver la ruta del binario")?;
 
     let db = std::env::var("DATABASE_URL").unwrap_or_default();
@@ -134,22 +92,14 @@ fn cuba_block(cfg: &Value) -> Option<&Value> {
     cfg.get("mcpServers")?.get("cuba-memorys")
 }
 
-// ---------------------------------------------------------------------------
-// check — the audit that would have caught the dead vector branch
-// ---------------------------------------------------------------------------
-
 fn run_check() -> Result<()> {
     println!("Auditoría de configuraciones de cliente MCP\n");
 
     let mut found = 0;
     let mut problems = 0;
-    // env var → set of distinct values seen across configs (divergence detector)
     let mut seen: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
 
-    // Global configs AND project-level ones. A project `.mcp.json` spawns a server
-    // exactly like a global config does, and leaving them out of the audit is how
-    // a stale one kept serving degraded results while this command said "all fine".
     let targets: Vec<(String, PathBuf)> = known_targets()
         .into_iter()
         .map(|(n, p)| (n.to_string(), p))
@@ -180,7 +130,6 @@ fn run_check() -> Result<()> {
                     seen.entry(key.to_string())
                         .or_default()
                         .insert(v.to_string());
-                    // A path that points nowhere is as bad as an absent one.
                     if key != "DATABASE_URL" && !Path::new(v).exists() {
                         println!("   PROBLEMA: {key} apunta a una ruta inexistente ({v})");
                         problems += 1;
@@ -201,10 +150,6 @@ fn run_check() -> Result<()> {
             }
         }
 
-        // Absence is a value here, not a gap to skip: a config with no
-        // CUBA_EMBEDDING_DIM runs at the 384-d default, and that DISAGREES with a
-        // config that sets 1024. Recording it as "(default)" is what makes the
-        // divergence check below able to see it at all.
         for key in MUST_AGREE {
             let value = env
                 .and_then(|e| e.get(key))
@@ -229,7 +174,6 @@ fn run_check() -> Result<()> {
         return Ok(());
     }
 
-    // The actual bug: two configs, same server, different env.
     for (key, values) in &seen {
         if values.len() > 1 {
             println!("DIVERGENCIA en {key}: los clientes no coinciden");
@@ -237,7 +181,6 @@ fn run_check() -> Result<()> {
                 println!("   - {v}");
             }
             if key == "CUBA_EMBEDDING_DIM" || key == "CUBA_EMBED_MODEL" {
-                // This one is not a wobble, it is a hard break.
                 println!(
                     "   → GRAVE. Los clientes hablan con la MISMA base con modelos de dimensiones\n\
                      \x20    distintas. El que no coincida con la columna no puede comparar vectores:\n\
@@ -263,10 +206,6 @@ fn run_check() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// write — plan first, backup, then merge
-// ---------------------------------------------------------------------------
-
 fn run_write(target: &str, apply: bool) -> Result<()> {
     let path = known_targets()
         .into_iter()
@@ -276,7 +215,6 @@ fn run_write(target: &str, apply: bool) -> Result<()> {
 
     let desired = desired_config()?;
 
-    // Warn about what `check` would flag, before writing it in.
     if let Some(env) = desired.get("env").and_then(Value::as_object) {
         for key in ["ONNX_MODEL_PATH", "ORT_DYLIB_PATH"] {
             if let Some(v) = env.get(key).and_then(Value::as_str)
@@ -301,9 +239,6 @@ fn run_write(target: &str, apply: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Merge into whatever is already there: these files hold the user's other
-    // MCP servers and unrelated settings. Overwriting them wholesale would be
-    // destroying config to install config.
     let mut cfg = read_json(&path).unwrap_or_else(|| json!({}));
     if !cfg.is_object() {
         bail!("{} no contiene un objeto JSON en la raíz", path.display());
@@ -376,22 +311,10 @@ pub fn run_cli(args: &[String]) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// hook — make the memory load itself
-// ---------------------------------------------------------------------------
-
-/// Install a `SessionStart` hook that injects the brain's context.
-///
-/// The CLAUDE.md in this setup already *asks* the agent to start every session
-/// with `cuba_faro`, and the same file lists forgetting to do it as anti-pattern
-/// AP2. Asking is the problem. A hook cannot forget.
 fn run_hook(apply: bool) -> Result<()> {
     let exe = std::env::current_exe().context("no se pudo resolver la ruta del binario")?;
     let path = home().join(".claude").join("settings.json");
 
-    // `--quiet` so a project with no memory prints nothing at all rather than a
-    // header over an empty result: an empty section injected into every session
-    // is pure cost.
     let command = format!("{} recall --quiet", exe.display());
     let hook = json!({
         "matcher": "*",
@@ -434,7 +357,6 @@ fn run_hook(apply: bool) -> Result<()> {
         .as_array_mut()
         .context("SessionStart no es una lista")?;
 
-    // Idempotent: re-running must not stack a second copy of the same hook.
     let already = list.iter().any(|h| {
         h.get("hooks")
             .and_then(Value::as_array)
@@ -477,8 +399,6 @@ mod tests {
         for key in REQUIRED_ENV {
             assert!(env.contains_key(key), "falta {key} en el bloque generado");
         }
-        // An absolute path: a client resolving `cuba-memorys` off $PATH is how
-        // you silently run yesterday's binary.
         let command = cfg.get("command").and_then(Value::as_str).unwrap_or("");
         assert!(
             Path::new(command).is_absolute(),
@@ -486,20 +406,12 @@ mod tests {
         );
     }
 
-    /// The divergence that actually broke production, in test form.
-    ///
-    /// A config with no CUBA_EMBEDDING_DIM runs at the 384-d default. Treating
-    /// "absent" as "nothing to compare" is what made the audit report
-    /// "all consistent" while a stale project config kept spawning 384-d servers
-    /// against a 1024-d column.
     #[test]
     fn an_absent_dimension_is_a_value_that_can_disagree() {
         use std::collections::HashSet;
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Config A sets it explicitly.
         seen.insert("1024".to_string());
-        // Config B omits it — which is NOT the same as agreeing.
         seen.insert("384 (default)".to_string());
 
         assert_eq!(
@@ -511,8 +423,6 @@ mod tests {
 
     #[test]
     fn the_vars_that_must_agree_include_the_dimension() {
-        // The audit originally checked ONNX paths but not the dimension — and the
-        // dimension is the one whose mismatch silently kills the vector branch.
         assert!(MUST_AGREE.contains(&"CUBA_EMBEDDING_DIM"));
         assert!(MUST_AGREE.contains(&"CUBA_EMBED_MODEL"));
     }

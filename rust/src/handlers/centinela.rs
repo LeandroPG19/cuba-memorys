@@ -1,8 +1,3 @@
-//! Handler: cuba_centinela — Prospective memory triggers.
-//!
-//! Set triggers that fire when entities are accessed, sessions start,
-//! or errors match a pattern. "Remember to remind me about X when Y happens."
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -34,7 +29,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Create a new prospective memory trigger.
 async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let entity_pattern = args
         .get("entity_pattern")
@@ -101,7 +95,6 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// List all active triggers.
 async fn list(pool: &PgPool) -> Result<Value> {
     type TriggerRow = (
         uuid::Uuid,
@@ -152,7 +145,6 @@ async fn list(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// Delete a trigger by ID.
 async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
     let trigger_id = args
         .get("trigger_id")
@@ -175,10 +167,6 @@ async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Check and fire matching triggers for a given entity + condition.
-///
-/// Public so other handlers (alma, jornada, alarma) can call it.
-/// Returns the list of fired trigger messages.
 pub async fn check_triggers(
     pool: &PgPool,
     entity_name: &str,
@@ -207,7 +195,6 @@ pub async fn check_triggers(
     let mut fired: Vec<Value> = Vec::new();
 
     for (id, pattern, message, fire_count, max_fires) in &triggers {
-        // Increment fire_count; deactivate if at max
         let new_count = fire_count + 1;
         let deactivate = *max_fires > 0 && new_count >= *max_fires;
 
