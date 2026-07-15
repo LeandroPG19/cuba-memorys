@@ -293,7 +293,11 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
-    checks.push(Check::ok("gpu", crate::gpu::active_provider()));
+    let gpu = crate::gpu::status();
+    checks.push(match gpu.hint {
+        Some(hint) if gpu.degraded => Check::warn("gpu", gpu.detail, hint),
+        _ => Check::ok("gpu", gpu.detail),
+    });
 
     if crate::search::rerank::enabled() {
         checks.push(Check::ok(

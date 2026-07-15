@@ -185,7 +185,7 @@ async fn download_runtime(gpu: bool) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let lib_dest = dir.join(lib_name);
 
-    if lib_dest.exists() && std::fs::metadata(&lib_dest)?.len() > 0 {
+    if !gpu && lib_dest.exists() && std::fs::metadata(&lib_dest)?.len() > 0 {
         println!("→ runtime: {lib_name} ya está en {}", dir.display());
         return Ok(());
     }
@@ -194,7 +194,8 @@ async fn download_runtime(gpu: bool) -> Result<()> {
         "https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/{archive_stem}.{ext}"
     );
     println!(
-        "→ runtime ({}/{}) desde {url}",
+        "→ runtime {}({}/{}) desde {url}",
+        if gpu { "GPU " } else { "" },
         std::env::consts::OS,
         std::env::consts::ARCH
     );
@@ -207,61 +208,91 @@ async fn download_runtime(gpu: bool) -> Result<()> {
         .context("descargando el runtime")?;
     println!("{} MB", std::fs::metadata(&archive_path)?.len() / 1_048_576);
 
-    print!("  ⇢ extrayendo {lib_name} ... ");
+    print!("  ⇢ extrayendo ... ");
     std::io::stdout().flush().ok();
-    extract_library(&archive_path, ext, lib_name, &lib_dest)
-        .with_context(|| format!("extrayendo {lib_name} de {}", archive_path.display()))?;
+    let extracted = extract_runtime(&archive_path, ext, lib_name, &dir, gpu)
+        .with_context(|| format!("extrayendo el runtime de {}", archive_path.display()))?;
     std::fs::remove_file(&archive_path).ok();
-    println!("ok");
+    println!("ok ({} librerías)", extracted.len());
+    for name in &extracted {
+        println!("     {name}");
+    }
     println!(
         "  listo. cuba-memorys lo encuentra en {} (o ORT_DYLIB_PATH=<ruta>)",
         lib_dest.display()
     );
+    if gpu {
+        println!(
+            "  nota GPU: el provider CUDA necesita las libs de CUDA 12 + cuDNN 9 accesibles.\n\
+             \x20      si el doctor cae a CPU, agregá sus rutas a LD_LIBRARY_PATH (Linux) o PATH (Windows)."
+        );
+    }
     Ok(())
 }
 
-fn extract_library(archive: &Path, ext: &str, lib_name: &str, dest: &Path) -> Result<()> {
-    let tmp = dest.with_extension("part");
+fn wanted_runtime_lib(base: &str, lib_name: &str, stem: &str, gpu: bool) -> bool {
+    if base.starts_with(lib_name) {
+        return true;
+    }
+    if gpu
+        && base.starts_with(stem)
+        && base.contains("_providers_")
+        && !base.contains("tensorrt")
+        && (base.contains(".so") || base.ends_with(".dll") || base.contains(".dylib"))
+    {
+        return true;
+    }
+    false
+}
+
+fn set_exec(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn extract_runtime(
+    archive: &Path,
+    ext: &str,
+    lib_name: &str,
+    dir: &Path,
+    gpu: bool,
+) -> Result<Vec<String>> {
+    let stem = lib_name.split('.').next().unwrap_or(lib_name);
+    let lib_dest = dir.join(lib_name);
+    let mut extracted: Vec<String> = Vec::new();
+    let mut main_real: Option<(u64, PathBuf)> = None;
+
     match ext {
         "tgz" => {
             let f = std::fs::File::open(archive)?;
             let gz = flate2::read::GzDecoder::new(f);
             let mut tar = tar::Archive::new(gz);
-            let mut best: Option<(u64, PathBuf)> = None;
-            let scratch = dest.with_file_name("cuba-ort-extract");
-            std::fs::create_dir_all(&scratch)?;
             for entry in tar.entries()? {
                 let mut entry = entry?;
                 if entry.header().entry_type() != tar::EntryType::Regular {
                     continue;
                 }
-                let name = match entry.path()?.file_name().and_then(|n| n.to_str()) {
-                    Some(n) if n.starts_with(lib_name) => n.to_string(),
+                let base = match entry.path()?.file_name().and_then(|n| n.to_str()) {
+                    Some(n) if wanted_runtime_lib(n, lib_name, stem, gpu) => n.to_string(),
                     _ => continue,
                 };
                 let size = entry.header().size().unwrap_or(0);
-                let staged = scratch.join(&name);
-                let mut out = std::fs::File::create(&staged)?;
+                let out_path = dir.join(&base);
+                let mut out = std::fs::File::create(&out_path)?;
                 std::io::copy(&mut entry, &mut out)?;
-                if best.as_ref().is_none_or(|(s, _)| size > *s) {
-                    best = Some((size, staged));
+                set_exec(&out_path)?;
+                if base.starts_with(lib_name) && main_real.as_ref().is_none_or(|(s, _)| size > *s) {
+                    main_real = Some((size, out_path.clone()));
                 }
-            }
-            match best {
-                Some((_, real)) => {
-                    std::fs::rename(&real, dest)?;
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
-                    }
-                    std::fs::remove_dir_all(&scratch).ok();
-                    Ok(())
-                }
-                None => {
-                    std::fs::remove_dir_all(&scratch).ok();
-                    bail!("no encontré {lib_name} dentro del .tgz");
-                }
+                extracted.push(base);
             }
         }
         "zip" => {
@@ -269,21 +300,36 @@ fn extract_library(archive: &Path, ext: &str, lib_name: &str, dest: &Path) -> Re
             let mut zip = zip::ZipArchive::new(f)?;
             for i in 0..zip.len() {
                 let mut file = zip.by_index(i)?;
-                let is_lib = file
+                let base = match file
                     .enclosed_name()
-                    .and_then(|p| p.file_name().map(|n| n.to_os_string()))
-                    .is_some_and(|n| n == lib_name);
-                if is_lib {
-                    let mut out = std::fs::File::create(&tmp)?;
-                    std::io::copy(&mut file, &mut out)?;
-                    drop(out);
-                    std::fs::rename(&tmp, dest)?;
-                    return Ok(());
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                {
+                    Some(n) if wanted_runtime_lib(&n, lib_name, stem, gpu) => n,
+                    _ => continue,
+                };
+                let size = file.size();
+                let out_path = dir.join(&base);
+                let mut out = std::fs::File::create(&out_path)?;
+                std::io::copy(&mut file, &mut out)?;
+                if base.starts_with(lib_name) && main_real.as_ref().is_none_or(|(s, _)| size > *s) {
+                    main_real = Some((size, out_path.clone()));
                 }
+                extracted.push(base);
             }
-            bail!("no encontré {lib_name} dentro del .zip");
         }
         other => bail!("formato de archivo desconocido: {other}"),
+    }
+
+    match main_real {
+        Some((_, real)) => {
+            if real != lib_dest {
+                std::fs::copy(&real, &lib_dest)?;
+                set_exec(&lib_dest)?;
+                extracted.push(lib_name.to_string());
+            }
+            Ok(extracted)
+        }
+        None => bail!("no encontré {lib_name} dentro del runtime"),
     }
 }
 
