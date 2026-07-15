@@ -1,3 +1,5 @@
+-- Bayesian calibration verify log (cuba_calibrar).
+-- Tracks faro/verify predictions, computes P(correct | grounding_level) via Beta distribution.
 DO $$
 BEGIN
     IF NOT EXISTS (

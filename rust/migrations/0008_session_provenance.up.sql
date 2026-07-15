@@ -1,3 +1,5 @@
+-- V0.6: Session provenance — link observations/episodes to the session that created them.
+-- Enables session_diff in cuba_jornada end and provenance tracking.
 DO $$
 BEGIN
     IF NOT EXISTS (

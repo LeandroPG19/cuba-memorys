@@ -1,3 +1,4 @@
+-- Rollback v0.8 project scoping. Order: drop project_id columns first, then projects table.
 DO $$
 DECLARE t TEXT;
 BEGIN

@@ -1,3 +1,4 @@
+-- v0.10: bitemporal facts + performance indexes on legacy observations
 
 CREATE INDEX IF NOT EXISTS idx_obs_session ON brain_observations(session_id)
     WHERE session_id IS NOT NULL;

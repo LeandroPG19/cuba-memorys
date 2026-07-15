@@ -1,3 +1,6 @@
+-- V0.8: LLM-judge cache (cuba_juez) — persists ContradictionJudge verdicts so
+-- the same observation pair never re-invokes the LLM. UNIQUE(a,b) is the dedup key.
+-- Depends on 0010 for brain_projects FK.
 DO $$
 BEGIN
     IF NOT EXISTS (

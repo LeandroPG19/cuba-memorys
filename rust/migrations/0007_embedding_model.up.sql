@@ -1,3 +1,5 @@
+-- V0.6: Embedding model versioning — track which model produced each embedding.
+-- Lets future migrations re-embed only stale rows.
 DO $$
 BEGIN
     IF NOT EXISTS (

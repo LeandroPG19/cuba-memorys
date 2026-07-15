@@ -1,3 +1,6 @@
+-- V0.8: Sync state tracker — records which export manifests have been
+-- imported locally so re-imports are no-ops (idempotent dedup).
+-- Depends on 0010 for brain_projects FK.
 DO $$
 BEGIN
     IF NOT EXISTS (
