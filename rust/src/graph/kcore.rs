@@ -1,38 +1,14 @@
-//! K-core decomposition (Batagelj-Zaversnik 2003 algorithm, O(m+n)).
-//!
-//! Seidman 1983 introduced k-cores: the maximal subgraph where every node
-//! has degree ≥ k inside the subgraph. The k-core number of a node is the
-//! highest k for which the node belongs to a k-core.
-//!
-//! ## Why this matters for memory hygiene
-//!
-//! - High k-core (≥3) = "structural backbone" of the project graph.
-//!   `cuba_forget` should refuse to delete these nodes — they are the
-//!   load-bearing concepts.
-//! - K-core ranking is orthogonal to PageRank/centrality: a node can have
-//!   high PageRank from one well-connected neighbor but k-core = 1.
-//! - Ranking by k-core is naturally hierarchical and stable under the
-//!   addition of leaves (unlike eigenvector centrality).
-//!
-//! ## Algorithm (Batagelj-Zaversnik 2003)
-//!
-//! Repeatedly remove the node of minimum degree, recording its k-core
-//! number as its degree at removal. Implemented via bucket sort for O(m+n).
-
 use anyhow::Result;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// In-memory k-core decomposition. Returns `kcore[v]` for every node.
 pub fn compute_in_memory(adj: &HashMap<Uuid, Vec<Uuid>>) -> HashMap<Uuid, u32> {
     let n = adj.len();
     if n == 0 {
         return HashMap::new();
     }
 
-    // Build undirected degree map: a node's degree is the count of unique
-    // neighbors irrespective of edge direction.
     let mut degree: HashMap<Uuid, usize> = HashMap::with_capacity(n);
     let mut undirected: HashMap<Uuid, std::collections::HashSet<Uuid>> = HashMap::with_capacity(n);
     for (&v, neighbors) in adj {
@@ -43,7 +19,6 @@ pub fn compute_in_memory(adj: &HashMap<Uuid, Vec<Uuid>>) -> HashMap<Uuid, u32> {
             }
         }
     }
-    // Reciprocate edges so undirected view is symmetric
     let snapshot: Vec<(Uuid, Vec<Uuid>)> = undirected
         .iter()
         .map(|(k, v)| (*k, v.iter().copied().collect()))
@@ -60,11 +35,6 @@ pub fn compute_in_memory(adj: &HashMap<Uuid, Vec<Uuid>>) -> HashMap<Uuid, u32> {
     let mut kcore: HashMap<Uuid, u32> = HashMap::with_capacity(n);
     let mut removed: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
 
-    // Batagelj-Zaversnik: peel nodes by current min degree but record the
-    // RUNNING MAX of removed degrees as the core number. This preserves the
-    // invariant: a node's k-core number = highest k it belonged to. Without
-    // running_max, the triangle K3 incorrectly assigns kcore=2 to the first
-    // peeled node and kcore=1 / 0 to the rest.
     let mut running_max: u32 = 0;
     while removed.len() < n {
         let (&min_v, &min_d) = degree
@@ -88,7 +58,6 @@ pub fn compute_in_memory(adj: &HashMap<Uuid, Vec<Uuid>>) -> HashMap<Uuid, u32> {
     kcore
 }
 
-/// Fetch undirected adjacency from `brain_relations` scoped by current project.
 async fn fetch_adjacency(pool: &PgPool) -> Result<HashMap<Uuid, Vec<Uuid>>> {
     let project_id = crate::project::current_project_id(pool).await?;
     let edges: Vec<(Uuid, Uuid)> = sqlx::query_as(
@@ -106,8 +75,6 @@ async fn fetch_adjacency(pool: &PgPool) -> Result<HashMap<Uuid, Vec<Uuid>>> {
     Ok(adj)
 }
 
-/// Compute k-core for the entire project graph. Returns top-N nodes by
-/// k-core number (descending). Used by `cuba_zafra` REM cycle.
 pub async fn compute_top(pool: &PgPool, top_n: usize) -> Result<Vec<(String, u32)>> {
     let adj = fetch_adjacency(pool).await?;
     let kcore = compute_in_memory(&adj);
@@ -172,7 +139,6 @@ mod tests {
         for l in &leaves {
             assert_eq!(kc[l], 1);
         }
-        // Center is 1-core too (leaves have degree 1, peel them first → center degree 0)
         assert!(kc[&center] <= 1);
     }
 

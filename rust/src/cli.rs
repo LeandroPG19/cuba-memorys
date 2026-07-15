@@ -1,24 +1,9 @@
-//! `cuba-memorys search | save | delete` — the human surface.
-//!
-//! Until now the brain was invisible: the only way to ask it anything was to
-//! ask an LLM to ask it for you. That is a strange property for a system whose
-//! whole job is to remember *your* work.
-//!
-//! **Thin adapter, fat core.** Every subcommand here builds the same JSON the
-//! MCP tool would receive and calls the *same* handler. No retrieval, dedup or
-//! write logic lives in this file. If it did, the CLI and the agent would drift
-//! apart and you would end up with two subtly different brains.
-//!
-//! Destructive commands are plan-first: `delete` shows what it *would* do and
-//! refuses to act without `--apply`, which first writes an undo file.
-
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 
 use crate::handlers;
 
-/// Where undo files land before a destructive apply.
 fn undo_dir() -> std::path::PathBuf {
     std::env::var("CUBA_UNDO_DIR").map_or_else(
         |_| dirs_home().join(".cache").join("cuba-memorys").join("undo"),
@@ -37,7 +22,6 @@ async fn pool() -> Result<PgPool> {
         .context("connecting to database")
 }
 
-/// Truncate on a char boundary — entity content is Spanish, so byte slicing panics.
 fn ellipsize(s: &str, max: usize) -> String {
     let clean = s.replace('\n', " ");
     if clean.chars().count() <= max {
@@ -46,10 +30,6 @@ fn ellipsize(s: &str, max: usize) -> String {
     let cut: String = clean.chars().take(max).collect();
     format!("{cut}…")
 }
-
-// ---------------------------------------------------------------------------
-// search
-// ---------------------------------------------------------------------------
 
 pub async fn run_search(args: &[String]) -> Result<()> {
     let mut query: Option<String> = None;
@@ -78,14 +58,6 @@ pub async fn run_search(args: &[String]) -> Result<()> {
                 );
                 return Ok(());
             }
-            // A flag this command does not know is a mistake, not search text.
-            //
-            // It used to fall into the catch-all below and get CONCATENATED onto the
-            // query, so `search "postgres" --format verbose` searched, literally, for
-            // «postgres --format verbose» — and returned nothing, with no hint as to
-            // why. Same family as the `--batch 64` that reembed silently ignored: an
-            // argument the tool pretends not to see is an argument that lies about
-            // what it did.
             flag if flag.starts_with("--") => {
                 bail!(
                     "search: opción desconocida `{flag}`.\n\
@@ -97,7 +69,6 @@ pub async fn run_search(args: &[String]) -> Result<()> {
                 if query.is_none() {
                     query = Some(other.to_string());
                 } else {
-                    // Unquoted multi-word query: join the rest.
                     let q = query.take().unwrap_or_default();
                     query = Some(format!("{q} {other}"));
                 }
@@ -110,8 +81,6 @@ pub async fn run_search(args: &[String]) -> Result<()> {
     };
 
     let pool = pool().await?;
-    // `verbose` explicitly: the renderer below reads entity_name/content/fused_score,
-    // and the handler now defaults to compact's abbreviated keys.
     let result = handlers::faro::handle(
         &pool,
         json!({
@@ -148,9 +117,6 @@ pub async fn run_search(args: &[String]) -> Result<()> {
         let kind = r.get("type").and_then(Value::as_str).unwrap_or("");
         let id = r.get("id").and_then(Value::as_str).unwrap_or("");
 
-        // faro returns two shapes: observations/episodes carry entity_name +
-        // content; errors carry error_type + error_message + resolved. Reading
-        // an error as an observation prints "?" and an empty body.
         let (head, body) = if kind == "error" {
             let etype = r
                 .get("error_type")
@@ -185,10 +151,6 @@ pub async fn run_search(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// save
-// ---------------------------------------------------------------------------
-
 pub async fn run_save(args: &[String]) -> Result<()> {
     let mut positional: Vec<String> = Vec::new();
     let mut obs_type = "fact".to_string();
@@ -209,7 +171,6 @@ pub async fn run_save(args: &[String]) -> Result<()> {
                 );
                 return Ok(());
             }
-            // A flag this command does not know is a mistake, not data. See run_search.
             flag if flag.starts_with("--") => {
                 bail!("save: opción desconocida `{flag}` (probá --help)");
             }
@@ -254,16 +215,11 @@ pub async fn run_save(args: &[String]) -> Result<()> {
     if !tags.is_empty() {
         println!("  tags: {tags}");
     }
-    // The dedup gate can swallow a near-duplicate; say so instead of implying a write.
     if result.get("duplicate").and_then(Value::as_bool) == Some(true) {
         println!("  nota: era casi idéntica a una observación existente — no se duplicó.");
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// delete  (plan → apply, with an undo file)
-// ---------------------------------------------------------------------------
 
 pub async fn run_delete(args: &[String]) -> Result<()> {
     let mut id: Option<String> = None;
@@ -280,7 +236,6 @@ pub async fn run_delete(args: &[String]) -> Result<()> {
                 );
                 return Ok(());
             }
-            // A flag this command does not know is a mistake, not data. See run_search.
             flag if flag.starts_with("--") => {
                 bail!("delete: opción desconocida `{flag}` (probá --help)");
             }
@@ -295,7 +250,6 @@ pub async fn run_delete(args: &[String]) -> Result<()> {
 
     let pool = pool().await?;
 
-    // --- plan: read the row first, always ---
     let row = sqlx::query(
         "SELECT o.id::text AS id, o.content, o.observation_type, o.created_at::text AS created_at,
                 o.importance, e.name AS entity
@@ -332,7 +286,6 @@ pub async fn run_delete(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    // --- apply: undo file first, then delete ---
     let dir = undo_dir();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("no se pudo crear el directorio de undo {}", dir.display()))?;
@@ -348,13 +301,10 @@ pub async fn run_delete(args: &[String]) -> Result<()> {
             "importance": importance,
         },
     });
-    // Uuid, not a clock, names the file: two deletes in the same second must not collide.
     let path = dir.join(format!("obs-{id}.json"));
     std::fs::write(&path, serde_json::to_string_pretty(&undo)?)
         .with_context(|| format!("no se pudo escribir el undo en {}", path.display()))?;
 
-    // The handler bails when nothing was deleted, so reaching the next line
-    // means the row is gone — no need to second-guess it.
     handlers::cronica::handle(&pool, json!({ "action": "delete", "observation_id": id }))
         .await
         .context("delete failed")?;

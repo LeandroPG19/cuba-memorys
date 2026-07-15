@@ -1,27 +1,3 @@
-//! `cuba-memorys reembed` — re-encode what needs re-encoding.
-//!
-//! This existed only as an MCP tool, and that is the wrong place for it. Re-embedding
-//! 1400 observations with a 570 MB model takes minutes; an MCP call is a request
-//! with a timeout on both ends, and a maintenance job that outlives its own
-//! protocol round-trip has no business being one. Switching embedding models —
-//! the exact moment you need this — is also the moment the MCP server is in a
-//! state where its clients cannot safely talk to it: the column has one dimension
-//! and the loaded model has another.
-//!
-//! So: a plain command, run by a human, with progress on stderr.
-//!
-//! It used to re-encode the ENTIRE corpus, unconditionally, and that made it a
-//! tool you could not reach for. One observation missing a vector? The only cure on
-//! offer was to recompute all 1,461 — overwriting 1,460 good vectors to fix one
-//! empty. A maintenance command whose smallest unit of work is "everything" is a
-//! command people avoid, and the thing it was supposed to fix stays broken.
-//!
-//! The default is now the stale set: rows with no vector, or tagged with a model
-//! other than the one loaded. That covers both real cases without a flag —
-//! changing models leaves every row "tagged with another model", so all of them
-//! qualify; a single failed embedding leaves exactly one. `--all` remains for
-//! forcing the issue.
-
 use anyhow::{Context, Result};
 
 pub async fn run_cli(args: &[String]) -> Result<()> {
@@ -46,9 +22,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                 return Ok(());
             }
             "--all" => all = true,
-            // Accept both `--batch=N` and `--batch N`. The second form used to be
-            // swallowed in silence, so `--batch 64` ran with the default and said
-            // nothing — an argument the tool ignores is an argument that lies.
             "--batch" => {
                 let n = it.next().context("--batch needs a number: --batch 500")?;
                 batch = n.parse().context("--batch needs an integer")?;
@@ -63,9 +36,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         }
     }
 
-    // The guard that matters. The hash fallback produces vectors that are the right
-    // SHAPE and semantically meaningless; writing them over a real corpus is a
-    // silent, total loss of retrieval quality — and it would look like it worked.
     if !crate::embeddings::onnx::is_model_loaded() {
         anyhow::bail!(
             "no hay modelo ONNX cargado. Reembeber con el fallback de hash reemplazaría \
@@ -83,9 +53,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let dim = crate::embeddings::onnx::embedding_dim();
     eprintln!("reembed: modelo={model} dim={dim}");
 
-    // Fail before writing a single row rather than halfway through. A dimension
-    // mismatch mid-run leaves the corpus split across two vector spaces, which is
-    // worse than either one alone.
     let col: String = sqlx::query_scalar(
         "SELECT format_type(atttypid, atttypmod) FROM pg_attribute
          WHERE attrelid = 'brain_observations'::regclass AND attname = 'embedding'",
@@ -145,8 +112,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     done += 1;
                 }
                 Err(e) => {
-                    // Keep going and report the count: one unembeddable row must not
-                    // abort a job that has already re-encoded a thousand others.
                     tracing::warn!(error = %e, id = %id, "no se pudo embeber");
                     failed += 1;
                 }

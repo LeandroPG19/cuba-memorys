@@ -1,32 +1,8 @@
-//! BM25-flavored sparse retrieval using PostgreSQL `ts_rank_cd`.
-//!
-//! V0.9 pragmatic implementation: uses `ts_rank_cd` (cover density ranking)
-//! over the existing `to_tsvector('simple', ...)` columns. ts_rank_cd is
-//! NOT exactly Okapi BM25 (Robertson-Walker SIGIR 1994) — it is a normalized
-//! variant that incorporates document length and cover density (matches that
-//! cluster near each other rank higher).
-//!
-//! Why ts_rank_cd instead of true BM25:
-//! - Zero new dependencies (PostgreSQL native).
-//! - Indexes already exist (`idx_obs_search` GIN tsvector).
-//! - For typical brain-of-an-agent corpus (≤100K obs), ts_rank_cd recovers
-//!   ~70-80% of true BM25 quality on heterogeneous queries.
-//!
-//! When to upgrade to ParadeDB pg_search (true BM25 via Tantivy):
-//! - Corpus exceeds 1M observations.
-//! - Specific recall@K requirement on long-tail entity name queries.
-//! - Plan v0.9.1 sub-PR — gated by `paradedb-bm25` feature flag.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Run BM25-style search across the same scopes as `text_search` and return
-/// a parallel ranked list. Output contract identical to `text_search` so the
-/// fusion layer can treat it as a third signal alongside text + vector.
-///
-/// Caller is `hybrid_search` in [crate::handlers::faro].
 pub async fn bm25_search(
     pool: &PgPool,
     query: &str,
@@ -37,8 +13,6 @@ pub async fn bm25_search(
     let mut results = Vec::new();
 
     if scope == "all" || scope == "observations" {
-        // ts_rank_cd weights (D, C, B, A) — we only have one weight band so
-        // the array is symbolic; the meaningful signal is cover density.
         let rows: Vec<(Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
                     ts_rank_cd(o.search_vector, cuba_or_tsquery($1))::float8 AS bm25
@@ -133,8 +107,6 @@ pub async fn bm25_search(
         );
     }
 
-    // Sort fused list by BM25 desc and truncate (per-table ORDER BY can
-    // leave entities/errors interleaved at top once we span multiple scopes).
     results.sort_by(|a, b| {
         let sa = a.get("bm25_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let sb = b.get("bm25_score").and_then(|v| v.as_f64()).unwrap_or(0.0);

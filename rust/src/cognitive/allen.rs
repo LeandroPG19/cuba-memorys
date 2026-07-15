@@ -1,26 +1,3 @@
-//! Allen's interval algebra (Allen, CACM 1983).
-//!
-//! Defines 13 mutually exclusive temporal relations between two time intervals.
-//! Useful for queries like "what episodes overlap with this decision" or
-//! "what happened during session X".
-//!
-//! Notation (X, Y) for two intervals X = [Xs, Xe], Y = [Ys, Ye]:
-//!
-//! | Relation | Inverse | Example |
-//! |---|---|---|
-//! | before (b)        | after (bi)         | X ends before Y starts |
-//! | meets (m)         | met-by (mi)        | X.end == Y.start |
-//! | overlaps (o)      | overlapped-by (oi) | X starts then Y starts then X ends then Y ends |
-//! | starts (s)        | started-by (si)    | X.start == Y.start, X.end < Y.end |
-//! | during (d)        | contains (di)      | Ys < Xs and Xe < Ye |
-//! | finishes (f)      | finished-by (fi)   | Xe == Ye, Ys < Xs |
-//! | equals (eq)       | equals             | Xs==Ys and Xe==Ye |
-//!
-//! Computed in O(1) from two pairs of timestamps. PostgreSQL `tstzrange`
-//! operators (`&&` overlaps, `@>` contains, `<<` strictly before) cover
-//! the high-frequency subset; this module exposes the full algebra for
-//! exact temporal queries.
-
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +50,6 @@ impl Interval {
     }
 }
 
-/// Compute the Allen relation X relative to Y.
 pub fn relation(x: Interval, y: Interval) -> Allen {
     use std::cmp::Ordering::*;
     let s_cmp = x.start.cmp(&y.start);

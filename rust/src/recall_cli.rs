@@ -1,24 +1,6 @@
-//! `cuba-memorys recall` — the context an agent should already have.
-//!
-//! The CLAUDE.md in this setup says: *"MANDATORY session start → cuba_jornada
-//! then cuba_faro"*. That is an instruction to a model, and a model can forget
-//! it. The same file lists the failure as an anti-pattern — AP2, Context Amnesia
-//! — which is an admission that the instruction is not reliable enough to be
-//! trusted, written by the person who wrote the instruction.
-//!
-//! A hook does not forget. This command prints what the agent should know before
-//! it does anything, so a `SessionStart` hook can inject it deterministically.
-//! The difference is between asking and knowing.
-//!
-//! Read-only, and bounded: it must never dump the whole brain into the first
-//! turn of a conversation.
-
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
-/// Token budget for the injected block. Whatever this costs is paid on EVERY
-/// session, so it has to stay small enough to be worth it — a recall that eats
-/// 10k tokens of context to save an agent one search is a bad trade.
 const DEFAULT_BUDGET: usize = 900;
 
 pub async fn run_cli(args: &[String]) -> Result<()> {
@@ -36,8 +18,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     .and_then(|s| s.parse().ok())
                     .context("--max-tokens needs an integer")?
             }
-            // For hooks: say nothing at all when there is nothing to say, rather
-            // than printing a header over an empty result.
             "--quiet" => quiet = true,
             "-h" | "--help" => {
                 eprintln!(
@@ -53,8 +33,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         }
     }
 
-    // Infer the project from the working directory when not told. This is what
-    // makes the hook zero-config: the same hook line works in every repo.
     let project = project.or_else(|| {
         std::env::current_dir().ok().and_then(|d| {
             d.file_name()
@@ -82,9 +60,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<String> {
     use crate::search::budget::count_tokens;
 
-    /// Append a section only while it fits. Sections are added in the order an
-    /// agent most regrets not having them, so hitting the budget drops the least
-    /// important one rather than truncating mid-sentence.
     fn push(out: &mut String, spent: &mut usize, budget: usize, section: &str) {
         let cost = count_tokens(section);
         if *spent + cost <= budget {
@@ -98,7 +73,6 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
 
     out.push_str("## Memoria de cuba-memorys\n");
 
-    // 1. Where we left off. Nothing else is as useful as this in the first turn.
     if let Ok(Some(row)) = sqlx::query(
         "SELECT name, summary, outcome, ended_at::date::text AS d
          FROM brain_sessions
@@ -121,10 +95,7 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         );
     }
 
-    // 2. Unresolved errors — the ones an agent is about to repeat.
     if let Ok(rows) = sqlx::query(
-        // Test fixtures are not lessons. Injecting "TestError: Project A error"
-        // into every session costs context and teaches nothing.
         "SELECT error_type, error_message FROM brain_errors
          WHERE resolved = false
            AND error_type NOT ILIKE '%test%'
@@ -148,7 +119,6 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         push(&mut out, &mut spent, budget, &s);
     }
 
-    // 3. Decisions already taken here — so they are not re-litigated.
     if let Ok(rows) = sqlx::query(
         "SELECT e.name, o.content
          FROM brain_observations o
@@ -172,9 +142,6 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         push(&mut out, &mut spent, budget, &s);
     }
 
-    // 4. How things are DONE here. This is the section that stops an agent
-    // rediscovering the test command for the twentieth time — and it is ranked by
-    // what has actually worked, not by what has been read the most.
     if let Ok(rows) = sqlx::query(
         "SELECT name, trigger_context, success_count, failure_count
          FROM brain_procedures
@@ -207,7 +174,6 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
         push(&mut out, &mut spent, budget, &s);
     }
 
-    // 5. What this project is about, if we could name it.
     if let Some(p) = project
         && let Ok(rows) = sqlx::query(
             "SELECT e.name, e.entity_type
@@ -240,7 +206,6 @@ async fn build(pool: &PgPool, project: Option<&str>, budget: usize) -> Result<St
          con `proposed_action` para no repetir un error ya cometido._\n",
     );
 
-    // Header only? Then there was nothing worth saying.
     if spent == 0 {
         return Ok(String::new());
     }

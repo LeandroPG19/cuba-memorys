@@ -1,19 +1,3 @@
-//! Handler: cuba_archivo — Tamper-evident audit log (v0.9, CFR-21 inspired).
-//!
-//! Append-only log with SHA-256 hash chain. Every row's `current_hash`
-//! commits to the previous row's `prev_hash`, the action, the canonical
-//! payload and the ISO8601 timestamp. Verification recomputes the chain
-//! sequentially and detects tampering by mismatch.
-//!
-//! Mutation is blocked at the PostgreSQL level via trigger
-//! `brain_audit_block_mutation` — only `cuba_admin` role can bypass for
-//! GDPR-driven rectification.
-//!
-//! Actions:
-//! - `append {action, payload}` — adds an event to the chain.
-//! - `verify {limit?}` — walks the chain and reports first break, if any.
-//! - `tail {limit?}` — returns the most recent N events (read-only).
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -29,20 +13,10 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// V0.9.3: deterministic ISO8601 with explicit microsecond precision and
-/// `+00:00` UTC offset. PostgreSQL TIMESTAMPTZ has μs resolution; if we hash
-/// chrono's default RFC3339 (which includes ns) we'd never recompute the
-/// same digest after a DB round-trip. This format is what both `append` and
-/// `verify` use so the chain is reproducible.
 fn canonical_iso(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
 }
 
-/// Compute the canonical hash of a row.
-///
-/// `prev_hash` empty for the first row. Payload is serialized with
-/// `serde_json::to_vec` (RFC 8259 — keys ordered as inserted by serde,
-/// fixed for our INSERT path because we always pass `Value::Object`).
 fn compute_hash(prev_hash: &[u8], action: &str, payload: &[u8], created_at_iso: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     h.update(prev_hash);
@@ -66,12 +40,6 @@ async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    // V0.9.3: SERIALIZABLE retry loop. Two concurrent `append` calls
-    // would otherwise hit Postgres' read/write dependency check
-    // (SQLSTATE 40001). We retry up to N times with exponential backoff;
-    // each retry recomputes prev_hash from the latest tail (which has
-    // shifted thanks to the other writer's commit), preserving chain
-    // integrity.
     const MAX_RETRIES: usize = 5;
     let mut attempt = 0;
     loop {
@@ -88,11 +56,6 @@ async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
         .await?;
         let prev_hash: Vec<u8> = prev.map(|(h,)| h).unwrap_or_default();
 
-        // Truncate now() to microsecond precision so the string we hash
-        // matches what PostgreSQL persists in TIMESTAMPTZ. Without this,
-        // chrono's nanoseconds are silently dropped on the round-trip and
-        // `verify` would fail to recompute the same hash. RFC3339 format
-        // pinned to 6 fractional digits + `+00:00` for determinism.
         let now = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
             chrono::Utc::now().timestamp_micros(),
         )
@@ -150,8 +113,6 @@ async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
     }
 }
 
-/// True if `e` is a Postgres SQLSTATE 40001 (serialization failure) — these
-/// are expected under concurrent appenders and warrant a retry.
 fn is_serialization_failure(e: &sqlx::Error) -> bool {
     if let sqlx::Error::Database(db_err) = e
         && let Some(code) = db_err.code()
@@ -196,8 +157,6 @@ async fn verify(pool: &PgPool, args: &Value) -> Result<Value> {
             }));
         }
         let payload_bytes = serde_json::to_vec(payload)?;
-        // V0.9.3: same canonical timestamp format used at append time so
-        // the round-trip through Postgres TIMESTAMPTZ does not drop digits.
         let recomputed = compute_hash(
             &prev_for_check,
             action,

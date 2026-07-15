@@ -2,8 +2,6 @@ pub mod bitemporal;
 pub mod entity_linking;
 pub mod temporal_query;
 
-/// Bitemporal fact append on write paths (cronica, ingesta via batch_add).
-/// Default **on** in v0.10; set `CUBA_BITEMPORAL=0` to disable.
 pub fn bitemporal_enabled() -> bool {
     bitemporal_enabled_from_env(std::env::var("CUBA_BITEMPORAL").ok())
 }

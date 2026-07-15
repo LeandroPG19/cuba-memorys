@@ -1,17 +1,3 @@
-//! Handler: cuba_proyecto — Project scoping management (v0.8).
-//!
-//! Projects isolate entities/observations/episodes/sessions/errors/relations
-//! across multiple workstreams sharing the same Postgres instance. Active
-//! project is bound to a session via `cuba_jornada start --project NAME`.
-//!
-//! Actions:
-//! - `list`     → all projects with row counts.
-//! - `current`  → project of the active session (or null).
-//! - `switch`   → upsert a project and bind it to the active session.
-//! - `stats`    → row counts for a single project.
-//! - `rename`   → UPDATE name (FK stable, no cascading writes).
-//! - `merge`    → reassign rows from `name` to `to`, then delete `name`.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -114,9 +100,6 @@ async fn current(pool: &PgPool) -> Result<Value> {
 async fn switch(pool: &PgPool, name: &str) -> Result<Value> {
     let pid = project::upsert_project(pool, name).await?;
 
-    // Bind the project to *this process's* session. Targeting the newest open
-    // session in the database meant switching project here could re-tag another
-    // MCP client's session.
     let updated: Option<(Uuid,)> = match crate::session::session_id() {
         Some(sid) => {
             let row: Option<(Uuid,)> = sqlx::query_as(
@@ -128,7 +111,6 @@ async fn switch(pool: &PgPool, name: &str) -> Result<Value> {
             .bind(sid)
             .fetch_optional(pool)
             .await?;
-            // Keep the in-memory scope in sync with what we just persisted.
             if row.is_some() {
                 crate::session::set(sid, Some(pid));
             }

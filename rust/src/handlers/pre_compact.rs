@@ -1,19 +1,3 @@
-//! Handler: cuba_pre_compact — context-compaction survival protocol (v0.8).
-//!
-//! The agent calls this BEFORE running `/compact` (or any context-trimming
-//! operation) so that the next post-compact turn can retrieve a dense summary
-//! of what was happening and reinject it into the new prompt.
-//!
-//! Two actions:
-//! - `snapshot`: read active session, build a markdown summary + structured
-//!   metadata, persist into `brain_compaction_snapshots`.
-//! - `restore`: return the most recent snapshot for the active session.
-//!
-//! Why explicit (not auto): the server can't see the agent's context window,
-//! so the agent always knows best when compaction is imminent. We DO surface
-//! a soft hint via `cuba_jornada current` (`compaction_hint: true`) when the
-//! session has been long-running or is already over the obs threshold.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -40,8 +24,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         }
     };
 
-    // Resolve the session's project once (used both for filtering and for
-    // tagging the snapshot row).
     let project_id: Option<uuid::Uuid> =
         sqlx::query_scalar("SELECT project_id FROM brain_sessions WHERE id = $1")
             .bind(session_id)
@@ -49,10 +31,8 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
             .await?
             .flatten();
 
-    // 1. Markdown summary via shared eco::reflect
     let summary_md = super::eco::reflect(pool, session_id).await?;
 
-    // 2. Last 50 observations of the session
     let key_obs: Vec<(uuid::Uuid, String, String, String)> = sqlx::query_as(
         "SELECT o.id, e.name, o.observation_type, o.content
          FROM brain_observations o
@@ -78,7 +58,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         })
         .collect();
 
-    // 3. Decisions from this session
     let decisions: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
         "SELECT o.id, e.name, o.content
          FROM brain_observations o
@@ -102,7 +81,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         })
         .collect();
 
-    // 4. Unresolved errors in current project (or globally if no project)
     let unresolved: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
         "SELECT id, error_type, error_message
          FROM brain_errors
@@ -126,7 +104,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         })
         .collect();
 
-    // 5. Pending embeddings (in-flight observations)
     let pending: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT id, content
          FROM brain_observations
@@ -148,7 +125,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         })
         .collect();
 
-    // 6. Active goals from the session
     let goals_row: Option<(Value,)> =
         sqlx::query_as("SELECT goals FROM brain_sessions WHERE id = $1")
             .bind(session_id)
@@ -158,7 +134,6 @@ async fn snapshot(pool: &PgPool) -> Result<Value> {
         .map(|(g,)| g)
         .unwrap_or_else(|| Value::Array(vec![]));
 
-    // 7. Persist
     let snap: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_compaction_snapshots
             (session_id, project_id, summary_md, key_observations, decisions,

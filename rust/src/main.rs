@@ -1,16 +1,3 @@
-//! Cuba-Memorys MCP Server
-//!
-//! Knowledge Graph MCP server: Hebbian/BCM learning, RRF hybrid search, episodic
-//! and procedural memory, contradiction detection, Bayesian calibration,
-//! bitemporal facts, contextual retrieval, and autonomous REM sleep
-//! consolidation.
-//!
-//! No version, no tool count. Both live in exactly one place each —
-//! `CARGO_PKG_VERSION` and `constants::tools_for_profile()` — and both were
-//! wrong here for four releases running (v0.6.0, 19 tools; then 25, when there
-//! were 28). A number copied into a docstring is a number that will drift, and
-//! a comment that lies is worse than no comment. Ask `tools/list`.
-
 use std::time::Duration;
 
 use mimalloc::MiMalloc;
@@ -18,14 +5,8 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// How long shutdown waits for detached writes (embeddings) to land.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The command surface, printed on `--help` and on an unrecognised argument.
-///
-/// Goes to stdout only from paths that return immediately — stdout is the MCP
-/// protocol channel once the server is up, and a stray byte there desyncs the
-/// client's JSON-RPC framing.
 fn print_help() {
     println!(
         "cuba-memorys {version} — knowledge-graph memory server (MCP)
@@ -61,8 +42,6 @@ Docs: https://github.com/LeandroPG19/cuba-memorys",
     );
 }
 
-/// Wait for tracked background tasks. Must run before any `process::exit`,
-/// which skips destructors and would abort them mid-write.
 async fn drain_background_tasks() {
     let lost = cuba_memorys::tasks::drain(DRAIN_TIMEOUT).await;
     if lost > 0 {
@@ -76,7 +55,6 @@ async fn drain_background_tasks() {
 
 #[tokio::main]
 async fn main() {
-    // Structured JSON logging to stderr (MCP uses stdout for protocol)
     tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -87,10 +65,6 @@ async fn main() {
         )
         .init();
 
-    // Subcommand dispatch. `eval` runs the read-only retrieval benchmark and
-    // `doctor` the read-only health check; both exit without ever reaching the
-    // MCP server. Anything else falls through to the stdio server. Kept before
-    // the server setup so no subcommand touches stdout's protocol channel.
     let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(String::as_str) {
         Some("eval") => {
@@ -166,7 +140,6 @@ async fn main() {
             }
             return;
         }
-        // The human surface: query and write the brain without an LLM in between.
         Some(cmd @ ("search" | "save" | "delete" | "export" | "dashboard")) => {
             let rest = &argv[2..];
             let result = match cmd {
@@ -184,7 +157,6 @@ async fn main() {
             drain_background_tasks().await;
             return;
         }
-        // Client wiring. Touches no database, so it runs even when the brain is down.
         Some("setup") => {
             if let Err(e) = cuba_memorys::setup_agent::run_cli(&argv[2..]) {
                 tracing::error!(error = %format!("{e:#}"), "setup failed");
@@ -194,10 +166,6 @@ async fn main() {
             return;
         }
 
-        // `--version` must be inert. It fell through to the server before, which
-        // means asking this binary what version it was CONNECTED TO A DATABASE AND
-        // RAN MIGRATIONS — the one command a person types precisely because they do
-        // not yet trust what they have installed. It returns before any of that now.
         Some("--version" | "-V" | "version") => {
             println!("cuba-memorys {}", env!("CARGO_PKG_VERSION"));
             return;
@@ -207,13 +175,6 @@ async fn main() {
             return;
         }
 
-        // An argument we do not recognise is a mistake, not a server launch.
-        //
-        // The old catch-all sent `doctro`, `--verison`, and every other typo straight
-        // into the MCP server, where it sat silent on a stdio socket nobody was
-        // speaking to — looking, to the person who typed it, exactly like a hang.
-        // The server is what you get with NO arguments; that is how MCP clients
-        // launch it, and it is the only way to get it.
         Some(unknown) => {
             eprintln!("cuba-memorys: unknown command '{unknown}'\n");
             print_help();
@@ -225,8 +186,6 @@ async fn main() {
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "cuba-memorys starting");
 
-    // Fail loudly, at startup, rather than silently on every query. A dimension
-    // mismatch turns hybrid search into lexical search with no visible symptom.
     {
         let url = cuba_memorys::setup::resolve_database_url().await;
         match cuba_memorys::db::create_pool(&url).await {
@@ -238,19 +197,15 @@ async fn main() {
                 }
             }
             Err(e) => {
-                // Not fatal here: the existing startup path has its own retry and
-                // setup logic, and duplicating that decision would be worse.
                 tracing::warn!(error = %e, "no se pudo verificar la dimensión del embedding al arrancar");
             }
         }
     }
 
-    // V0.9: optional Prometheus /metrics endpoint (no-op without `observability` feature).
     if let Err(e) = cuba_memorys::observability::init() {
         tracing::warn!(error = %e, "observability init failed — continuing without /metrics");
     }
 
-    // Graceful shutdown on SIGTERM/SIGINT
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]
@@ -269,7 +224,6 @@ async fn main() {
         }
     };
 
-    // Run MCP protocol with graceful shutdown
     tokio::select! {
         result = cuba_memorys::protocol::run_mcp() => {
             if let Err(e) = result {
@@ -283,9 +237,5 @@ async fn main() {
         }
     }
 
-    // The select! above exits as soon as run_mcp() returns — which is what
-    // happens on every normal session end, when the MCP client closes stdin.
-    // Without this drain the runtime is dropped here and every in-flight
-    // embedding write is aborted silently.
     drain_background_tasks().await;
 }

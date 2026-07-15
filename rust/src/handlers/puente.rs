@@ -1,8 +1,3 @@
-//! Handler: cuba_puente — Relations management.
-//!
-//! CTE-based traversal and inference for graph navigation.
-//! Hebbian: relations strengthen with use (traversal).
-
 use crate::constants::VALID_RELATION_TYPES;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -21,7 +16,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Create a relation between entities.
 async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     let from = args
         .get("from_entity")
@@ -44,14 +38,11 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("Invalid relation_type: {rel_type}");
     }
 
-    // Get entity IDs
     let from_id = get_entity_id(pool, from).await?;
     let to_id = get_entity_id(pool, to).await?;
 
-    // V0.8: Resolve current project for new relations
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Upsert relation (strengthen if exists, create if not)
     let result = sqlx::query(
         "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional, project_id)
          VALUES ($1, $2, $3, $4, $5)
@@ -78,7 +69,6 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         );
     }
 
-    // If bidirectional, create reverse
     if bidirectional {
         sqlx::query(
             "INSERT INTO brain_relations (from_entity, to_entity, relation_type, bidirectional, project_id)
@@ -104,7 +94,6 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Delete a relation.
 async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
     let from = args
         .get("from_entity")
@@ -135,7 +124,6 @@ async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Traverse graph from a starting entity using CTE.
 async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
     let start = args
         .get("start_entity")
@@ -153,10 +141,8 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let start_id = get_entity_id(pool, start).await?;
 
-    // V0.8: scope traversal to current project
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // CTE-based depth-first traversal (project-scoped on relations)
     let paths: Vec<(String, String, f64, i32)> = sqlx::query_as(
         r#"
         WITH RECURSIVE graph_walk AS (
@@ -197,7 +183,6 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
-    // Strengthen traversed edges (Hebbian) — only within scope
     sqlx::query(
         "UPDATE brain_relations SET
             strength = LEAST(strength + 0.02, 1.0),
@@ -231,7 +216,6 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Infer transitive connections (A→B→C).
 async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
     let start = args
         .get("start_entity")
@@ -249,10 +233,8 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let start_id = get_entity_id(pool, start).await?;
 
-    // V0.8: scope inference to current project
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Find transitive paths using CTE (project-scoped on relations & entities)
     let inferences: Vec<(String, i32, f64)> = sqlx::query_as(
         r#"
         WITH RECURSIVE transitive_closure AS (
@@ -309,11 +291,6 @@ async fn infer(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// V0.6: Adamic-Adar link prediction — predict missing relations via common neighbors.
-///
-/// AA(x,y) = Σ 1/log(|N(z)|) for z in common neighbors of x and y.
-/// High AA score means two entities share many well-connected neighbors,
-/// suggesting a missing direct relation. Simple, effective for small graphs.
 async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
     let entity_name = args
         .get("entity_name")
@@ -330,7 +307,6 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or(10)
         .min(50);
 
-    // V0.8: scope link prediction to current project (None = global)
     let project_id = crate::project::current_project_id(pool).await?;
 
     let entity_id: Option<(uuid::Uuid,)> = sqlx::query_as(
@@ -356,7 +332,6 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         }
     };
 
-    // Adamic-Adar link prediction via SQL CTEs (project-scoped on every relation/entity)
     let predictions: Vec<(String, String, f64)> = sqlx::query_as(
         r#"
         WITH entity_neighbors AS (
@@ -451,7 +426,6 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Get entity_id by name.
 async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
     let row: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")

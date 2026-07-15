@@ -1,8 +1,3 @@
-//! Handler dispatch — routes tool names to handler functions.
-//!
-//! Each handler is in its own module file to keep CC ≤ 7.
-//! AI-2: Instrumented with tracing spans for RED metrics observability.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -37,14 +32,6 @@ pub mod tools;
 pub mod vigia;
 pub mod zafra;
 
-/// Dispatch a tool call to the appropriate handler.
-///
-/// Returns MCP content response (text or structured).
-///
-/// AI-2: Instrumented with tracing span for observability (RED metrics).
-/// - Rate: span count per tool_name
-/// - Errors: error events within span
-/// - Duration: elapsed_ms field in span close
 #[tracing::instrument(skip(pool, args), fields(tool = %tool_name))]
 pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Value> {
     let start = std::time::Instant::now();
@@ -96,13 +83,11 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
     } else {
         "error"
     };
-    // V0.9: Prometheus RED metrics (no-op when feature observability disabled)
     crate::observability::record_handler(tool_name, outcome, elapsed.as_secs_f64());
     tracing::info!(tool = %tool_name, elapsed_ms = %elapsed_ms, outcome = %outcome, "handler completed");
 
     let result = dispatch_result?;
 
-    // Wrap in MCP content format
     Ok(serde_json::json!({
         "content": [{
             "type": "text",
@@ -111,14 +96,7 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
     }))
 }
 
-/// Whether `dispatch` has an arm for this tool.
-///
-/// Kept next to the dispatcher so a new tool added to one and forgotten in the
-/// other is caught by a test rather than by an agent at runtime.
 pub fn is_known_tool(name: &str) -> bool {
-    // Advertised only when the feature is on, so it must be *known* only when the
-    // feature is on too — a tool the catalogue offers and the dispatcher rejects is a
-    // broken promise, and there is a test that says so.
     #[cfg(feature = "docs")]
     if name == "cuba_docs" {
         return docs::enabled();

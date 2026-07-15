@@ -1,5 +1,3 @@
-//! Handler: cuba_jornada — Working session management.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -15,8 +13,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or("unnamed");
             let goals = args.get("goals").cloned().unwrap_or(Value::Array(vec![]));
 
-            // V0.8: Optional project scoping. When provided, the session is bound
-            // to the project (upsert) so subsequent handlers can resolve it.
             let project_arg = args.get("project").and_then(|v| v.as_str());
             let project_id = match project_arg {
                 Some(p) if !p.is_empty() => Some(crate::project::upsert_project(pool, p).await?),
@@ -34,9 +30,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             .await
             .context("failed to start session")?;
 
-            // Bind the session to *this* process. Everything downstream
-            // (project scoping, session boost, `end`) reads it from here
-            // instead of asking the database who started a session last.
             crate::session::set(row.0, project_id);
 
             let mut response = serde_json::json!({
@@ -50,7 +43,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 }
             });
 
-            // V0.6: Fetch previous session summary for context continuity
             let prev_session: Option<(Option<String>, Option<String>, Option<String>)> =
                 sqlx::query_as(
                     "SELECT session_name, summary, outcome FROM brain_sessions
@@ -69,7 +61,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 });
             }
 
-            // Centinela: check on_session_start triggers
             let triggered =
                 crate::handlers::centinela::check_triggers(pool, name, "on_session_start")
                     .await
@@ -87,9 +78,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Close only the session this process opened. The previous query
-            // targeted the newest open session in the whole database, so with
-            // concurrent MCP clients it could end somebody else's session.
             let Some(own_session) = crate::session::session_id() else {
                 return Ok(serde_json::json!({
                     "action": "ended",
@@ -98,8 +86,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 }));
             };
 
-            // Atomic UPDATE RETURNING — a concurrent `end` on the same session
-            // cannot succeed twice (ended_at IS NULL guards it).
             let active_session: Option<(uuid::Uuid,)> = sqlx::query_as(
                 "UPDATE brain_sessions SET ended_at = NOW(), outcome = $1, summary = $2
                  WHERE id = $3 AND ended_at IS NULL
@@ -120,7 +106,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 "updated": updated
             });
 
-            // V0.6: Session diff — summarize what was created during this session
             if let Some((session_id,)) = active_session {
                 let session_diff: Vec<(String, i64)> = sqlx::query_as(
                     "SELECT observation_type, COUNT(*) FROM brain_observations
@@ -150,15 +135,12 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(response)
         }
         "current" => {
-            // V0.8: include started_at + compaction_hint + last_snapshot id so
-            // agents can decide whether to run cuba_pre_compact snapshot.
             type SessionRow = (
                 uuid::Uuid,
                 Option<String>,
                 Value,
                 chrono::DateTime<chrono::Utc>,
             );
-            // This process's session — not whichever client opened one last.
             let session: Option<SessionRow> = match crate::session::session_id() {
                 Some(sid) => {
                     sqlx::query_as(
@@ -173,7 +155,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             };
             match session {
                 Some((id, name, goals, started_at)) => {
-                    // Count observations created in this session
                     let obs_count: i64 = sqlx::query_scalar(
                         "SELECT COUNT(*) FROM brain_observations WHERE session_id = $1",
                     )
@@ -238,7 +219,3 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         _ => anyhow::bail!("Invalid action: {action}"),
     }
 }
-
-// `current_session_id` was removed: it asked the database for the newest open
-// session anywhere, which is not this process's session. Callers now use
-// `crate::session::session_id()`.

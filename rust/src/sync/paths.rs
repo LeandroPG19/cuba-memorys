@@ -1,16 +1,9 @@
-//! Path utilities for cuba_sync — resolves CUBA_SYNC_DIR and prevents
-//! directory traversal escapes.
-
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 const ENV_VAR: &str = "CUBA_SYNC_DIR";
 const DEFAULT_DIR: &str = ".cuba-memorys";
 
-/// Resolve the export/import root, applying overrides from arg → env → default.
-///
-/// Always canonicalized to an absolute path. The directory is created if
-/// missing (export will populate it; import expects it).
 pub fn resolve_dir(override_arg: Option<&str>) -> Result<PathBuf> {
     let raw = override_arg
         .map(|s| s.to_string())
@@ -26,10 +19,6 @@ pub fn resolve_dir(override_arg: Option<&str>) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Slugify an entity name to a filesystem-safe basename.
-///
-/// Keeps ASCII alphanumerics + `-_`, replaces every other rune with `-`,
-/// collapses runs, trims trailing dashes. Falls back to "entity" if empty.
 pub fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -50,26 +39,12 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// Reject paths that would escape `root` (defense in depth — fed paths come
-/// from manifest/import, so a malicious manifest cannot cause writes outside
-/// the sync dir).
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<()> {
-    // Lexical check first, and it must come first: a content-addressed write
-    // targets `chunks/ab/<hash>.json`, whose parent directory does not exist yet.
-    // The previous version canonicalized the parent, which fails with NotFound on
-    // any path more than one level deep — so every nested write was rejected as a
-    // traversal attempt. Creating the directory before validating is not an option
-    // either: that is exactly how `../../etc/x` gets a directory made for it.
-    //
-    // Resolving `..` on the string cannot be fooled by a non-existent path.
     let normalized = lexical_join(root, candidate);
     if !normalized.starts_with(root) {
         anyhow::bail!("path traversal blocked: {candidate:?} escapes root {root:?}");
     }
 
-    // Then, if the path (or an existing ancestor) is really there, canonicalize
-    // it too. Lexical normalization cannot see a symlink pointing out of the
-    // root; this catches that.
     let existing = candidate
         .ancestors()
         .find(|p| p.exists())
@@ -83,10 +58,6 @@ pub fn ensure_within(root: &Path, candidate: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `.` and `..` against `root` without touching the filesystem.
-///
-/// A `..` that would climb above the root is not clamped — it is allowed to walk
-/// off, so the caller's `starts_with` check sees it and rejects the path.
 fn lexical_join(root: &Path, candidate: &Path) -> PathBuf {
     use std::path::Component;
 

@@ -1,27 +1,3 @@
-//! Phase 1.2: explicit ADD / UPDATE / DELETE / NOOP memory operations.
-//!
-//! Closes gap #2 (see docs/PLAN-MEJORAS-v0.11.md): cuba used to decide
-//! reinforce/update/create by a raw cosine threshold — the brittle approach
-//! mem0 abandoned. Instead, the LLM judge classifies the relationship between a
-//! candidate fact and the most similar existing one, and this module maps that
-//! judgment to a concrete operation. The *decision* is the LLM's; the mapping is
-//! deterministic and unit-tested.
-//!
-//! Semantics against cuba's bitemporal model (rows are never physically
-//! deleted — "delete" means supersede/invalidate):
-//!
-//! | Op     | supersedes_old | adds_new | meaning                                   |
-//! |--------|:--------------:|:--------:|-------------------------------------------|
-//! | Add    |       no       |   yes    | new fact coexists with the old one        |
-//! | Update |      yes       |   yes    | new fact replaces an older version        |
-//! | Delete |      yes       |    no    | old fact retracted, nothing new to store  |
-//! | Noop   |       no       |    no    | duplicate / not confident enough — ignore |
-//!
-//! auto_extract only ever emits Add/Update/Noop automatically (a coding turn
-//! always carries a positive fact, so a bare retraction is not produced by
-//! extraction). Delete is modeled for explicit callers (cuba_forget / a future
-//! cuba_juez recommendation) and is never inferred from a low-signal turn.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryOp {
     Add,
@@ -31,30 +7,21 @@ pub enum MemoryOp {
 }
 
 impl MemoryOp {
-    /// Map an LLM judgment to an operation. `verdict` is the judge's vocabulary
-    /// (`contradicts | supersedes | complementary | unrelated | unknown`);
-    /// `confidence` is 0..1; `conf_floor` is the minimum confidence below which
-    /// we refuse to act (Noop) to avoid superseding on a weak call.
     pub fn from_judgment(verdict: &str, confidence: f64, conf_floor: f64) -> Self {
         if confidence < conf_floor {
             return MemoryOp::Noop;
         }
         match verdict {
-            // Both mean "the new fact wins over the old" → supersede + keep new.
             "supersedes" | "contradicts" => MemoryOp::Update,
-            // Both can hold at once, or they are unrelated → keep both.
             "complementary" | "unrelated" => MemoryOp::Add,
-            // "unknown" or anything unexpected → do not touch existing memory.
             _ => MemoryOp::Noop,
         }
     }
 
-    /// Whether the operation invalidates (supersedes) the matched old observation.
     pub fn supersedes_old(self) -> bool {
         matches!(self, MemoryOp::Update | MemoryOp::Delete)
     }
 
-    /// Whether the candidate fact should be stored as a new active observation.
     pub fn adds_new(self) -> bool {
         matches!(self, MemoryOp::Add | MemoryOp::Update)
     }
@@ -69,8 +36,6 @@ impl MemoryOp {
     }
 }
 
-/// Tally of operations chosen across a batch — surfaced in the auto_extract
-/// response so callers can see what the judge decided, not just a bare count.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OpBreakdown {
     pub add: u32,

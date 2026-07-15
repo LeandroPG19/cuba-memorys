@@ -1,5 +1,3 @@
-//! Spreading activation over the knowledge graph (multi-hop, weighted edges).
-
 use anyhow::Result;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -34,7 +32,6 @@ impl ActivationPropagation {
         self
     }
 
-    /// Propagate activation on an in-memory adjacency list (undirected weights).
     pub fn propagate_on_graph(
         &self,
         neighbors: &[Vec<(usize, f32)>],
@@ -66,7 +63,6 @@ impl ActivationPropagation {
         activations
     }
 
-    /// Single-hop decay on seeds only (backward-compatible helper).
     pub fn propagate(&self, seed_nodes: &[usize], graph_size: usize) -> Vec<f32> {
         let mut activations = vec![0.0_f32; graph_size];
         for &node in seed_nodes {
@@ -78,7 +74,6 @@ impl ActivationPropagation {
     }
 }
 
-/// Load graph from DB and spread activation from seed entity UUIDs.
 pub async fn spread_from_entities(
     pool: &PgPool,
     seed_ids: &[Uuid],
@@ -136,7 +131,6 @@ pub async fn spread_from_entities(
     Ok(scored)
 }
 
-/// BFS seed expansion by entity name (used by link prediction enrichment).
 pub async fn activated_neighbor_names(
     pool: &PgPool,
     entity_name: &str,

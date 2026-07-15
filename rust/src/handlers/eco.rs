@@ -1,9 +1,3 @@
-//! Handler: cuba_eco — RLHF feedback (Oja's rule).
-//!
-//! Positive: boost importance (Oja Hebbian).
-//! Negative: decrease importance (anti-Hebbian).
-//! Correct: update content with versioning.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -21,17 +15,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Positive RLHF: Oja's rule with V0.9 Robbins-Monro adaptive learning rate.
-///
-/// V0.9: η_t = η_0 / sqrt(1 + access_count/100) — Robbins-Monro 1951
-/// stochastic approximation. Convergence O(1/√t) instead of constant rate.
-/// As an observation accumulates feedback, the marginal effect of each
-/// additional Oja step shrinks → bounded importance volatility, no
-/// single noisy signal can radically swing a well-established memory.
-///
-/// At access_count=0: η = 0.05 (original behavior).
-/// At access_count=100: η ≈ 0.0354.
-/// At access_count=1000: η ≈ 0.0157.
 async fn positive(
     pool: &PgPool,
     entity_name: Option<&str>,
@@ -87,7 +70,6 @@ async fn positive(
     }))
 }
 
-/// Negative RLHF: anti-Oja with V0.9 Robbins-Monro adaptive learning rate.
 async fn negative(
     pool: &PgPool,
     entity_name: Option<&str>,
@@ -141,7 +123,6 @@ async fn negative(
     }))
 }
 
-/// Content correction with version history.
 async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> Result<Value> {
     let obs_id_str = observation_id.context("observation_id required for correct")?;
     let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
@@ -154,7 +135,6 @@ async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> R
         .and_then(|v| v.as_str())
         .context("correction text is required")?;
 
-    // Archive old content in previous_versions, then update
     let result = sqlx::query(
         "UPDATE brain_observations SET
             previous_versions = previous_versions || jsonb_build_array(
@@ -183,12 +163,6 @@ async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> R
     }))
 }
 
-/// V0.8: Internal reflection helper used by `cuba_pre_compact` to build a
-/// session-scoped summary before context compaction. Returns dense markdown
-/// (~500 tokens) summarizing observations created in the given session.
-///
-/// Pure aggregation — does not modify state. Caller is responsible for
-/// persisting it (typically into `brain_compaction_snapshots`).
 pub async fn reflect(pool: &PgPool, session_id: uuid::Uuid) -> Result<String> {
     type Row = (String, i64);
     let by_type: Vec<Row> = sqlx::query_as(

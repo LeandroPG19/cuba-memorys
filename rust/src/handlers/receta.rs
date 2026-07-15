@@ -1,42 +1,9 @@
-//! `cuba_receta` — procedural memory: how things are done here.
-//!
-//! The fourth memory. See migration 0033 for why it is a store of its own rather
-//! than a ninth observation type: procedural memory is reinforced by SUCCESS,
-//! declarative memory by ACCESS, and conflating them means a recipe that is
-//! consulted constantly *because it keeps failing* would climb the rankings.
-//!
-//! ## Ranking: why not the success rate
-//!
-//! The obvious ranking is `success / (success + failure)`. It is wrong, and
-//! wrong in a way that matters: a procedure that worked once, the only time it
-//! was ever run, scores 100% — and outranks one that worked 47 times out of 50.
-//! The first has almost no evidence behind it; the second has a track record.
-//!
-//! The standard fix is the lower bound of the Wilson score confidence interval
-//! (Wilson 1927), which is what you rank by when observations are unequal in
-//! number and you want to be honest about uncertainty:
-//!
-//! ```text
-//!   ( p̂ + z²/2n − z·√( (p̂(1−p̂) + z²/4n) / n ) ) / ( 1 + z²/n )
-//! ```
-//!
-//! It asks: *given this evidence, what is the worst plausible true success rate?*
-//! One-for-one lands around 0.21; 47-of-50 lands around 0.84. The recipe with a
-//! record wins, which is the entire point of keeping a record.
-
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
 
-/// z for a 95% confidence interval.
 const Z_95: f64 = 1.96;
 
-/// Lower bound of the Wilson score interval for a binomial proportion.
-///
-/// Returns 0.0 with no trials at all: an untried procedure has no evidence, and
-/// should sort below anything that has ever been shown to work. It is still
-/// findable — `search` returns it — it just does not get to claim reliability it
-/// has not earned.
 pub fn wilson_lower_bound(successes: i64, failures: i64) -> f64 {
     let n = (successes + failures) as f64;
     if n <= 0.0 {
@@ -49,7 +16,6 @@ pub fn wilson_lower_bound(successes: i64, failures: i64) -> f64 {
     (numerator / denominator).clamp(0.0, 1.0)
 }
 
-/// Render the steps into the markdown an agent (or a human) actually reads.
 fn steps_to_markdown(steps: &Value) -> String {
     let Some(arr) = steps.as_array() else {
         return String::new();
@@ -85,7 +51,6 @@ fn row_to_json(r: &sqlx::postgres::PgRow) -> Value {
         "verification": r.try_get::<String, _>("verification").unwrap_or_default(),
         "successes": successes,
         "failures": failures,
-        // The number to trust. See wilson_lower_bound.
         "reliability": wilson_lower_bound(i64::from(successes), i64::from(failures)),
         "last_outcome": r.try_get::<Option<String>, _>("last_outcome").unwrap_or(None),
     })
@@ -106,13 +71,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Store a procedure. Re-adding an existing name UPDATES it — a project has one
-/// way to bring up its services, and a second recipe under the same name is an
-/// edit, not a rival.
-///
-/// The success/failure counters are deliberately NOT reset on update: the
-/// procedure is being refined, not replaced, and throwing away its track record
-/// would mean every correction costs you the evidence you had.
 async fn add(pool: &PgPool, args: &Value) -> Result<Value> {
     let name = args
         .get("name")
@@ -140,8 +98,6 @@ async fn add(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Embed name + trigger: that is what a search for "how do I bring up the
-    // services" has to match against. The steps are the payload, not the key.
     let embed_text = format!("{name}. {trigger}");
     let embedding = crate::embeddings::onnx::embed_passage(&embed_text)
         .await
@@ -204,13 +160,6 @@ async fn get(pool: &PgPool, args: &Value) -> Result<Value> {
     Ok(out)
 }
 
-/// Find procedures by meaning, ranked by reliability.
-///
-/// Semantic first (the agent asks "how do I bring the services up", the recipe
-/// is called "levantar el entorno de desarrollo" — no lexical overlap), with a
-/// trigram fallback so it still works when the ONNX model is not loaded rather
-/// than silently returning nothing, which is the failure mode this repo has been
-/// bitten by before.
 async fn search(pool: &PgPool, args: &Value) -> Result<Value> {
     let query = args
         .get("query")
@@ -256,8 +205,6 @@ async fn search(pool: &PgPool, args: &Value) -> Result<Value> {
     };
 
     let mut results: Vec<Value> = rows.iter().map(row_to_json).collect();
-    // Relevance finds the candidates; reliability decides between them. A recipe
-    // that has never worked should not win on a slightly better cosine.
     results.sort_by(|a, b| {
         let ra = a["reliability"].as_f64().unwrap_or(0.0);
         let rb = b["reliability"].as_f64().unwrap_or(0.0);
@@ -274,11 +221,6 @@ async fn search(pool: &PgPool, args: &Value) -> Result<Value> {
     }))
 }
 
-/// Record whether the procedure actually worked.
-///
-/// This is the reinforcement signal, and the whole reason this store exists. An
-/// agent that runs a recipe and does not report the outcome leaves the memory no
-/// better than it found it.
 async fn outcome(pool: &PgPool, args: &Value) -> Result<Value> {
     let name = args
         .get("name")
@@ -309,8 +251,6 @@ async fn outcome(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let mut out = row_to_json(&row);
     out["action"] = json!("outcome");
-    // Say it plainly: a procedure that keeps failing is worse than no procedure,
-    // because it is trusted.
     if !ok {
         out["hint"] = json!(
             "Falló. Si el procedimiento está desactualizado, corregilo con action=add \
@@ -368,7 +308,6 @@ async fn delete(pool: &PgPool, args: &Value) -> Result<Value> {
     Ok(json!({ "action": "delete", "name": name, "deleted": true }))
 }
 
-/// Everything, for the Skills exporter. Ordered by reliability.
 pub async fn all_for_export(pool: &PgPool) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT * FROM brain_procedures ORDER BY name")
         .fetch_all(pool)
@@ -397,8 +336,6 @@ mod tests {
 
     #[test]
     fn a_track_record_beats_a_lucky_first_try() {
-        // This is the whole reason Wilson is here instead of successes/total.
-        // One-for-one is a 100% success rate and means almost nothing.
         let lucky = wilson_lower_bound(1, 0);
         let proven = wilson_lower_bound(47, 3);
         assert!(
@@ -411,7 +348,6 @@ mod tests {
 
     #[test]
     fn never_run_means_no_evidence_not_perfect() {
-        // A brand-new procedure must not outrank one that has actually worked.
         assert_eq!(wilson_lower_bound(0, 0), 0.0);
         assert!(wilson_lower_bound(0, 0) < wilson_lower_bound(1, 0));
     }
@@ -419,14 +355,12 @@ mod tests {
     #[test]
     fn failure_is_punished_and_more_evidence_sharpens_it() {
         assert!(wilson_lower_bound(0, 5) < 0.05, "0 de 5 no vale nada");
-        // Same rate, more evidence → a tighter (higher) lower bound.
         let few = wilson_lower_bound(8, 2);
         let many = wilson_lower_bound(80, 20);
         assert!(
             many > few,
             "más evidencia con la misma tasa debe subir: {many:.3} vs {few:.3}"
         );
-        // But never above the rate itself.
         assert!(many < 0.8);
     }
 
@@ -450,7 +384,6 @@ mod tests {
         assert!(md.contains("docker compose up -d db"));
         assert!(md.contains("→ esperado: healthy"));
         assert!(md.contains("2. Correr las migraciones"));
-        // A step with no command must not emit an empty code block.
         assert_eq!(md.matches("```").count(), 2);
     }
 }

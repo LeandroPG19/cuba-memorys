@@ -1,8 +1,3 @@
-//! `cuba-memorys link` — connect the 58% of the graph that has no edges.
-//!
-//! Plan-first, like every destructive command here: it shows the edges it would
-//! create and refuses to write them without `--apply`.
-
 use anyhow::{Context, Result};
 
 use crate::graph::autolink::{self, DEFAULT_NPMI_THRESHOLD, MIN_CO_SESSIONS};

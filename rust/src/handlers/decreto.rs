@@ -1,5 +1,3 @@
-//! Handler: cuba_decreto — Architecture/design decisions.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -8,7 +6,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let entity_name = "architecture_decisions";
 
-    // V0.8: resolve current project once for all branches
     let project_id = crate::project::current_project_id(pool).await?;
 
     match action {
@@ -30,7 +27,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 title, context, alternatives, chosen, rationale
             );
 
-            // Ensure entity exists (project-scoped on creation, idempotent on conflict)
             sqlx::query(
                 "INSERT INTO brain_entities (name, entity_type, project_id)
                  VALUES ($1, 'concept', $2)

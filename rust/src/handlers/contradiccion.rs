@@ -1,9 +1,3 @@
-//! Handler: cuba_contradiccion — Active contradiction detection.
-//!
-//! Scans same-entity observations for semantic conflicts.
-//! Uses embedding cosine distance + negation heuristics.
-//! All operations are READ-ONLY.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -42,7 +36,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Scan a specific entity (or top-20 by observation count) for contradictions.
 async fn scan(pool: &PgPool, entity_name: &str) -> Result<Value> {
     if entity_name.is_empty() {
         return scan_top_entities(pool).await;
@@ -50,9 +43,7 @@ async fn scan(pool: &PgPool, entity_name: &str) -> Result<Value> {
     scan_entity(pool, entity_name).await
 }
 
-/// Scan a single entity for contradicting observation pairs.
 async fn scan_entity(pool: &PgPool, entity_name: &str) -> Result<Value> {
-    // V0.8: scope contradictions to current project (None = global)
     let project_id = crate::project::current_project_id(pool).await?;
 
     type PairRow = (uuid::Uuid, String, uuid::Uuid, String, f64);
@@ -88,9 +79,7 @@ async fn scan_entity(pool: &PgPool, entity_name: &str) -> Result<Value> {
     }))
 }
 
-/// Scan top-20 entities by observation count.
 async fn scan_top_entities(pool: &PgPool) -> Result<Value> {
-    // V0.8: scope to current project
     let project_id = crate::project::current_project_id(pool).await?;
 
     let entities: Vec<(String,)> = sqlx::query_as(
@@ -143,7 +132,6 @@ async fn scan_top_entities(pool: &PgPool) -> Result<Value> {
         all_contradictions.extend(scored);
     }
 
-    // Sort by contradiction score descending
     all_contradictions.sort_by(|a, b| {
         let sa = a
             .get("contradiction_score")
@@ -166,7 +154,6 @@ async fn scan_top_entities(pool: &PgPool) -> Result<Value> {
     }))
 }
 
-/// Check if one observation has negation markers relative to the other.
 fn has_negation_conflict(a: &str, b: &str) -> bool {
     let a_lower = a.to_lowercase();
     let b_lower = b.to_lowercase();
@@ -180,14 +167,10 @@ fn has_negation_conflict(a: &str, b: &str) -> bool {
     false
 }
 
-/// V0.8: Public re-export so cognitive::judge::HeuristicJudge (the fallback
-/// backend for cuba_juez) can reuse the bilingual negation heuristic without
-/// pulling SQL/embedding dependencies.
 pub fn heuristic_conflict(a: &str, b: &str) -> bool {
     has_negation_conflict(a, b)
 }
 
-/// Score observation pairs and return contradiction items.
 fn score_pairs(pairs: &[(uuid::Uuid, String, uuid::Uuid, String, f64)]) -> Vec<Value> {
     pairs
         .iter()

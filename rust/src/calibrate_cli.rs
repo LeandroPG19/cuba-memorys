@@ -1,18 +1,7 @@
-//! `cuba-memorys calibrate` — diagnose and fix the abstention threshold.
-//!
-//! Reports what the OOD score actually looks like on this corpus, and computes
-//! the conformal threshold from real queries instead of from a χ² assumption the
-//! embeddings violate. See [`crate::search::calibrate`] for why theory fails here.
-
 use anyhow::{Context, Result};
 
 use crate::search::calibrate::{self, DEFAULT_ALPHA};
 
-/// Queries used to calibrate. They must be *answerable* from the corpus: the
-/// conformal guarantee is about not rejecting queries like these.
-///
-/// Read from the eval dataset when one is given, so the calibration set is the
-/// same distribution the benchmark grades on.
 fn load_queries(path: Option<&str>) -> Result<Vec<String>> {
     let Some(path) = path else {
         anyhow::bail!(
@@ -27,9 +16,6 @@ fn load_queries(path: Option<&str>) -> Result<Vec<String>> {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(line).context("línea JSONL inválida")?;
-        // Abstention samples are out-of-distribution on purpose — including them
-        // in the calibration set would calibrate the threshold to accept exactly
-        // what it exists to reject.
         if v.get("abstain").and_then(serde_json::Value::as_bool) == Some(true) {
             continue;
         }

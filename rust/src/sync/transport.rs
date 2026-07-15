@@ -1,33 +1,17 @@
-//! Where a sync bundle lives, decoupled from what it contains.
-//!
-//! The exporter used to call `std::fs::write` directly, which welded the format
-//! to the local filesystem. A [`Transport`] is the seam: the content-addressed
-//! store (see [`super::cas`]) speaks in blobs and names, and something else
-//! decides whether those land on disk, in a git checkout, or in object storage.
-//!
-//! Only [`FsTransport`] ships today, and that is on purpose — an S3 backend with
-//! no user is worse than no S3 backend. The point of the trait is that adding one
-//! later touches this file and nothing else.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 pub trait Transport: Send + Sync {
-    /// Write a blob. Must be atomic enough that a crash never leaves a
-    /// half-written object readable under its final name — a truncated chunk
-    /// named by the hash of its complete form is a corrupt store that looks intact.
     fn put(&self, key: &str, bytes: &[u8]) -> Result<()>;
 
     fn get(&self, key: &str) -> Result<Vec<u8>>;
 
     fn exists(&self, key: &str) -> bool;
 
-    /// Keys under a prefix. Order is unspecified.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
 }
 
-/// Local filesystem, rooted at a directory.
 pub struct FsTransport {
     root: PathBuf,
 }
@@ -35,15 +19,10 @@ pub struct FsTransport {
 impl FsTransport {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
-        // Canonicalize up front: the traversal guard compares prefixes, and
-        // `/tmp/x` vs `/private/tmp/x` would make an in-root path look foreign.
         let root = root.canonicalize().unwrap_or(root);
         Self { root }
     }
 
-    /// Resolve a key to a path, refusing anything that climbs out of the root.
-    /// Keys are hashes today, but an importer will one day read keys from an
-    /// index file it did not write.
     fn path_for(&self, key: &str) -> Result<PathBuf> {
         let candidate = self.root.join(key);
         super::paths::ensure_within(&self.root, &candidate)
@@ -59,9 +38,6 @@ impl Transport for FsTransport {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("no se pudo crear {}", parent.display()))?;
         }
-        // Write to a sibling temp file, then rename: rename is atomic within a
-        // filesystem, so a reader never observes a partial chunk under its
-        // final, content-derived name.
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, bytes)
             .with_context(|| format!("no se pudo escribir {}", tmp.display()))?;
@@ -108,9 +84,6 @@ fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// One directory per test. Naming them by pid alone made the three tests in
-    /// this module share a directory, and the test runner is parallel: whichever
-    /// finished first deleted the tree out from under the others.
     fn tmpdir(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("cuba-transport-{}-{tag}", std::process::id()));
         std::fs::remove_dir_all(&p).ok();
@@ -137,7 +110,6 @@ mod tests {
     fn refuses_to_escape_its_root() {
         let dir = tmpdir("escape");
         let t = FsTransport::new(&dir);
-        // An index file is data, and data can be hostile.
         assert!(t.put("../../../etc/passwd", b"x").is_err());
         assert!(t.get("../../secret").is_err());
         std::fs::remove_dir_all(&dir).ok();
@@ -148,7 +120,6 @@ mod tests {
         let dir = tmpdir("atomic");
         let t = FsTransport::new(&dir);
         t.put("a/b.json", b"contenido completo").unwrap();
-        // The temp file must not linger, or `list` would hand it to an importer.
         assert!(!t.list("a").unwrap().iter().any(|k| k.ends_with(".tmp")));
         std::fs::remove_dir_all(&dir).ok();
     }

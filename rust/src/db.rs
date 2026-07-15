@@ -15,8 +15,8 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     let node_name = std::env::var("CUBA_NODE_NAME")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok()) // Unix
-        .or_else(|| std::env::var("COMPUTERNAME").ok()) // Windows
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
 
     let pool = PgPoolOptions::new()

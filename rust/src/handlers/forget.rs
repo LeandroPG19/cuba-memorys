@@ -1,17 +1,3 @@
-//! Handler: cuba_forget — GDPR Right to Erasure (ARCO).
-//!
-//! Performs cascading hard-delete across ALL tables for a given entity,
-//! including brain_errors and brain_sessions which are NOT covered by
-//! FK ON DELETE CASCADE (they reference entities by name, not FK).
-//!
-//! POST-AUDIT FIX: Gemini audit identified COMP-001 (GDPR non-compliance)
-//! because cuba_alma(delete) only cascades via FK to observations + relations,
-//! leaving orphaned references in errors/sessions.
-//!
-//! SEC-002 FIX: Replaced ILIKE '%' || $1 || '%' with POSITION(LOWER($1) IN LOWER(field)) > 0.
-//! ILIKE with wildcards in $1 (e.g., entity_name="%") acted as a wildcard and deleted ALL rows.
-//! POSITION() performs literal substring search with no special characters.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -42,12 +28,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Use a transaction for atomicity
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
 
-    // 1. Delete errors that mention this entity (by name in context or message).
-    // SEC-002: Use POSITION(LOWER($1) IN LOWER(field)) > 0 — literal substring match,
-    // no special characters (unlike ILIKE '%'||$1||'%' where $1='%' matches everything).
     let errors_deleted: (i64,) = sqlx::query_as(
         "WITH deleted AS (
             DELETE FROM brain_errors
@@ -61,8 +43,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to delete errors")?;
 
-    // 2. Delete sessions that mention this entity in goals or summary.
-    // SEC-002: Same POSITION() fix — literal match, no wildcard expansion.
     let sessions_deleted: (i64,) = sqlx::query_as(
         "WITH deleted AS (
             DELETE FROM brain_sessions
@@ -77,7 +57,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     .await
     .context("failed to delete sessions")?;
 
-    // 3. Delete the entity itself (FK CASCADE handles observations, relations, AND episodes)
     let entity_deleted = sqlx::query(
         "DELETE FROM brain_entities WHERE name = $1
          AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",

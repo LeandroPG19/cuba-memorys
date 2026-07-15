@@ -1,7 +1,3 @@
-//! Handler: cuba_remedio — Resolve errors with solution.
-//!
-//! FIX A-005: UTF-8 safe truncation via zafra::safe_truncate.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -19,7 +15,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     let error_id: uuid::Uuid = error_id_str.parse().context("invalid error_id UUID")?;
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Mark error as resolved
     let result = sqlx::query(
         "UPDATE brain_errors SET solution = $2, resolved = true, resolved_at = NOW()
          WHERE id = $1
@@ -35,7 +30,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("Error not found: {error_id_str}");
     }
 
-    // Cross-reference: find similar unresolved errors
     let similar: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT e2.id, e2.error_message FROM brain_errors e1
          JOIN brain_errors e2 ON similarity(e1.error_message, e2.error_message) > 0.5

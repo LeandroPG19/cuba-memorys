@@ -5,19 +5,6 @@ pub mod reporters;
 
 use anyhow::{Context, Result};
 
-/// CLI entrypoint for the retrieval benchmark:
-///   `cuba-memorys eval [--dataset PATH.jsonl] [--k N] [--json]`
-///
-/// Runs the production hybrid `cuba_faro` per sample and reports nDCG@k, MRR,
-/// P@k, R@k. **Non-mutating**: the harness passes `track_access=false`, so the
-/// Testing Effect boost that a normal search applies is skipped — running the
-/// benchmark does not change importance/access of the corpus it measures, and
-/// is safe against the live database. Without `--dataset` it uses the built-in
-/// smoke set.
-///
-/// This is the entrypoint the harness lacked (the modules existed with zero
-/// callers), so no mechanism in the cognitive/graph stack had a way to prove it
-/// helped. Phase 1 of docs/PLAN-MEJORAS-v0.11.md: measure first.
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut dataset_path: Option<String> = None;
     let mut json = false;
@@ -35,8 +22,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             }
             "--json" => json = true,
             "--associative" => cfg.associative = true,
-            // These two exist because the harness used to hard-code them off and
-            // then report that they scored zero.
             "--abstain" => cfg.abstain = true,
             "--rerank" => cfg.rerank = true,
             "--format" => {

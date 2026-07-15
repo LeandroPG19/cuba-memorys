@@ -1,55 +1,14 @@
-//! Out-of-Distribution detection via Mahalanobis distance.
-//!
-//! Lee, K., Lee, K., Lee, H., & Shin, J. (2018).
-//! "A Simple Unified Framework for Detecting Out-of-Distribution Samples
-//! and Adversarial Attacks." NeurIPS 2018.
-//!
-//! ## Why this matters for memory retrieval
-//!
-//! When a query is genuinely out-of-distribution with respect to what we
-//! have stored, returning the K nearest neighbors yields garbage with low
-//! confidence — encouraging hallucination. LongMemEval explicitly measures
-//! the *abstention* dimension: knowing when to say "I don't have this".
-//!
-//! Mahalanobis(x, μ, Σ) = sqrt((x - μ)ᵀ Σ⁻¹ (x - μ))
-//!
-//! The threshold scales with dimensionality — see [`default_threshold`]. A
-//! typical in-distribution point lies at `M ≈ sqrt(d)` (χ² with d dof), so a
-//! fixed small τ abstains on everything.
-//!
-//! ## Caching
-//!
-//! μ and Σ⁻¹ are recomputed in the REM cycle (`cuba_zafra`) — they do not
-//! change at request time. The result is a single matrix-vector product per
-//! query, O(d²) — for d=384 that is ≈150K mul-adds, sub-millisecond.
-
 use nalgebra::{DMatrix, DVector};
 
-/// Cached statistics of the active embedding distribution.
-/// Populated by `cuba_zafra` REM cycle, read by `cuba_faro` per-query.
 #[derive(Debug, Clone)]
 pub struct OodStats {
     pub mean: DVector<f64>,
     pub inverse_covariance: DMatrix<f64>,
-    /// Number of samples used to fit μ and Σ. Caller can decide to skip
-    /// OOD if too few samples (high variance estimate).
     pub n_samples: usize,
-    /// Ledoit-Wolf shrinkage intensity actually applied, in [0, 1]. Reported so
-    /// `doctor` and `calibrate` can show how much of the fitted covariance is
-    /// real signal and how much is the identity target propping it up: near 1
-    /// means the sample was far too small to say anything about the shape of the
-    /// distribution.
     pub shrinkage: f64,
 }
 
 impl OodStats {
-    /// Estimate μ and Σ⁻¹ from a sample of embeddings.
-    ///
-    /// `embeddings` is a flat row-major matrix: `embeddings.len() == n × d`.
-    ///
-    /// Returns `None` when there are fewer than 2 samples (covariance undefined),
-    /// the sample is degenerate (rank-deficient covariance), or matrix inversion
-    /// fails. Callers should fall back to skipping OOD checks in those cases.
     pub fn fit(embeddings: &[Vec<f32>]) -> Option<Self> {
         let n = embeddings.len();
         if n < 2 {
@@ -60,7 +19,6 @@ impl OodStats {
             return None;
         }
 
-        // Compute mean μ
         let mut mean = DVector::<f64>::zeros(d);
         for e in embeddings {
             for (i, &v) in e.iter().enumerate() {
@@ -69,7 +27,6 @@ impl OodStats {
         }
         mean /= n as f64;
 
-        // Sample covariance.
         let mut cov = DMatrix::<f64>::zeros(d, d);
         let mut centered: Vec<DVector<f64>> = Vec::with_capacity(n);
         for e in embeddings {
@@ -82,32 +39,8 @@ impl OodStats {
         }
         cov /= (n - 1).max(1) as f64;
 
-        // Ledoit-Wolf shrinkage toward the scaled identity.
-        //
-        // The previous code applied a FIXED ridge of ε = (tr(S)/d) · 1e-3 while
-        // its comment claimed "Ledoit-Wolf style". It is not: Ledoit-Wolf derives
-        // the shrinkage intensity from the data, and the difference is not
-        // cosmetic here. This corpus fits Σ from ~500–1400 embeddings in 384
-        // dimensions — n/d between 1.3 and 3.7 — where the sample covariance is
-        // catastrophically ill-conditioned and a 0.1% ridge is nowhere near
-        // enough to fix it. Inverting it amplified estimation noise until every
-        // query looked like an outlier: abstention rejected 100% of answerable
-        // queries, and the theoretical cutoff rejected 14.4% of the corpus
-        // against its own distribution.
-        //
-        // Ledoit & Wolf (2004), "A well-conditioned estimator for
-        // large-dimensional covariance matrices", J. Multivariate Analysis 88(2):
-        //
-        //     Σ* = (b²/d²)·μ·I + ((d²−b²)/d²)·S
-        //
-        // with μ = tr(S)/d the average eigenvalue, d² = ‖S − μI‖²_F / d the
-        // distance from the target, and b² an estimate of the sample covariance's
-        // own variance. The ratio b²/d² is the optimal intensity in the sense of
-        // minimizing expected squared Frobenius error: it shrinks hard when the
-        // sample is small relative to d, and vanishes as n → ∞, recovering S.
         let mu = (0..d).map(|i| cov[(i, i)]).sum::<f64>() / d as f64;
 
-        // d² = ‖S − μI‖²_F / d
         let mut target_dist = 0.0;
         for i in 0..d {
             for j in 0..d {
@@ -118,7 +51,6 @@ impl OodStats {
         }
         target_dist /= d as f64;
 
-        // b̄² = (1/n²) Σₖ ‖xₖxₖᵀ − S‖²_F / d, then b² = min(b̄², d²).
         let mut b_bar = 0.0;
         for x in &centered {
             let mut acc = 0.0;
@@ -134,8 +66,6 @@ impl OodStats {
         b_bar /= (n * n) as f64;
         let b2 = b_bar.min(target_dist);
 
-        // Intensity in [0, 1]. A degenerate target (target_dist ≈ 0) means S is
-        // already essentially μI, so there is nothing to shrink toward.
         let intensity = if target_dist > f64::EPSILON {
             (b2 / target_dist).clamp(0.0, 1.0)
         } else {
@@ -149,9 +79,6 @@ impl OodStats {
             }
         }
 
-        // A floor on the diagonal survives the pathological case the sphere
-        // creates: e5 L2-normalizes, so the radial direction carries no variance
-        // at all and Σ is singular there by construction, whatever the shrinkage.
         let floor = (mu * 1e-6).max(f64::MIN_POSITIVE);
         for i in 0..d {
             cov[(i, i)] += floor;
@@ -167,8 +94,6 @@ impl OodStats {
         })
     }
 
-    /// Mahalanobis distance from `query` to the fitted distribution.
-    /// Returns `None` if the query has the wrong dimensionality.
     pub fn mahalanobis(&self, query: &[f32]) -> Option<f64> {
         if query.len() != self.mean.len() {
             return None;
@@ -181,41 +106,13 @@ impl OodStats {
         Some(m2.max(0.0).sqrt())
     }
 
-    /// Convenience: classify a query as OOD given a threshold.
     pub fn is_ood(&self, query: &[f32], threshold: f64) -> bool {
         self.mahalanobis(query).is_some_and(|d| d > threshold)
     }
 }
 
-/// z-score for the 99th percentile of the standard normal. Used by
-/// [`default_threshold`] to pick the chi-squared quantile.
 const Z_99: f64 = 2.326_347_9;
 
-/// Default OOD threshold for a `dim`-dimensional embedding space.
-///
-/// # Why this is not a constant
-///
-/// For data drawn from a `d`-dimensional Gaussian, the *squared* Mahalanobis
-/// distance follows a chi-squared distribution with `d` degrees of freedom.
-/// A **typical, in-distribution** point therefore sits at `M ≈ sqrt(d)`, not
-/// near zero: for `d = 384` that is `19.6`.
-///
-/// The previous hard-coded `5.0` — documented as "~5σ in 384-dim space" —
-/// misread Mahalanobis as if it were a per-axis z-score. Measured against the
-/// live corpus (n=1215, d=384), it flagged **100% of in-distribution
-/// observations as OOD**: median distance 19.60, min 10.69. Abstention was
-/// unconditional.
-///
-/// We instead return `sqrt(χ²_{0.99}(d))`, the radius enclosing 99% of the
-/// distribution, via the Wilson–Hilferty cube-root approximation:
-///
-/// ```text
-/// χ²_p(d) ≈ d · (1 − 2/(9d) + z_p · sqrt(2/(9d)))³
-/// ```
-///
-/// It is accurate to <0.1% for `d ≥ 30`. For `d = 384` it yields `τ ≈ 21.25`,
-/// matching `scipy.stats.chi2.ppf(0.99, 384)` and leaving the empirical corpus
-/// with a ~10% abstention rate at the tail — the intended behavior.
 pub fn default_threshold(dim: usize) -> f64 {
     if dim == 0 {
         return 0.0;
@@ -226,8 +123,6 @@ pub fn default_threshold(dim: usize) -> f64 {
     chi2.max(0.0).sqrt()
 }
 
-/// Minimum samples required before OOD detection is meaningful. Below this,
-/// the covariance estimate is too noisy and we skip the check entirely.
 pub const MIN_SAMPLES_FOR_OOD: usize = 50;
 
 #[cfg(test)]
@@ -235,7 +130,6 @@ mod tests {
     use super::*;
 
     fn random_around(center: &[f32], n: usize, jitter: f32) -> Vec<Vec<f32>> {
-        // Deterministic pseudo-random — no rand crate to keep test infra small.
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let mut v = center.to_vec();
@@ -263,9 +157,6 @@ mod tests {
 
     #[test]
     fn threshold_tracks_sqrt_of_dimension() {
-        // Wilson–Hilferty must agree with scipy.stats.chi2.ppf(0.99, df).
-        // Reference values: chi2.ppf(0.99, 384) = 451.4 -> sqrt = 21.25
-        //                   chi2.ppf(0.99, 1024) = 1131.2 -> sqrt = 33.63
         let t384 = default_threshold(384);
         assert!(
             (t384 - 21.25).abs() < 0.1,
@@ -279,10 +170,6 @@ mod tests {
         assert_eq!(default_threshold(0), 0.0);
     }
 
-    /// Regression: the old fixed tau = 5.0 flagged 100% of the live corpus as
-    /// OOD, because a typical point sits at M ~ sqrt(d), not near zero. The
-    /// previous test only probed the mean itself (distance ~0) and so never
-    /// caught it.
     #[test]
     fn typical_in_distribution_point_is_not_ood() {
         let d = 64;
@@ -291,7 +178,6 @@ mod tests {
         let stats = OodStats::fit(&samples).expect("fit");
         let tau = default_threshold(d);
 
-        // Probe actual samples, not the centroid.
         let flagged = samples.iter().filter(|s| stats.is_ood(s, tau)).count();
         let rate = flagged as f64 / samples.len() as f64;
         assert!(
@@ -300,8 +186,6 @@ mod tests {
             rate * 100.0
         );
 
-        // And the old constant must reject essentially everything, which is
-        // exactly why it was wrong.
         let flagged_old = samples.iter().filter(|s| stats.is_ood(s, 5.0)).count();
         assert!(
             flagged_old > samples.len() / 2,
@@ -315,7 +199,6 @@ mod tests {
         let center = vec![0.0_f32; d];
         let samples = random_around(&center, 200, 0.01);
         let stats = OodStats::fit(&samples).expect("fit");
-        // Far from the cluster: every dim shifted well beyond the spread.
         let ood = vec![10.0_f32; d];
         let dist = stats.mahalanobis(&ood).expect("mahalanobis");
         assert!(

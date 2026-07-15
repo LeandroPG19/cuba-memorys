@@ -1,18 +1,3 @@
-//! Handler: cuba_hipotesis — Abductive inference on the knowledge graph.
-//!
-//! Given an observed effect E, finds plausible causes by traversing
-//! causal relations BACKWARDS through the knowledge graph.
-//!
-//! Abductive reasoning: if H → E (H causes E) and E is observed,
-//! then H is a plausible hypothesis. Score = path_strength × entity_importance.
-//!
-//! Supported relation types for backward traversal:
-//!   - causes: direct causal link
-//!   - related_to: associative link
-//!   - depends_on: dependency (reversed → dependent may cause issues)
-//!
-//! All operations are READ-ONLY.
-
 use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -28,7 +13,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Find plausible causes for an observed effect via backward graph traversal.
 async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
     let effect = args.get("effect").and_then(|v| v.as_str()).unwrap_or("");
     if effect.is_empty() {
@@ -47,10 +31,8 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or(10)
         .min(50);
 
-    // V0.8: scope abductive search to current project (None = global)
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // Check effect entity exists (within scope)
     let effect_exists: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT id FROM brain_entities
          WHERE name = $1
@@ -72,11 +54,6 @@ async fn explain(pool: &PgPool, args: &Value) -> Result<Value> {
         }));
     }
 
-    // CTE recursive backward traversal over causal relations.
-    // path_strength = product of relation strengths along the chain.
-    // plausibility = path_strength × entity_importance (incorporates PageRank + Hebbian boosts).
-    // Cycle prevention via path array.
-    // V0.8: $4 = project_id; both relations and target entities filtered by it.
     let rows: Vec<(String, String, f64, i64, f64, f64)> = sqlx::query_as(
         "WITH RECURSIVE causal_chain AS (
             -- Base: direct causes of the effect

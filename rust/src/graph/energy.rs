@@ -1,10 +1,6 @@
-//! Graph energy scores — blends persisted PageRank with structural centrality.
-
 use anyhow::Result;
 use sqlx::PgPool;
 
-/// Recompute `energy_score` from `pagerank_score` and `betweenness_centrality`.
-/// Call after `pagerank::compute_and_store` (zafra pagerank action).
 pub async fn refresh_energy_scores(pool: &PgPool) -> Result<u64> {
     let result = sqlx::query(
         r#"INSERT INTO brain_node_metrics (node_id, pagerank_score, energy_score, last_calculated)

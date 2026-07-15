@@ -1,8 +1,3 @@
-//! Cuba-Memorys — Knowledge Graph MCP Server.
-//!
-//! Exposes modules for integration testing.
-//! The binary entry point is in `main.rs`.
-
 pub mod calibrate_cli;
 pub mod cli;
 pub mod cognitive;
@@ -20,7 +15,6 @@ pub mod handlers;
 pub mod link_cli;
 pub mod mode;
 pub mod models_cli;
-/// Outbound network access. Absent entirely unless the `docs` feature is on.
 #[cfg(feature = "docs")]
 pub mod net;
 pub mod observability;

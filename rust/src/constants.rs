@@ -1,55 +1,31 @@
-//! Constants, tool definitions, and threshold configuration.
-//!
-//! Mirrors Python constants.py — tool definitions for MCP tools/list.
-
 use serde_json::Value;
 use std::sync::OnceLock;
 
-// ── Thresholds ───────────────────────────────────────────────────
-
-/// Deduplication similarity threshold (cosine similarity).
 pub const DEDUP_THRESHOLD: f64 = 0.85;
 
-/// Prediction Error Gating thresholds (V5 — Vestige-inspired).
-pub const PRED_ERROR_REINFORCE: f64 = 0.92; // Very similar → reinforce existing
-pub const PRED_ERROR_UPDATE: f64 = 0.75; // Somewhat similar → update existing
-// Below PRED_ERROR_UPDATE → create new observation
+pub const PRED_ERROR_REINFORCE: f64 = 0.92;
+pub const PRED_ERROR_UPDATE: f64 = 0.75;
 
-/// Cache configuration.
-/// V3: TTL raised 60→300s to prevent thrashing during long tool executions.
-/// Configurable via CUBA_CACHE_TTL env var.
 pub const CACHE_MAX_ENTRIES: usize = 256;
 pub const CACHE_TTL_SECS: u64 = 300;
 
-/// Hebbian boost constants.
 pub const HEBBIAN_ACCESS_BOOST: f64 = 0.01;
 
-/// BCM Metaplasticity (Bienenstock-Cooper-Munro, 1982).
-/// Throttle scale: how aggressively to reduce boost (0.0=off, 1.0=max throttle).
 pub const BCM_THROTTLE_SCALE: f64 = 0.8;
 
-/// V0.8: Project scoping kill-switch env var.
-/// When set to "off" (case-insensitive), the project filter is fully disabled
-/// and all queries see every project + global rows. Useful for admin/debug.
 pub const KILL_SWITCH_ENV: &str = "CUBA_PROJECT_FILTER";
 
-/// V0.8: `cuba_jornada current` flips `compaction_hint=true` past these
-/// thresholds so the agent knows to call `cuba_pre_compact snapshot`.
 pub const COMPACTION_HINT_HOURS: i64 = 2;
 pub const COMPACTION_HINT_OBS_COUNT: i64 = 100;
 
-/// V0.8: LLM-judge ambiguous similarity band — pairs with cosine_sim inside
-/// this window are escalated to the judge from `cuba_contradiccion scan_with_judge`.
 pub const JUEZ_AMBIGUOUS_LO: f64 = 0.6;
 pub const JUEZ_AMBIGUOUS_HI: f64 = 0.8;
 pub const JUEZ_DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const JUEZ_DEFAULT_MAX_PAIRS: usize = 5;
 
-/// Relation types.
 pub const VALID_RELATION_TYPES: &[&str] =
     &["uses", "causes", "implements", "depends_on", "related_to"];
 
-/// Entity types.
 pub const VALID_ENTITY_TYPES: &[&str] = &[
     "concept",
     "project",
@@ -59,7 +35,6 @@ pub const VALID_ENTITY_TYPES: &[&str] = &[
     "config",
 ];
 
-/// Observation types.
 pub const VALID_OBSERVATION_TYPES: &[&str] = &[
     "fact",
     "decision",
@@ -72,7 +47,6 @@ pub const VALID_OBSERVATION_TYPES: &[&str] = &[
     "superseded",
 ];
 
-/// Observation sources.
 pub const VALID_SOURCES: &[&str] = &[
     "agent",
     "error_detection",
@@ -81,13 +55,6 @@ pub const VALID_SOURCES: &[&str] = &[
     "inference",
 ];
 
-// ── Importance Priors ────────────────────────────────────────────
-
-/// Importance priors by observation type.
-///
-/// Decisions and lessons inherently more valuable than transient context.
-/// Used by cronica::add to set initial importance based on both the
-/// observation type and the information density of the content.
 pub fn importance_prior(obs_type: &str, density: f64) -> f64 {
     match obs_type {
         "decision" => 0.8,
@@ -99,12 +66,8 @@ pub fn importance_prior(obs_type: &str, density: f64) -> f64 {
     }
 }
 
-// ── Tool Definitions ─────────────────────────────────────────────
-
-/// MCP tool definitions — built once, reused on every tools/list call.
 static TOOL_DEFS: OnceLock<Vec<Value>> = OnceLock::new();
 
-/// Generate MCP tool definitions for tools/list response.
 pub fn tool_definitions() -> &'static Vec<Value> {
     TOOL_DEFS.get_or_init(|| {
         #[allow(unused_mut)]
@@ -518,9 +481,6 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
     ];
 
-        // Compiled in, but not offered unless asked for. `cuba_docs` is the only tool
-        // that leaves this machine, and a tool an agent cannot see is a tool it cannot
-        // call — which is the actual guarantee, not a comment promising one.
         #[cfg(feature = "docs")]
         if !crate::handlers::docs::enabled() {
             defs.retain(|t| t.get("name").and_then(Value::as_str) != Some("cuba_docs"));
@@ -530,7 +490,6 @@ pub fn tool_definitions() -> &'static Vec<Value> {
     })
 }
 
-/// Helper to build a tool definition.
 fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
     serde_json::json!({
         "name": name,
@@ -539,12 +498,6 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
     })
 }
 
-/// The two tools that make progressive disclosure possible.
-///
-/// Declared apart from `tool_definitions()` because they are *about* the tool
-/// list, and because the `lean` profile always includes them — a lean profile
-/// without the means to reach the other tools would be an amputation, not an
-/// optimization.
 fn meta_tool_defs() -> Vec<Value> {
     vec![
         tool_def(
@@ -578,18 +531,6 @@ fn meta_tool_defs() -> Vec<Value> {
     ]
 }
 
-// ── Tool Profiles ────────────────────────────────────────────────
-//
-// All 25 schemas are injected into the agent's context on every session. That
-// is a real tax — in tokens, and in the model's ability to pick the right tool
-// when two dozen are on the table. Most of them (REM cycles, audit log, GDPR
-// erasure, Bayesian calibration) are maintenance surfaces an agent almost never
-// needs mid-task.
-//
-// `full` stays the default: no existing setup changes behaviour by upgrading.
-// The narrower profiles are opt-in via `CUBA_TOOL_PROFILE`.
-
-/// Day-to-day agent flow: search, write, relate, errors, sessions, decisions.
 const PROFILE_AGENT: [&str; 14] = [
     "cuba_receta",
     "cuba_faro",
@@ -607,7 +548,6 @@ const PROFILE_AGENT: [&str; 14] = [
     "cuba_pizarra",
 ];
 
-/// Agent flow + the cognitive tools worth reaching for mid-task.
 const PROFILE_STANDARD_EXTRA: [&str; 6] = [
     "cuba_eco",
     "cuba_reflexion",
@@ -617,43 +557,24 @@ const PROFILE_STANDARD_EXTRA: [&str; 6] = [
     "cuba_calibrar",
 ];
 
-/// The lean core: what an agent actually reaches for in a normal turn.
-///
-/// Everything else is one `cuba_tools` call away — not gone.
 const PROFILE_LEAN: [&str; 6] = [
-    "cuba_faro",       // search
-    "cuba_cronica",    // write
-    "cuba_expediente", // past errors — the anti-repetition guard
-    "cuba_receta",     // how things are done here — deferring this defeats its purpose
-    "cuba_jornada",    // session lifecycle
-    "cuba_alarma",     // report an error
+    "cuba_faro",
+    "cuba_cronica",
+    "cuba_expediente",
+    "cuba_receta",
+    "cuba_jornada",
+    "cuba_alarma",
 ];
 
-/// Which tools this process exposes on `tools/list`, per `CUBA_TOOL_PROFILE`.
 pub fn tools_for_profile() -> Vec<Value> {
     tools_for(&std::env::var("CUBA_TOOL_PROFILE").unwrap_or_else(|_| "full".to_string()))
 }
 
-/// Filter the tool set by profile name.
-///
-/// `full` (default, all 25) | `standard` (19) | `agent` (13) | `lean` (5 + the
-/// two meta-tools). An unknown value falls back to `full`: a typo in an env var
-/// must never silently hide tools.
-///
-/// `lean` is the one that matters. It is not a smaller server — every one of the
-/// 25 tools remains callable through `cuba_call`; they simply stop shipping their
-/// schemas into the context of a session that may never use them. That is the
-/// difference between removing a capability and deferring it.
-///
-/// Takes the profile as an argument rather than reading the environment, so the
-/// tests can exercise it without mutating process-global state under a parallel
-/// test runner.
 pub fn tools_for(profile: &str) -> Vec<Value> {
     let all = tool_definitions();
 
     let allowed: Vec<&str> = match profile.to_lowercase().as_str() {
         "lean" => {
-            // Core + the means to reach everything else.
             let mut out: Vec<Value> = all
                 .iter()
                 .filter(|t| {
@@ -673,8 +594,6 @@ pub fn tools_for(profile: &str) -> Vec<Value> {
             .copied()
             .collect(),
         _ => {
-            // Full: the 25, plus the meta-tools, which stay useful — an agent can
-            // still ask "what can you do?" without the profile being narrowed.
             let mut out = all.clone();
             out.extend(meta_tool_defs());
             return out;
@@ -695,7 +614,6 @@ pub fn tools_for(profile: &str) -> Vec<Value> {
 mod profile_tests {
     use super::*;
 
-    /// Guard against a rename silently dropping a tool from a profile.
     #[test]
     fn every_profiled_tool_actually_exists() {
         let names: Vec<&str> = tool_definitions()
@@ -712,8 +630,6 @@ mod profile_tests {
 
     #[test]
     fn the_default_hides_nothing() {
-        // The whole point: upgrading must not shrink anyone's toolset. `full`
-        // now also carries the two meta-tools, so it grows — never shrinks.
         let full = tools_for("full");
         assert_eq!(full.len(), tool_definitions().len() + 2);
         for t in tool_definitions() {
@@ -736,7 +652,6 @@ mod profile_tests {
     #[test]
     fn lean_defers_tools_it_does_not_delete_them() {
         let lean = tools_for("lean");
-        // 5 core + cuba_tools + cuba_call.
         assert_eq!(lean.len(), PROFILE_LEAN.len() + 2);
         let names: Vec<&str> = lean
             .iter()
@@ -760,7 +675,6 @@ mod profile_tests {
             tools_for("standard").len(),
             PROFILE_AGENT.len() + PROFILE_STANDARD_EXTRA.len()
         );
-        // A narrow profile must never invent a tool that `full` does not have.
         let full: Vec<String> = tools_for("full")
             .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str).map(String::from))

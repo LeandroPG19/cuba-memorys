@@ -1,7 +1,3 @@
-//! Cognitive module — Hebbian learning, Dual-Strength, density.
-//!
-//! These are library functions used by handlers and the REM daemon.
-
 pub mod adwin;
 pub mod allen;
 pub mod calibration;

@@ -1,14 +1,3 @@
-//! Handler: cuba_juez — LLM-judge for ambiguous contradictions (v0.8).
-//!
-//! Two actions:
-//! - `judge_pair {observation_a, observation_b}` — judge two given UUIDs.
-//! - `scan_entity {entity_name, max_pairs?}` — pull pairs in the ambiguous
-//!   cosine band [JUEZ_AMBIGUOUS_LO, JUEZ_AMBIGUOUS_HI] and judge each.
-//!
-//! Verdicts are persisted in `brain_judgments` with a UNIQUE(a, b) constraint
-//! that doubles as a permanent cache. A repeat call on the same pair never
-//! re-invokes the LLM.
-
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -50,10 +39,7 @@ fn required_uuid(args: &Value, key: &str) -> Result<Uuid> {
         .with_context(|| format!("invalid UUID for {key}"))
 }
 
-/// Judge a single pair. Cache hit returns the existing verdict without invoking
-/// the backend. Cache miss invokes resolve_judge() then INSERTs.
 async fn judge_pair(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Value> {
-    // Always store with (lower, higher) ordering so cache hits are symmetric.
     let (a, b) = if a < b { (a, b) } else { (b, a) };
 
     if let Some(j) = lookup_cached(pool, a, b).await? {
@@ -88,7 +74,6 @@ async fn judge_pair(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Value> {
     }))
 }
 
-/// Pull pairs in the ambiguous similarity band and judge up to `max_pairs`.
 async fn scan_entity(pool: &PgPool, entity_name: &str, max_pairs: usize) -> Result<Value> {
     let project_id = crate::project::current_project_id(pool).await?;
 

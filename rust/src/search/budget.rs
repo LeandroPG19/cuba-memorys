@@ -1,31 +1,15 @@
-//! Token-budget enforcement for cuba_faro response truncation.
-//!
-//! V0.9: replaces the old "4 chars/token" heuristic with exact tiktoken
-//! counting via `cl100k_base` (GPT-4 family). The heuristic over-estimated
-//! for Spanish (~2.7 chars/tok) and under-estimated for code (~3.5
-//! chars/tok), causing the budget to be either too generous or to truncate
-//! mid-sentence.
-//!
-//! Compatible with Claude tokens within ~5% margin in our domain per
-//! Anthropic tokenizer notes.
-
 use std::sync::OnceLock;
 use tiktoken_rs::{CoreBPE, cl100k_base};
 
-/// Lazy-initialized BPE encoder. cl100k_base allocates ~30MB.
 fn encoder() -> &'static CoreBPE {
     static ENCODER: OnceLock<CoreBPE> = OnceLock::new();
     ENCODER.get_or_init(|| cl100k_base().expect("cl100k_base loads from embedded data"))
 }
 
-/// Exact count of `text` in cl100k_base.
-/// O(n) on text length, no allocations beyond the BPE result vec.
 pub fn count_tokens(text: &str) -> usize {
     encoder().encode_with_special_tokens(text).len()
 }
 
-/// Truncate `text` to at most `max_tokens`, preserving UTF-8 boundaries.
-/// Falls back to char-boundary truncation when the BPE round-trip fails.
 pub fn truncate_to_budget(text: &str, max_tokens: usize) -> String {
     let enc = encoder();
     let tokens = enc.encode_with_special_tokens(text);
@@ -65,7 +49,6 @@ mod tests {
     fn count_handles_spanish_correctly() {
         let s = "El sistema MCP de cuba-memorys es excelente para agentes de IA.";
         let n = count_tokens(s);
-        // Old "len/4" heuristic predicted ~16 tokens. Real cl100k is higher.
         assert!(n > 0);
         assert!(n < 200, "sanity bound, got {n}");
     }
