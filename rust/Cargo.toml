@@ -1,6 +1,6 @@
 [package]
 name = "cuba-memorys"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 description = "Knowledge Graph MCP Server — 25 tools, sqlx-migrate, BM25/MMR/OOD search, conformal prediction, testing-effect/Δt-Hebbian/Robbins-Monro cognitive, source credibility, closeness/harmonic/k-core graph, working-memory + Allen interval + ADWIN drift + MI tagging, audit hash-chain (CFR-21) + RLS, MCP Resources URI scheme, optional Prometheus /metrics + MCPSamplingJudge, plus v0.8 features (project scoping, snapshots, sync, LLM-judge)"
 license = "AGPL-3.0-only"

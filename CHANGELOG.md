@@ -6,6 +6,33 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.14.1] — 2026-07-15 (Cargo `0.14.1` · npm `0.14.1` · PyPI `1.16.1`)
+
+### Correcciones
+
+- **`models runtime --gpu` instala de verdad la GPU.** Antes solo extraía la
+  librería principal del runtime, nunca los execution providers de CUDA
+  (`libonnxruntime_providers_cuda.so` + `_providers_shared.so`), así que aun con
+  una instalación GPU limpia el proveedor CUDA no se registraba y todo caía a CPU
+  en silencio. Además el comando saltaba la descarga si ya existía cualquier
+  runtime, con lo que pasar de CPU a GPU era un no-op. Ahora `--gpu` siempre
+  re-descarga y extrae la principal más los providers (TensorRT excluido: necesita
+  librerías extra que no distribuimos), y lista cada archivo extraído.
+
+- **`doctor` reporta el estado real de la GPU.** `gpu::active_provider()` devolvía
+  un `"cuda"` fijo sin comprobar nada, así que `doctor` mostraba `[ok] gpu` incluso
+  corriendo en CPU. Ahora `gpu::status()` verifica que el provider CUDA esté junto
+  al runtime y que exista una GPU NVIDIA, y `doctor` avisa con `warn` accionable
+  cuando una build con GPU degrada a CPU.
+
+- **Las migraciones vuelven a ser inmutables.** El barrido de comentarios de
+  `e96df5d` había tocado 33 archivos de migración ya publicados. sqlx valida el
+  checksum SHA-384 de cada migración aplicada en cada arranque, así que cambiar su
+  contenido rompía el arranque contra cualquier base creada antes de 0.14 (toda
+  instalación real) con `migration N was previously applied but has been modified`.
+  Restaurados los 33 archivos a su contenido original; una migración publicada es
+  inmutable y el estándar de "código sin comentarios" no le aplica.
+
 ## [0.14.0] — 2026-07-15 (Cargo `0.14.0` · npm `0.14.0` · PyPI `1.16.0`)
 
 ### Modos de funcionamiento: `CUBA_MODE=local | red | completo`

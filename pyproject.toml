@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "cuba-memorys"
-version = "1.16.0"
+version = "1.16.1"
 description = "Persistent memory MCP server for AI agents (v0.10). 25 tools: bitemporal facts, sqlx-migrate, BM25+MMR+OOD hybrid retrieval, graph metrics, conformal prediction, Hebbian/BCM, project scoping, CFR-21 audit chain. Rust + PostgreSQL + pgvector."
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }

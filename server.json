@@ -6,12 +6,12 @@
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.14.0",
+  "version": "0.14.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.14.0",
+      "version": "0.14.1",
       "transport": {
         "type": "stdio"
       },
@@ -70,7 +70,7 @@
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "1.16.0",
+      "version": "1.16.1",
       "transport": {
         "type": "stdio"
       },
