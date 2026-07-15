@@ -1,15 +1,4 @@
 #!/usr/bin/env node
-/**
- * Smoke test for the npm install path — no network, no published release needed.
- *
- * This exists because the bug it guards against shipped to real users: the package
- * installed and the binary was not there, because the only thing that fetched it was a
- * postinstall script npm is turning off by default. The catastrophic failures are not
- * subtle logic errors — they are a broken `require`, a renamed export, a detection
- * check that downloads when it should not. Those need no network to catch.
- *
- * Run: node npm/install.test.js
- */
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -26,8 +15,6 @@ function test(name, fn) {
   }
 }
 
-// The load itself is the test bin.js depends on: if this require throws, `npm install`
-// produces a package whose entry point cannot even start.
 const mod = require("./postinstall.js");
 
 test("postinstall exports the reusable download path", () => {
@@ -37,8 +24,6 @@ test("postinstall exports the reusable download path", () => {
 });
 
 test("bin.js loads and can require ensureBinary", () => {
-  // Loading bin.js runs it, which would try to spawn — so just check it parses and its
-  // dependency wiring is intact by re-requiring the module it pulls in.
   const src = fs.readFileSync(path.join(__dirname, "bin.js"), "utf8");
   assert.ok(src.includes('require("./postinstall.js")'), "bin.js must reuse postinstall");
   assert.ok(src.includes("ensureBinary"), "bin.js must call ensureBinary on first use");
@@ -51,8 +36,6 @@ test("binPath is platform-correct", () => {
 });
 
 test("ensureBinary does NOT download when a real binary is already present", async () => {
-  // Point BIN_DIR resolution at a temp copy by faking a present, non-empty binary at
-  // the real binPath, then asserting ensureBinary returns it without touching the net.
   const dest = mod.binPath();
   const dir = path.dirname(dest);
   const hadDir = fs.existsSync(dir);
@@ -75,8 +58,6 @@ test("ensureBinary does NOT download when a real binary is already present", asy
 });
 
 test("ensureBinary treats a 0-byte binary as missing", () => {
-  // The exact residue that lived in the repo: a truncated placeholder must never be
-  // accepted as the binary. We assert the size guard, not the download (no network).
   const dest = mod.binPath();
   const dir = path.dirname(dest);
   const hadFile = fs.existsSync(dest);
@@ -85,8 +66,6 @@ test("ensureBinary treats a 0-byte binary as missing", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(dest, ""); // 0 bytes
     assert.strictEqual(fs.statSync(dest).size, 0);
-    // ensureBinary would now attempt a download; we cannot exercise that offline, but
-    // the size==0 branch is what routes it there. Guard the invariant directly:
     assert.ok(fs.existsSync(dest) && fs.statSync(dest).size === 0);
   } finally {
     if (backup) fs.writeFileSync(dest, backup);

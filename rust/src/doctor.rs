@@ -1,16 +1,3 @@
-//! `cuba-memorys doctor` — read-only health check.
-//!
-//! Every one of the four critical v0.10 bugs was **silent**: the server kept
-//! answering, just wrong. Recall collapsed to zero because `plainto_tsquery`
-//! ANDs its terms; the vector branch returned an empty vec whenever the ONNX
-//! model was missing; the OOD threshold was inverted and flagged the entire
-//! corpus as out-of-distribution; and the session/project id was resolved
-//! globally across MCP processes. Nothing in any response said "degraded".
-//!
-//! This module is the answer: one command that asserts the invariants those
-//! bugs violated, and exits non-zero when the system is lying to you. It only
-//! ever issues `SELECT`s — running it can never change what the brain knows.
-
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -18,21 +5,15 @@ use sqlx::{PgPool, Row};
 
 use crate::embeddings::onnx;
 
-/// A healthy schema has this many `brain_*` tables (verified against the
-/// known-good backup: 23).
 const EXPECTED_TABLES: i64 = 23;
 
-/// Extensions the retrieval stack cannot work without.
 const REQUIRED_EXTENSIONS: [&str; 2] = ["vector", "pg_trgm"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
-    /// Invariant holds.
     Ok,
-    /// Degraded but serving: worth knowing, not worth failing CI.
     Warn,
-    /// Broken: retrieval is wrong, or will be.
     Fail,
 }
 
@@ -51,7 +32,6 @@ pub struct Check {
     pub name: String,
     pub status: Status,
     pub detail: String,
-    /// What to actually do about it. Only set when something is wrong.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
@@ -83,9 +63,7 @@ impl Check {
     }
 }
 
-/// Strip the password out of a Postgres URL so the report is safe to paste.
 pub fn redact_url(url: &str) -> String {
-    // postgresql://user:password@host:port/db → postgresql://user:***@host:port/db
     let Some((scheme, rest)) = url.split_once("://") else {
         return "<unparseable>".to_string();
     };
@@ -96,7 +74,6 @@ pub fn redact_url(url: &str) -> String {
     format!("{scheme}://{user}:***@{host}")
 }
 
-/// Parse the declared dimension out of a pgvector column type, e.g. `vector(384)`.
 fn parse_vector_dim(col_type: &str) -> Option<i64> {
     col_type
         .trim()
@@ -106,19 +83,10 @@ fn parse_vector_dim(col_type: &str) -> Option<i64> {
         .ok()
 }
 
-/// Live MCP processes still executing a binary older than the one on disk.
-///
-/// You rebuild, the tests pass, and nothing changes — because the MCP client
-/// spawned its server hours ago and holds the old image in memory. This is not
-/// hypothetical: it is a documented pending item in this repo's own notes
-/// ("reiniciar el cliente MCP para cargar el binario nuevo; los procesos vivos
-/// son viejos").
-///
-/// Linux-only: it reads `/proc`. Elsewhere it returns empty and the check is skipped.
 fn stale_processes() -> Vec<u32> {
     let mut stale = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return stale; // not Linux, or /proc not mounted
+        return stale;
     };
 
     for entry in entries.flatten() {
@@ -127,14 +95,9 @@ fn stale_processes() -> Vec<u32> {
         };
         let exe_link = entry.path().join("exe");
         let Ok(exe) = std::fs::read_link(&exe_link) else {
-            continue; // not ours, or no permission
+            continue;
         };
 
-        // When a running binary is replaced, Linux appends " (deleted)" to the
-        // /proc/<pid>/exe symlink — so the file NAME becomes "cuba-memorys
-        // (deleted)". Matching on the raw name therefore filtered out precisely
-        // the processes this check exists to find: the ones still executing an
-        // image that no longer exists on disk. Strip the suffix before comparing.
         let raw = exe.to_string_lossy();
         let (path, deleted) = match raw.strip_suffix(" (deleted)") {
             Some(p) => (std::path::PathBuf::from(p), true),
@@ -144,15 +107,12 @@ fn stale_processes() -> Vec<u32> {
             continue;
         }
 
-        // The binary was replaced out from under a running process: it is still
-        // serving the old code from memory.
         if deleted {
             stale.push(pid);
             continue;
         }
         let exe = path;
 
-        // mtime of /proc/<pid> approximates when the process started.
         let (Ok(bin_meta), Ok(proc_meta)) =
             (std::fs::metadata(&exe), std::fs::metadata(entry.path()))
         else {
@@ -168,11 +128,6 @@ fn stale_processes() -> Vec<u32> {
     stale
 }
 
-/// Latest version published to the npm registry. `None` on any failure — a
-/// version check must never be the reason `doctor` cannot run.
-///
-/// Shells out to curl instead of pulling in an HTTP client: this is one GET,
-/// behind an opt-in flag, and it is not worth a dependency.
 fn latest_published_version() -> Option<String> {
     let out = std::process::Command::new("curl")
         .args([
@@ -190,13 +145,17 @@ fn latest_published_version() -> Option<String> {
     json.get("version")?.as_str().map(String::from)
 }
 
-/// Run every check. Read-only: issues `SELECT`s and nothing else.
 pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     let mut checks = Vec::new();
 
+    let mode = crate::mode::active();
+    checks.push(Check::ok(
+        "mode",
+        format!("{} — {}", mode.as_str(), mode.describe()),
+    ));
+
     checks.push(Check::ok("database_url", redact_url(url)));
 
-    // --- Connectivity -------------------------------------------------------
     let t0 = Instant::now();
     match sqlx::query("SELECT 1").fetch_one(pool).await {
         Ok(_) => checks.push(Check::ok(
@@ -209,11 +168,10 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                 format!("no se pudo consultar: {e}"),
                 "verificá que el contenedor de Postgres esté arriba y que DATABASE_URL apunte a él",
             ));
-            return checks; // nothing below can run
+            return checks;
         }
     }
 
-    // --- Extensions ---------------------------------------------------------
     match sqlx::query("SELECT extname::text FROM pg_extension")
         .fetch_all(pool)
         .await
@@ -242,7 +200,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Migrations ---------------------------------------------------------
     match sqlx::query(
         "SELECT count(*)::bigint AS total, count(*) FILTER (WHERE NOT success)::bigint AS dirty
          FROM _sqlx_migrations",
@@ -273,7 +230,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Schema shape -------------------------------------------------------
     match sqlx::query(
         "SELECT count(*)::bigint FROM information_schema.tables
          WHERE table_schema='public' AND table_name LIKE 'brain%'",
@@ -300,7 +256,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Bug #1: the OR-tsquery function (silent zero recall without it) -----
     match sqlx::query("SELECT count(*)::bigint FROM pg_proc WHERE proname='cuba_or_tsquery'")
         .fetch_one(pool)
         .await
@@ -325,7 +280,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Bug #2: the vector branch dies silently without a model ------------
     let model = onnx::current_model();
     if onnx::is_model_loaded() {
         checks.push(Check::ok("onnx_model", format!("cargado ({model})")));
@@ -339,10 +293,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
-    // --- The reranker: loaded, or silently the identity function? ---------------
-    // It spent its entire life running as identity, and nobody knew because nothing
-    // reported it. `doctor` reports it now — a reranker that is not loaded is not an
-    // error (it is optional), but it must never be an invisible one.
     if crate::search::rerank::enabled() {
         checks.push(Check::ok(
             "reranker",
@@ -357,7 +307,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
-    // --- The verifier: is entailment decided locally, or by a 20 s round-trip? ---
     if crate::cognitive::nli::available() {
         if crate::cognitive::nli::enabled() {
             checks.push(Check::ok(
@@ -381,7 +330,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         ));
     }
 
-    // --- Dimension agreement: model vs column (breaks everything if off) ----
     let runtime_dim = onnx::embedding_dim() as i64;
     match sqlx::query(
         "SELECT format_type(atttypid, atttypmod)::text FROM pg_attribute
@@ -417,7 +365,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Coverage: observations with no vector are invisible to dense search -
     match sqlx::query(
         "SELECT count(*)::bigint AS total,
                 count(*) FILTER (WHERE embedding IS NULL)::bigint AS missing,
@@ -448,7 +395,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         Err(e) => checks.push(Check::warn("embedding_coverage", format!("no verificable: {e}"), "revisar esquema")),
     }
 
-    // --- Bitemporal invariant (migration 0029 enforces it; check it holds) --
     match sqlx::query(
         "SELECT count(*)::bigint FROM brain_facts
          WHERE valid_to IS NOT NULL AND valid_to <= valid_from",
@@ -475,7 +421,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- The decay anchor (without it, REM re-applies decay 10-80×) ---------
     match sqlx::query(
         "SELECT count(*)::bigint FROM information_schema.columns
          WHERE table_name='brain_observations' AND column_name='last_decayed_at'",
@@ -506,7 +451,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Bug 0.7: superuser makes RLS and the audit log decorative ----------
     match sqlx::query(
         "SELECT current_user::text AS usr,
                 COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false) AS super",
@@ -532,7 +476,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         Err(e) => checks.push(Check::warn("runtime_role", format!("no verificable: {e}"), "revisar permisos")),
     }
 
-    // --- Corpus size (context, not a verdict) -------------------------------
     match sqlx::query(
         "SELECT (SELECT count(*) FROM brain_observations)::bigint AS obs,
                 (SELECT count(*) FROM brain_entities)::bigint AS ent,
@@ -559,7 +502,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Isolated entities: unreachable by multi-hop and by PageRank --------
     match sqlx::query(
         "SELECT count(*)::bigint AS isolated, (SELECT count(*) FROM brain_entities)::bigint AS total
          FROM brain_entities e
@@ -594,7 +536,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         )),
     }
 
-    // --- Live processes running yesterday's binary --------------------------
     let stale = stale_processes();
     if stale.is_empty() {
         checks.push(Check::ok(
@@ -618,7 +559,6 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     checks
 }
 
-/// CLI entry point. Exits non-zero when any check fails.
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let json = args.iter().any(|a| a == "--json");
     let check_updates = args.iter().any(|a| a == "--check-updates");
@@ -641,8 +581,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 
     let mut checks = run_checks(&pool, &url).await;
 
-    // Opt-in, and deliberately never automatic: an update check that installs
-    // things is a supply chain, not a diagnostic.
     if check_updates {
         let current = env!("CARGO_PKG_VERSION");
         match latest_published_version() {
@@ -722,10 +660,6 @@ mod tests {
 
     #[test]
     fn a_replaced_binary_is_recognized_despite_the_deleted_suffix() {
-        // Linux appends " (deleted)" to /proc/<pid>/exe when the running image is
-        // replaced. Matching the raw file name against "cuba-memorys" therefore
-        // filtered out exactly the processes this check exists to find — it
-        // reported "no stale processes" while six were running the old code.
         let raw = "/home/x/rust/target/release/cuba-memorys (deleted)";
         let (path, deleted) = match raw.strip_suffix(" (deleted)") {
             Some(p) => (std::path::PathBuf::from(p), true),
@@ -737,7 +671,6 @@ mod tests {
             Some("cuba-memorys")
         );
 
-        // A live binary parses unchanged.
         let live = "/home/x/rust/target/release/cuba-memorys";
         assert!(live.strip_suffix(" (deleted)").is_none());
     }

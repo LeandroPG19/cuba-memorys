@@ -1,95 +1,21 @@
-//! Cross-encoder reranker — bge-reranker-v2-m3 (Xiao 2023).
-//!
-//! # It had never run. Not once.
-//!
-//! This file used to open with a confident postmortem: *"measured, and it does NOT
-//! earn its place"*, *"the eval did not move: nDCG@10 stayed at 0.7344, bit for
-//! bit"*. Every word of that was true and the conclusion drawn from it was wrong.
-//! The eval did not move because **the reranker never produced a single score**.
-//!
-//! Three bugs, in series, each one hiding the next:
-//!
-//! 1. **`faro` wrapped the call in `if let Ok(..)`.** Any error was dropped and the
-//!    RRF ranking returned untouched — the same silent-degradation pattern that let
-//!    the vector branch die unnoticed. This is why the output was "bit for bit
-//!    identical": not because reranking changed nothing, but because it never
-//!    happened.
-//!
-//! 2. **It fed the model `token_type_ids`.** bge-reranker-v2-m3 is **XLM-RoBERTa**,
-//!    which has no segment embeddings; `token_type_ids` is a BERT input. Every
-//!    inference threw `Invalid input name: token_type_ids`.
-//!
-//! 3. **It read the logits as `f32`.** The checkpoint emits `f16`. Once bug 2 was
-//!    fixed, this one surfaced immediately: `Cannot extract Tensor<f32> from
-//!    Tensor<f16>`.
-//!
-//! Two of these were architectural mismatches that would have been obvious from one
-//! error message. Nobody saw the error message, because bug 1 ate it.
-//!
-//! The earlier note also blamed `score * 0.0001` — a "tiebreaker" smaller than the
-//! smallest gap between consecutive RRF scores (0.00016–0.00219), which indeed could
-//! never reorder anything. That was real, and fixing it was necessary. It was just
-//! not sufficient, and fixing it while the inference still threw produced a "measured
-//! result" of exactly zero: the number you get from a model that is not running.
-//!
-//! The cross-encoder now REPLACES the fusion score, which is the premise of
-//! retrieve-then-rerank: RRF is the recall stage, the cross-encoder is the precision
-//! stage, and it is the stronger signal because it reads the query and the document
-//! together instead of scoring them apart.
-//!
-//! Real ONNX forward pass via the `ort` crate (already used by
-//! `embeddings::onnx`). Activated when `CUBA_RERANKER_PATH` points to a
-//! directory containing `model.onnx` (or `model_quantized.onnx`) plus
-//! `tokenizer.json`. Identity fallback when not configured.
-//!
-//! ## Architecture
-//!
-//! bge-reranker is a cross-encoder: it tokenizes the [CLS] + query +
-//! [SEP] + passage + [SEP] sentence pair and emits a single relevance
-//! logit per pair. We sigmoid the logit to a [0, 1] score and sort
-//! descending. One forward pass per (query, candidate) pair — typically
-//! 50 candidates × ~10 ms each on CPU = ~500 ms latency, paid only when
-//! the user opts into reranking via `cuba_faro rerank=true`.
-//!
-//! ## Pipeline used by `cuba_faro`
-//!
-//!   top-50 from RRF → rerank() → top-K returned to client
-//!
-//! Expected gain: +12-25% nDCG@10 over RRF alone (Xiao 2023).
-//!
-//! ## Threading
-//!
-//! Same pattern as `embeddings::onnx`: shared `Session` behind a `Mutex`,
-//! forward passes wrapped in `tokio::task::spawn_blocking`, semaphore caps
-//! concurrent inference at 2 to match `with_intra_threads(2)` (Little's
-//! Law — prevents threadpool starvation under load).
-
 use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// Resolved once at startup. `None` = reranker disabled (identity).
 static RERANKER_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Reranker model status — loaded only after a successful init.
 static RERANKER_STATUS: OnceLock<RerankerStatus> = OnceLock::new();
 
-/// ONNX session (Mutex because `Session::run` requires `&mut self`).
 static RERANKER_SESSION: OnceLock<std::sync::Mutex<Session>> = OnceLock::new();
 
-/// Tokenizer for the reranker.
 static RERANKER_TOKENIZER: OnceLock<tokenizers::Tokenizer> = OnceLock::new();
 
-/// Concurrency cap mirroring the embeddings semaphore. Same Little's Law
-/// reasoning: prevent spawn_blocking pool starvation.
 static RERANKER_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
 enum RerankerStatus {
-    /// Real ONNX cross-encoder loaded.
     Loaded,
-    /// No model — identity fallback.
     Fallback,
 }
 
@@ -97,8 +23,6 @@ fn semaphore() -> &'static tokio::sync::Semaphore {
     RERANKER_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(2))
 }
 
-/// Returns true if `CUBA_RERANKER_PATH` points to a valid model directory.
-/// Lazy — does the resolution exactly once per process.
 pub fn enabled() -> bool {
     matches!(get_status(), RerankerStatus::Loaded)
 }
@@ -106,12 +30,6 @@ pub fn enabled() -> bool {
 fn get_status() -> &'static RerankerStatus {
     RERANKER_STATUS.get_or_init(|| {
         let path = RERANKER_PATH.get_or_init(|| {
-            // Explicit path wins. But when it is unset — which is the default, because
-            // nothing writes it — fall back to the cache directory the download script
-            // populates. Without this, the model can be sitting on disk and the
-            // reranker still runs as identity: the same silent gap that kept it from
-            // ever running, one layer up. A model nobody can point the binary at is a
-            // model that does not exist.
             if let Some(p) = std::env::var("CUBA_RERANKER_PATH")
                 .ok()
                 .map(PathBuf::from)
@@ -140,10 +58,7 @@ fn get_status() -> &'static RerankerStatus {
     })
 }
 
-/// Initialize the ONNX session and tokenizer from the model directory.
-/// Mirrors the loader in `embeddings::onnx::init_onnx_session`.
 fn init_session(model_dir: &std::path::Path) -> Result<()> {
-    // Pick model file: prefer quantized, fall back to plain `model.onnx`.
     let candidates = ["model_quantized.onnx", "model.onnx"];
     let model_file = candidates
         .iter()
@@ -189,11 +104,6 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Re-rank `candidates` against `query`. Returns `(index, score)` pairs
-/// sorted by score descending.
-///
-/// When the reranker is disabled (no model loaded), returns identity
-/// pairs preserving the upstream RRF order — production transparent.
 pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)>> {
     if !enabled() {
         return Ok(identity_pairs(candidates.len()));
@@ -202,11 +112,9 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
         return Ok(Vec::new());
     }
 
-    // Move owned strings into the blocking task — avoids lifetime grief.
     let query_owned = query.to_string();
     let candidates_owned: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
 
-    // Cap concurrent inference (Little's Law).
     let _permit = semaphore()
         .acquire()
         .await
@@ -221,15 +129,6 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
     Ok(indexed)
 }
 
-/// CPU-bound scoring. All (query, candidate) pairs go through the model in ONE batched
-/// forward pass, and each yields a single relevance logit, sigmoided to [0, 1].
-///
-/// It used to be one inference per candidate — a `session.run` per pair, behind the
-/// session Mutex, so 50 candidates meant 50 serialized passes. Measured, that was ~15 s
-/// for a single search: unusable to turn on by default, even though the reranker earns
-/// +92% nDCG (0.28→0.53, paired bootstrap). Batching turns those 50 locked passes into
-/// one and lets ORT fill the GEMM instead of trickling rows through it. Same lesson,
-/// same fix as `cognitive::nli::classify_batch`.
 fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -244,16 +143,12 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         .get()
         .context("reranker tokenizer not initialized")?;
 
-    // Each pair is `[CLS] query [SEP] candidate [SEP]`. encode_batch keeps the [SEP]
-    // and segment handling the tokenizer already gets right.
     let pairs: Vec<(&str, &str)> = candidates.iter().map(|c| (query, c.as_str())).collect();
     let encodings = tokenizer
         .encode_batch(pairs, true)
         .map_err(|e| anyhow::anyhow!("encode batch: {e}"))?;
 
     let batch = encodings.len();
-    // Pad to the longest pair in THIS batch, not the model's max — a batch of short
-    // candidates stays cheap; only one that needs the length pays for it.
     let seq = encodings
         .iter()
         .map(|e| e.get_ids().len())
@@ -266,8 +161,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     for e in &encodings {
         let (e_ids, e_mask, e_types) = (e.get_ids(), e.get_attention_mask(), e.get_type_ids());
         for i in 0..seq {
-            // Past this pair's end: padding, and the attention mask says so, so the
-            // model never reads a shorter candidate's tail as content.
             ids.push(*e_ids.get(i).unwrap_or(&0) as i64);
             mask.push(*e_mask.get(i).unwrap_or(&0) as i64);
             types.push(*e_types.get(i).unwrap_or(&0) as i64);
@@ -280,10 +173,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     let attn_t =
         ort::value::Tensor::from_array((shape.clone(), mask)).context("attention_mask tensor")?;
 
-    // Ask the model what it takes. bge-reranker-v2-m3 is XLM-RoBERTa and has no
-    // `token_type_ids`; feeding them (as the pre-fix code did, unconditionally) made
-    // every inference throw `Invalid input name` — invisibly, behind a swallowed error,
-    // which is how the reranker "ran" for a release without producing one score.
     let wants_type_ids = session
         .inputs()
         .iter()
@@ -309,8 +198,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         anyhow::bail!("reranker returned no outputs");
     }
 
-    // f32 or f16 depending on the export — asking only for f32 threw on the half-
-    // precision checkpoint, silently, for the reranker's entire prior life.
     let (out_shape, data): (Vec<i64>, Vec<f32>) = match outputs[0].try_extract_tensor::<f32>() {
         Ok((s, d)) => (s.to_vec(), d.to_vec()),
         Err(_) => {
@@ -321,8 +208,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         }
     };
 
-    // Output is [batch, num_labels]: one row per candidate. num_labels is 1 (a single
-    // relevance logit) or 2 (binary head → log-odds of the positive class).
     let num_labels = out_shape.last().copied().unwrap_or(1).max(1) as usize;
     if data.len() < batch * num_labels {
         anyhow::bail!(
@@ -338,10 +223,10 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         let row = &data[b * num_labels..(b + 1) * num_labels];
         let logit = match num_labels {
             1 => row[0],
-            2 => row[1] - row[0], // log-odds of relevance
+            2 => row[1] - row[0],
             _ => row[0],
         };
-        scores.push(1.0_f64 / (1.0 + (-logit as f64).exp())); // sigmoid → [0,1]
+        scores.push(1.0_f64 / (1.0 + (-logit as f64).exp()));
     }
     Ok(scores)
 }
@@ -356,17 +241,12 @@ mod tests {
 
     #[tokio::test]
     async fn identity_when_disabled() {
-        // Skip when a model is present — since the cache fallback, `enabled()` is true
-        // wherever the reranker is installed, and calling `rerank()` there would load a
-        // 1.1 GB model just to not assert anything. The identity contract only applies
-        // when the reranker is off, so only exercise it then.
         if enabled() {
             eprintln!("SKIP: reranker model present; identity path not exercised");
             return;
         }
         let pairs = rerank("anything", &["a", "b", "c"]).await.unwrap();
         assert_eq!(pairs.len(), 3);
-        // Identity preserves order.
         assert_eq!(pairs[0].0, 0);
         assert!(pairs[0].1 > pairs[1].1);
     }

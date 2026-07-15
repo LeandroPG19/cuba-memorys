@@ -1,13 +1,3 @@
-//! `cuba_docs` — read a library's real documentation instead of remembering it wrong.
-//!
-//! This is the one capability worth keeping from cuba-search, and it exists for a
-//! failure this project has hit repeatedly: a model confidently writing an API that was
-//! renamed two versions ago. A memory server can tell you what *you* decided; it cannot
-//! tell you what `tokio::spawn` signature shipped last month. This can.
-//!
-//! It is behind the `docs` Cargo feature, and every request goes through
-//! [`crate::net::guard`]. cuba-memorys makes no outbound requests without both.
-
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::sync::{Mutex, OnceLock};
@@ -15,42 +5,21 @@ use std::sync::{Mutex, OnceLock};
 use crate::net::fetch;
 use crate::search::cache::TtlLruCache;
 
-/// Is the tool switched on? Default: **no**.
-///
-/// The Cargo feature was supposed to be the whole switch, and it was not enough. The
-/// published binaries are the default build, so a feature that is off by default is a
-/// feature that ships to nobody: `cuba_docs` existed for exactly one release and could
-/// not be invoked by a single person who installed from npm or PyPI. Compiling it in
-/// and *advertising* it conditionally is the version that both works and keeps the
-/// promise — with `CUBA_DOCS` unset the tool is not in the catalogue, the dispatcher
-/// refuses it, and this server makes no outbound request of any kind.
 pub fn enabled() -> bool {
-    std::env::var("CUBA_DOCS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::mode::env_toggle("CUBA_DOCS").unwrap_or_else(|| crate::mode::active().docs_default())
 }
 
-/// Documentation is not a memory: it is fetched, read once, and worth keeping for the
-/// rest of the session rather than re-fetched for every follow-up question.
 static DOC_CACHE: OnceLock<Mutex<TtlLruCache<String>>> = OnceLock::new();
 
 fn cache() -> &'static Mutex<TtlLruCache<String>> {
     DOC_CACHE.get_or_init(|| Mutex::new(TtlLruCache::new()))
 }
 
-/// Where a library's documentation actually lives.
-///
-/// Guessing a URL from a name is how you end up scraping a squatted domain, so the
-/// mapping is explicit for the ecosystems whose layout is predictable, and refuses
-/// otherwise. A wrong answer here is worse than no answer: it is a *confident* wrong
-/// answer, fetched over the network, that the caller has no reason to doubt.
 fn resolve(library: &str) -> Result<String> {
     let lib = library.trim().to_lowercase();
     if lib.is_empty() {
         anyhow::bail!("¿documentación de qué? `library` está vacío");
     }
-    // Names come from a model, and a model will eventually pass a URL, a path, or a
-    // sentence. Only a package name is a package name.
     if !lib
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -61,10 +30,7 @@ fn resolve(library: &str) -> Result<String> {
         );
     }
 
-    // docs.rs renders every published Rust crate at a predictable path, which is why
-    // Rust gets a rule and the rest get a list.
     Ok(match lib.as_str() {
-        // Python
         "fastapi" => "https://fastapi.tiangolo.com/".into(),
         "pydantic" => "https://docs.pydantic.dev/latest/".into(),
         "sqlalchemy" => "https://docs.sqlalchemy.org/en/20/".into(),
@@ -72,20 +38,15 @@ fn resolve(library: &str) -> Result<String> {
         "pytest" => "https://docs.pytest.org/en/stable/".into(),
         "structlog" => "https://www.structlog.org/en/stable/".into(),
         "granian" => "https://github.com/emmett-framework/granian".into(),
-        // JS/TS
         "react" => "https://react.dev/reference/react".into(),
         "next" | "nextjs" | "next.js" => "https://nextjs.org/docs".into(),
         "zod" => "https://zod.dev/".into(),
         "zustand" => "https://zustand.docs.pmnd.rs/".into(),
         "tailwind" | "tailwindcss" => "https://tailwindcss.com/docs".into(),
         "vitest" => "https://vitest.dev/guide/".into(),
-        // Infra
         "postgresql" | "postgres" => "https://www.postgresql.org/docs/current/".into(),
         "pgvector" => "https://github.com/pgvector/pgvector".into(),
         "docker" => "https://docs.docker.com/".into(),
-        // Anything else: assume a Rust crate. Wrong for a Python package that shares a
-        // name with one, and docs.rs answers 404 for a crate that does not exist —
-        // both of which are visible failures, not silent ones.
         other => format!(
             "https://docs.rs/{other}/latest/{}/",
             other.replace('-', "_")
@@ -93,12 +54,6 @@ fn resolve(library: &str) -> Result<String> {
     })
 }
 
-/// Fetch and flatten a library's documentation.
-///
-/// `query` does not search the site — it filters the fetched text to the paragraphs
-/// that mention it, which is the difference between handing a model 400 KB of
-/// navigation chrome and handing it the three paragraphs about the function it asked
-/// about.
 pub async fn handle(args: &Value) -> Result<Value> {
     if !enabled() {
         anyhow::bail!(
@@ -140,9 +95,6 @@ pub async fn handle(args: &Value) -> Result<Value> {
         q => {
             let hits = grep(&text, q);
             if hits.is_empty() {
-                // Say that the filter found nothing, rather than returning the whole
-                // page as if it had. A model handed 8 KB of unrelated docs will find
-                // something in them.
                 return Ok(json!({
                     "library": library,
                     "url": url,
@@ -169,8 +121,6 @@ pub async fn handle(args: &Value) -> Result<Value> {
     }))
 }
 
-/// Paragraphs mentioning the query, with the one before and after for context — a
-/// signature is useless without the sentence that says what it does.
 fn grep(text: &str, query: &str) -> String {
     let needle = query.to_lowercase();
     let paras: Vec<&str> = text.split("\n\n").collect();
@@ -207,7 +157,6 @@ mod tests {
             resolve("tokio").unwrap(),
             "https://docs.rs/tokio/latest/tokio/"
         );
-        // El guion del paquete es un guion bajo en el nombre del módulo.
         assert_eq!(
             resolve("tiktoken-rs").unwrap(),
             "https://docs.rs/tiktoken-rs/latest/tiktoken_rs/"
@@ -220,16 +169,8 @@ mod tests {
         assert!(resolve("React").unwrap().contains("react.dev"));
     }
 
-    /// The switch is OFF unless someone reaches for it.
-    ///
-    /// This is the guarantee: with `CUBA_DOCS` unset, the only tool in cuba-memorys
-    /// that can leave the machine is neither advertised nor dispatchable, so the server
-    /// makes no outbound request at all. v0.13.0 tried to make the Cargo feature carry
-    /// that promise and it carried too much — the published binaries are the default
-    /// build, so the tool shipped to nobody.
     #[test]
     fn the_network_is_off_unless_asked_for() {
-        // No env var in the test process, so this is the shipped default.
         assert!(
             !enabled(),
             "CUBA_DOCS no está puesto: cuba_docs DEBE estar apagado"
@@ -247,8 +188,6 @@ mod tests {
         );
     }
 
-    /// A model WILL eventually pass a URL here, and that URL must not become a fetch
-    /// target that skipped the name check.
     #[test]
     fn a_url_is_not_a_package_name() {
         for bad in [

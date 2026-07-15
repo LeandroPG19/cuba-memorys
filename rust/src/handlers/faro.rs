@@ -1,13 +1,3 @@
-//! Handler: cuba_faro — Hybrid search with RRF fusion.
-//!
-//! FIX B2: embed() runs in spawn_blocking (not blocking event loop).
-//! §A: Weighted RRF Entropy Routing — dynamic weight based on query entropy.
-//! V8: Graceful degradation — if vector search fails, fallback to text.
-//! VF2: Testing Effect — search matches update access tracking.
-//! V4-RRF: k=60 constant (Cormack 2009) — removed adaptive instability.
-//! V10: importance integrated into SQL score (score*0.7 + importance*0.3).
-//!      Activates the cognitive pipeline — PageRank/Hebbian/decay now affect ranking.
-
 use crate::cognitive::dual_strength;
 use crate::search::confidence as grounding;
 use anyhow::Result;
@@ -20,9 +10,6 @@ const MAX_LIMIT: i64 = 50;
 const DEFAULT_MAX_TOKENS: i64 = 5000;
 const GRAPHRAG_TOP_K: usize = 3;
 
-/// V0.6: Score breakdown — tracks individual RRF components per result.
-/// V0.9: Clone added so MMR can reorder without re-running the fusion.
-/// V0.9: bm25_score field added for 3-way RRF (text + vector + bm25).
 #[derive(Clone)]
 struct FusedResult {
     text_score: f64,
@@ -55,41 +42,27 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_i64())
         .unwrap_or(DEFAULT_MAX_TOKENS);
 
-    // Compact is the default: abbreviated keys cost 798 tokens for limit=10 where
-    // verbose costs 2787 — measured, not estimated (the old comment claimed ~35%;
-    // it is 71%). Every session pays this on every search, so the cheap shape is
-    // the one that should need no opt-in. Callers that need the full keys —
-    // the CLI renderer, chiefly — ask for `verbose` explicitly.
     let format = args
         .get("format")
         .and_then(|v| v.as_str())
         .unwrap_or("compact");
 
-    // V0.6: Tag filter
     let tag_filter = args.get("tags").and_then(|v| v.as_str());
 
-    // The Testing Effect write (dual_strength::on_search_match) boosts the
-    // importance/access of matched observations. Callers that must NOT mutate —
-    // the eval harness above all, which would otherwise skew the very rankings
-    // it measures — pass track_access=false. Default true (normal search).
     let track_access = args
         .get("track_access")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    // v0.11: associative multi-hop expansion (opt-in; default off).
     let associative = args
         .get("associative")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Temporal filters (ISO8601 strings)
     let before = args.get("before").and_then(|v| v.as_str());
     let after = args.get("after").and_then(|v| v.as_str());
     let time_bounds = parse_time_bounds(before, after);
 
-    // V0.9: MMR diversification (Carbonell-Goldstein 1998).
-    // diversify=true reorders top-K to penalize near-duplicates.
     let diversify = args
         .get("diversify")
         .and_then(|v| v.as_bool())
@@ -99,39 +72,26 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_f64())
         .unwrap_or(crate::search::mmr::DEFAULT_LAMBDA);
 
-    // V0.9: OOD abstention via Mahalanobis (Lee NeurIPS 2018).
-    // abstain_ood=true triggers early return when query is far from the
-    // active embedding distribution. Default false to preserve v0.8 behavior.
     let abstain_ood = args
         .get("abstain_ood")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // None => derive from the embedding dimension inside check_ood, since a
-    // sane Mahalanobis cutoff scales as sqrt(d). See search::ood::default_threshold.
     let ood_threshold = args.get("ood_threshold").and_then(|v| v.as_f64());
 
-    // V0.9: BM25 (ts_rank_cd) as third RRF signal. Default true — gives
-    // +8-15% recall on queries with rare entity names / specific errors.
     let enable_bm25 = args
         .get("enable_bm25")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    // V0.9.2: cross-encoder rerank pass over top-50 RRF candidates.
-    // Auto-enabled when CUBA_RERANKER_PATH points to a valid bge-reranker
-    // ONNX. Identity fallback otherwise (no perf cost). Argument override
-    // lets callers force off even when env is set.
     let enable_rerank = args
         .get("rerank")
         .and_then(|v| v.as_bool())
-        .unwrap_or_else(crate::search::rerank::enabled);
+        .unwrap_or_else(|| {
+            crate::mode::active().rerank_default() && crate::search::rerank::enabled()
+        });
 
-    // V0.8: Resolve current project (None = no filter, see project::current_project_id)
     let project_id = crate::project::current_project_id(pool).await?;
 
-    // V0.9: OOD pre-check (when requested). On a warm cache this is a single
-    // O(d²) matrix-vector product on μ, Σ⁻¹ — no DB round-trip. A cold cache
-    // pays one bounded fit (<=500 rows) before short-circuiting the search.
     if abstain_ood
         && mode == "hybrid"
         && let Some(answer) = check_ood(pool, query, ood_threshold, project_id).await
@@ -162,13 +122,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-/// Parsed temporal bounds for search filtering.
 struct TimeBounds {
     after: chrono::DateTime<chrono::Utc>,
     before: chrono::DateTime<chrono::Utc>,
 }
 
-/// Parse optional before/after ISO8601 strings into DateTime bounds.
 fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> TimeBounds {
     let after_ts = after
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
@@ -184,7 +142,6 @@ fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> TimeBounds {
     }
 }
 
-/// Search options for hybrid search.
 struct SearchOpts<'a> {
     scope: &'a str,
     limit: i64,
@@ -192,36 +149,20 @@ struct SearchOpts<'a> {
     time_bounds: TimeBounds,
     format: &'a str,
     tag_filter: Option<&'a str>,
-    /// V0.8: project scoping. None = no filter (legacy behavior).
     project_id: Option<uuid::Uuid>,
-    /// V0.9: when true, post-RRF results pass through MMR diversification.
     diversify: bool,
-    /// V0.9: MMR balance — 1.0 = pure relevance, 0.0 = pure diversity. Default 0.7.
     mmr_lambda: f64,
-    /// V0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector.
     enable_bm25: bool,
-    /// V0.9.2: cross-encoder rerank top-N pre-MMR. Identity when reranker
-    /// asset (CUBA_RERANKER_PATH) is missing — production transparent.
     enable_rerank: bool,
-    /// When false, skip the Testing Effect write (eval harness). Default true.
     track_access: bool,
-    /// v0.11: associative expansion. Seeds spreading activation from
-    /// query-matched entities and pulls in observations on graph-connected
-    /// entities that no lexical/vector signal surfaced (multi-hop recall,
-    /// HippoRAG-style). Additive and opt-in — default false leaves the
-    /// production ranking untouched.
     associative: bool,
 }
 
-/// §A V2: Weighted RRF Entropy Routing — 3 ranges (Elastic 2025).
 async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Result<Value> {
-    // §A V2: 3-range entropy routing (keyword / mixed / semantic)
     let query_entropy = crate::search::rrf::query_entropy(query);
     let (text_weight, vector_weight) = entropy_weights(query_entropy);
-    // BM25 weight tracks text channel (Jaynes routing extension — keyword-heavy queries).
     let bm25_weight = text_weight;
 
-    // Run text search (always available — V8 graceful degradation base)
     let mut text_results = text_search(
         pool,
         query,
@@ -232,8 +173,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     )
     .await?;
 
-    // V0.6: Tag filter — if specified, run additional tag-based query and merge
-    // V0.8: tag query also scoped by project (transparent if None)
     if let Some(tag) = opts.tag_filter {
         let tagged_obs: Vec<(uuid::Uuid, String, String, String, f64, f64)> = sqlx::query_as(
             "SELECT o.id, e.name, o.content, o.observation_type, o.importance::float8,
@@ -254,7 +193,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         .unwrap_or_default();
 
         for (id, entity_name, content, obs_type, importance, score) in tagged_obs {
-            // Avoid duplicates
             let id_str = id.to_string();
             if !text_results
                 .iter()
@@ -274,7 +212,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
     }
 
-    // Run vector search (may fail gracefully — V8)
     let vector_results = vector_search(
         pool,
         query,
@@ -285,13 +222,10 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     )
     .await;
 
-    // V4: Fixed k=60 (Cormack 2009 consensus — eliminates non-monotonic instability)
-    // Use the canonical constant from rrf.rs to avoid drift if the value ever changes.
     let rrf_k = crate::search::rrf::RRF_K;
 
     let mut fused_scores: HashMap<String, FusedResult> = HashMap::new();
 
-    // Add text results with RRF rank score
     for (rank, result) in text_results.iter().enumerate() {
         let id = result
             .get("id")
@@ -312,19 +246,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         );
     }
 
-    // A failure in the vector branch is NOT cosmetic. When it fails, the hybrid
-    // search quietly becomes a lexical search: every query still returns ten
-    // confident-looking rows, recall collapses, and nothing in the response says
-    // a word about it.
-    //
-    // This `if let Ok` used to discard the error outright — no log, no flag. That
-    // is precisely how the v0.10 "dead vector branch" bug survived in production:
-    // the answers looked normal. It resurfaced the moment the embedding dimension
-    // changed under a running server (384-d model, 1024-d column): pgvector
-    // rejected every comparison, the error was swallowed here, and the MCP served
-    // lexical-only results while the CLI — same code, right dimension — was fine.
-    //
-    // Now it is loud, and the caller is told.
     let vector_failed = match &vector_results {
         Ok(_) => false,
         Err(e) => {
@@ -363,10 +284,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
     }
 
-    // V0.9: BM25 (ts_rank_cd) as third RRF signal — opt-out via enable_bm25=false.
-    // Weight = 1.0 (uniform with the other two; entropy_weights only balances
-    // text vs vector). Catches queries with rare terms / specific entity names
-    // that dense embeddings miss.
     if opts.enable_bm25 {
         let bm25_results = crate::search::bm25::bm25_search(
             pool,
@@ -401,27 +318,10 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
     }
 
-    // v0.11: associative expansion (opt-in). Seed spreading activation from the
-    // entities that match the query, then pull in observations on graph-connected
-    // entities that no lexical/vector/bm25 signal surfaced. Strictly additive:
-    // only inserts ids not already present, so the base ranking cannot regress.
     if opts.associative {
         associative_expand(pool, query, opts.project_id, &mut fused_scores).await;
     }
 
-    // Sort by fused score, breaking ties by id.
-    //
-    // The tie-break is not cosmetic. `fused_scores` is a HashMap, and Rust
-    // randomizes its iteration order per process; `sort_by` is stable, so
-    // equal-scoring rows kept whatever order the HashMap happened to produce.
-    // Two runs of the same query therefore returned the same documents in a
-    // different order, and the benchmark scored 0.7389 / 0.7344 / 0.7389 on
-    // three identical runs. A benchmark that cannot reproduce itself cannot
-    // measure an improvement smaller than its own noise — every number in this
-    // repo's optimization history was resting on that.
-    //
-    // rrf::fuse already did this correctly. This pipeline is a second, parallel
-    // fusion path that never got the fix.
     let mut results: Vec<(String, FusedResult)> = fused_scores.into_iter().collect();
     results.sort_by(|a, b| {
         b.1.total
@@ -430,7 +330,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             .then_with(|| a.0.cmp(&b.0))
     });
 
-    // Post-fusion dedup (Cormack RRF + lexical overlap — same as rrf::fuse).
     const FUSION_DEDUP: f64 = 0.85;
     let mut deduped: Vec<(String, FusedResult)> = Vec::with_capacity(results.len());
     for (id, fr) in results {
@@ -453,10 +352,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     }
     results = deduped;
 
-    // V0.9: defer truncation. With diversify=true we need a wider pool
-    // (up to limit*2) so MMR has candidates to choose from. With rerank
-    // enabled we keep top-50 so the cross-encoder has enough signal.
-    // Truncation to opts.limit happens after session boost + rerank + MMR.
     let pool_size = if opts.enable_rerank {
         50.min(results.len())
     } else if opts.diversify {
@@ -466,9 +361,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     };
     results.truncate(pool_size);
 
-    // V0.9.2: cross-encoder rerank pass. Reorders results in place; MMR
-    // runs after this so diversification operates on the better-ranked
-    // candidates. Identity fallback when reranker is not configured.
     let mut reranker_failed = false;
     if opts.enable_rerank && results.len() > 1 {
         let contents: Vec<&str> = results
@@ -481,45 +373,29 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .unwrap_or("")
             })
             .collect();
-        // Only let the cross-encoder speak when there is a cross-encoder. With no
-        // model loaded, `rerank` returns identity pairs whose scores are the
-        // descending index (n, n-1, …); writing those into `total` would preserve
-        // the order but destroy the fusion scores the caller reads.
         let have_model = crate::search::rerank::enabled();
 
-        // A failing reranker used to be an `if let Ok(..)` — the error dropped, the
-        // ranking left untouched, and not one word said about it. That is the same
-        // bug the vector branch had, and it produced the same lie: the model loaded,
-        // 0.33 s per query was spent, and the output was bit-for-bit identical to not
-        // running it at all. Which is how this project concluded, and published, that
-        // "the cross-encoder reranker earns nothing" — a feature cannot earn anything
-        // when its results are thrown away.
-        // Time-box the cross-encoder. bge-reranker-v2-m3 is XLM-RoBERTa-large, and on
-        // CPU it can spend tens of seconds on 50 candidates — past the 30 s handler
-        // timeout, which would fail the whole search rather than the reranker alone. So
-        // it gets a budget, and when it blows it, the search returns the RRF ranking
-        // (recall stage) instead of hanging: on fast hardware or a GPU the reranker
-        // runs and earns its +92% nDCG; on slow hardware the query still answers.
         let rerank_budget = std::time::Duration::from_secs(
             std::env::var("CUBA_RERANK_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(20),
         );
-        let rerank_result =
-            match tokio::time::timeout(rerank_budget, crate::search::rerank::rerank(query, &contents))
-                .await
-            {
-                Ok(inner) => inner,
-                Err(_) => {
-                    tracing::warn!(
-                        secs = rerank_budget.as_secs(),
-                        "el reranker excedió su presupuesto — se devuelve el ranking RRF \
-                         (subí CUBA_RERANK_TIMEOUT_SECS o usá un modelo más chico/GPU)"
-                    );
-                    Err(anyhow::anyhow!("reranker timeout"))
-                }
-            };
+        let rerank_result = match tokio::time::timeout(
+            rerank_budget,
+            crate::search::rerank::rerank(query, &contents),
+        )
+        .await
+        {
+            Ok(inner) => inner,
+            Err(_) => {
+                tracing::warn!(
+                    secs = rerank_budget.as_secs(),
+                    "reranker excedió su presupuesto — se devuelve el ranking RRF"
+                );
+                Err(anyhow::anyhow!("reranker timeout"))
+            }
+        };
         match rerank_result {
             Ok(reranked) => {
                 let original = results.clone();
@@ -528,17 +404,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .filter_map(|(idx, score)| {
                         let mut entry = original.get(idx).cloned()?;
                         if have_model {
-                            // The cross-encoder REPLACES the fusion score. That is the
-                            // entire premise of retrieve-then-rerank: RRF is the recall
-                            // stage, the cross-encoder is the precision stage, and it is
-                            // the stronger signal — it reads the query and the document
-                            // together instead of scoring them apart.
-                            //
-                            // An earlier version added `score * 0.0001` and called it a
-                            // "tiebreaker". Consecutive RRF scores on this corpus are
-                            // separated by 0.00016–0.00219, so a bump of at most 0.0001
-                            // is smaller than the SMALLEST gap: it could not reorder
-                            // anything, ever.
                             entry.1.total = score;
                         } else {
                             entry.1.total += score * 0.0001;
@@ -559,7 +424,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
     }
 
-    // VF2: Testing Effect — update access tracking on matched observations
     let matched_obs_ids: Vec<uuid::Uuid> = results
         .iter()
         .filter_map(|(_, fr)| {
@@ -577,12 +441,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         tracing::warn!(error = %e, "failed to apply Testing Effect boost");
     }
 
-    // Session awareness: check active session and boost matching results.
-    //
-    // V0.7 (Mejora 5): Word-level overlap instead of substring match.
-    // Previous `.contains()` caused false positives: goal "rust" matched
-    // "frustrated", "entrusted", "robust". Now uses tokenized word sets
-    // with proportional boost (bag-of-words model, Salton 1971).
     let session_boost = get_session_goals(pool).await.unwrap_or_default();
     if !session_boost.is_empty() {
         for (_, fr) in &mut results {
@@ -603,14 +461,13 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     let overlap = content_words.intersection(&goal_words).count();
                     if overlap > 0 {
                         let match_ratio = overlap as f64 / goal_words.len().max(1) as f64;
-                        fr.total *= 1.0 + 0.3 * match_ratio; // Up to 1.3x at full overlap
+                        fr.total *= 1.0 + 0.3 * match_ratio;
                         fr.session_boosted = true;
                         break;
                     }
                 }
             }
         }
-        // Re-sort after session boost — same deterministic tie-break as above.
         results.sort_by(|a, b| {
             b.1.total
                 .partial_cmp(&a.1.total)
@@ -619,10 +476,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         });
     }
 
-    // V0.9: MMR diversification pass.
-    // Uses Jaccard token-set similarity as a fast proxy for semantic distance
-    // between candidates — avoids re-fetching embeddings from DB. For exact
-    // semantic dedup (cross-encoder rerank), see PR #6 Phase 4.
     if opts.diversify && results.len() > 1 {
         let n = results.len();
         let relevance: Vec<f64> = results.iter().map(|(_, fr)| fr.total).collect();
@@ -664,21 +517,17 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             opts.mmr_lambda,
             opts.limit as usize,
         );
-        // Reorder results by MMR picks
         let reordered: Vec<(String, FusedResult)> = picks
             .into_iter()
             .filter_map(|i| results.get(i).cloned())
             .collect();
         results = reordered;
     } else {
-        // No diversification — just truncate to the requested limit
         results.truncate(opts.limit as usize);
     }
 
-    // GraphRAG enrichment — add degree-1 neighbors for top-K results (V9)
     let graphrag_context = enrich_graphrag(pool, &results, GRAPHRAG_TOP_K).await;
 
-    // V0.6: Score breakdown — include component scores in each result
     let results_json: Vec<Value> = results
         .iter()
         .map(|(_, fr)| {
@@ -700,16 +549,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         })
         .collect();
 
-    // Shape first, THEN budget. The order matters and used to be wrong: the
-    // budget counted each row's full `content`, and compact_result afterwards
-    // truncated that same content to 200 chars. So the caller's budget was spent
-    // counting text that was never sent — a limit=10 compact response costs 798
-    // tokens against a 5000-token budget, meaning most of what was paid for was
-    // thrown away and fewer results came back than fit.
-    //
-    // Counting the serialized row (keys, scores and all) rather than just the
-    // content also stops the JSON envelope from riding along for free: ten
-    // verbose rows carry ten copies of ~10 field names.
     use crate::search::budget::{count_tokens, truncate_to_budget};
 
     let shaped: Vec<Value> = if opts.format == "compact" {
@@ -717,7 +556,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     } else {
         results_json
     };
-    // Whichever shape we are in, this is where the text lives.
     let text_key = if opts.format == "compact" {
         "c"
     } else {
@@ -732,8 +570,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
         let row_tokens = count_tokens(&r.to_string()) as i64;
         if row_tokens > token_budget {
-            // One row alone overflows what is left: keep it, but trim its text
-            // so the response still lands inside the budget.
             let truncated: Option<String> = r
                 .get(text_key)
                 .and_then(|v| v.as_str())
@@ -756,9 +592,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         "graphrag_context": graphrag_context
     });
 
-    // Tell the caller when the answer is worse than it looks. An agent that knows
-    // its memory is degraded can say so, or retry; an agent handed a silently
-    // lexical-only top-10 will simply trust it. Silence is the bug.
     if vector_failed {
         response["degraded"] = serde_json::json!(true);
         response["degraded_reason"] = serde_json::json!(
@@ -768,11 +601,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         );
     }
 
-    // Same principle, and the same bug this feature had for its entire life: you asked
-    // for reranking, the cross-encoder threw on every pair, the error was swallowed,
-    // and you got the RRF order back looking exactly like a reranked one. Anyone
-    // measuring that would conclude the reranker changes nothing — and someone did,
-    // and wrote it in the README.
     if reranker_failed {
         response["reranker_degraded"] = serde_json::json!(true);
         response["reranker_degraded_reason"] = serde_json::json!(
@@ -785,33 +613,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
     Ok(response)
 }
 
-/// How much of an observation the compact shape keeps.
-///
-/// This is the whole trade, and it was being made blind. Abbreviating the keys
-/// saves almost nothing; the saving comes from cutting the text — and cutting
-/// the text is what costs recall, because a marker sitting at character 300 of
-/// a memory is simply not there any more, and an agent cannot use what it
-/// cannot see.
-///
-/// Swept on the Spanish ability set (n=10, e5-small), quality against cost:
-///
-/// ```text
-///   chars   tokens   nDCG@10   vs verbose
-///     200      871    0.6353   -75% cost, -13.5% quality   ← the old hard-coded value
-///     400     1271    0.6900   -64% cost,  -6.0% quality
-///     600     1580    0.7090   -55% cost,  -3.5% quality
-///    1200     2109    0.7344   -40% cost,   NO LOSS        ← the knee
-///    2000     2531    0.7344   -28% cost,   no loss
-///    full     3508    0.7344    baseline
-/// ```
-///
-/// 1200 is where the curve bends: every character past it costs context and buys
-/// nothing, and every character below it starts eating relevance. The previous
-/// default of 200 was throwing away an eighth of the retrieval quality to save
-/// tokens nobody had measured.
-///
-/// Overridable with `CUBA_COMPACT_CHARS` — re-sweep it on a different corpus
-/// rather than inheriting this number the way we inherited 200.
 fn compact_chars() -> usize {
     std::env::var("CUBA_COMPACT_CHARS")
         .ok()
@@ -820,24 +621,12 @@ fn compact_chars() -> usize {
         .unwrap_or(1200)
 }
 
-/// Transform a result into compact shape: abbreviated keys, bounded text.
 fn compact_result(r: &Value) -> Value {
     let content = r
         .get("content")
         .and_then(|v| v.as_str())
         .map(|s| crate::handlers::zafra::safe_truncate(s, compact_chars()));
     serde_json::json!({
-        // The id is NOT optional, however much it costs.
-        //
-        // compact shipped without one, and that made every result a dead end: an
-        // agent could read a memory but could not act on it. Deleting it needs the
-        // observation_id (cuba_cronica delete), reinforcing or correcting it needs
-        // the id (cuba_eco), citing it needs the id. A search result you cannot
-        // refer to is a search result you can only paraphrase.
-        //
-        // A UUID is ~36 chars — about 6% of a limit=10 response. That is the
-        // cheapest 6% in the whole payload: it is the difference between a memory
-        // the agent can use and a memory it can only look at.
         "id": r.get("id"),
         "e": r.get("entity_name").or_else(|| r.get("name")),
         "c": content,
@@ -847,27 +636,14 @@ fn compact_result(r: &Value) -> Value {
     })
 }
 
-/// Verify a claim against stored knowledge with source diversity scoring.
-///
-/// V0.7: Hybrid verification — combines trigram + embedding search (Mejora 2).
-///       Previously only used pg_trgm, missing all paraphrase matches.
-///       Also eliminates double trigram scan (Mejora 9): entity_name is now
-///       returned from the first query instead of running a second scan.
 async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>) -> Result<Value> {
     use std::collections::HashMap;
 
-    // V0.9: bump HNSW ef_search 100 → 200 for verify-mode queries.
-    // Recall@10 jumps from ~0.95 to ~0.99 (Malkov-Yashunin 2018 Fig. 11),
-    // critical when cuba_juez consumes our results downstream. SET LOCAL
-    // scopes to the current transaction-equivalent session, no leak across
-    // pool checkouts.
     sqlx::query("SET LOCAL hnsw.ef_search = 200")
         .execute(pool)
         .await
         .ok();
 
-    // 1. Trigram evidence (with entity_name — Mejora 9: eliminates second scan)
-    // V0.8: project filter applied (no-op when project_id is None)
     let trigram_evidence: Vec<(uuid::Uuid, String, f64, String, String)> = sqlx::query_as(
         "SELECT o.id, o.content, similarity(o.content, $1)::float8 AS sim,
                 o.observation_type, e.name AS entity_name
@@ -884,14 +660,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
     .fetch_all(pool)
     .await?;
 
-    // 2. Semantic evidence via embeddings (Mejora 2: catches paraphrase matches).
-    //
-    // Guard: only run when a real ONNX model is loaded. Hash-based fallback embeddings
-    // stored in the DB are not semantically meaningful, so skipping avoids false evidence.
-    //
-    // Threshold: cosine distance < 0.8 (sim > 0.2). Without a threshold, top-10 nearest
-    // regardless of distance pulls in unrelated observations that lower avg_sim and degrade
-    // the confidence score. Distance 0.8 corresponds to sim ≈ 0.2 — a weak but real signal.
     let semantic_evidence: Vec<(uuid::Uuid, String, f64, String, String)> =
         if crate::embeddings::onnx::is_model_loaded() {
             match crate::embeddings::onnx::embed(claim).await {
@@ -919,10 +687,9 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
                 }
             }
         } else {
-            vec![] // V8: graceful degradation if no ONNX model
+            vec![]
         };
 
-    // 3. Merge by ID, take max similarity per observation (Robertson 1977 fusion)
     let mut merged: HashMap<uuid::Uuid, (String, f64, String, String)> = HashMap::new();
     for (id, content, sim, obs_type, entity_name) in
         trigram_evidence.iter().chain(semantic_evidence.iter())
@@ -933,7 +700,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
             .or_insert((content.clone(), *sim, obs_type.clone(), entity_name.clone()));
     }
 
-    // Sort by similarity descending
     let mut evidence_list: Vec<(uuid::Uuid, String, f64, String, String)> = merged
         .into_iter()
         .map(|(id, (content, sim, obs_type, entity_name))| {
@@ -942,33 +708,11 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
         .collect();
     evidence_list.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Retrieval always returns its top-K. That is right for search and wrong for
-    // verification: "the Chernobyl reactor used graphite" came back with ten pieces
-    // of "evidence" from a corpus that has never heard of Chernobyl. Cut the ones
-    // that are merely the nearest thing in the store.
     evidence_list.retain(|(_, _, sim, _, _)| *sim >= grounding::MIN_EVIDENCE_SIMILARITY);
     evidence_list.truncate(10);
 
-    // Mejora 9: top_entity from merged results (no second query)
     let top_entity: Option<String> = evidence_list.first().map(|(_, _, _, _, e)| e.clone());
 
-    // Ask a judge what the evidence actually SAYS about the claim.
-    //
-    // Similarity answers "is this on-topic". Verification needs "does this assert
-    // the claim", and those come apart exactly where it matters: the store saying
-    // "written in Rust" is maximally on-topic for the claim "written in Java" and
-    // maximally against it. Under the old scoring that false claim scored 0.61 while
-    // a true one scored 0.59.
-    //
-    // The judge backend is resolved from CUBA_JUDGE. In `auto` it prefers MCP
-    // sampling — the client's own model, at no cost to this server — then a local
-    // CLI, then the API, and finally the heuristic, which honestly reports `unknown`
-    // rather than inventing a verdict it cannot reach.
-    // Concurrently, not one after another. The verdicts are independent — nothing in
-    // evidence #2 depends on what the judge made of evidence #1 — so serializing them
-    // just multiplies the model's latency by the evidence count. Judged in sequence,
-    // a three-evidence verify cost over a minute of wall clock and would have made
-    // this feature unusable no matter how correct it was.
     let judge = crate::cognitive::judge::resolve_judge();
     let max_judged = crate::cognitive::judge::default_max_pairs();
     let to_judge: Vec<(usize, &String, f64)> = evidence_list
@@ -991,9 +735,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
         let judgment = match result {
             Ok(j) => j,
             Err(e) => {
-                // A judge that cannot be reached must not silently become a judge that
-                // agrees. Dropping the verdict leaves this evidence counting for
-                // nothing, which lands the claim in `unknown` — the honest outcome.
                 tracing::warn!(
                     error = %format!("{e:#}"),
                     backend = judge.backend_name(),
@@ -1018,7 +759,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
 
     let (confidence, level) = grounding::compute_grounding_judged(&judged);
 
-    // Log verify prediction to brain_verify_log
     sqlx::query(
         "INSERT INTO brain_verify_log (claim, entity_name, confidence, grounding_level)
          VALUES ($1, $2, $3, $4)",
@@ -1029,9 +769,8 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
     .bind(level)
     .execute(pool)
     .await
-    .ok(); // Non-fatal
+    .ok();
 
-    // Fetch historical calibration for this grounding level
     let calibration: Option<(f64,)> = sqlx::query_as(
         "SELECT (COUNT(*) FILTER (WHERE outcome = 'correct') + 1)::float8 /
                 (COUNT(*) FILTER (WHERE outcome = 'correct') + COUNT(*) FILTER (WHERE outcome = 'incorrect') + 2)::float8
@@ -1044,8 +783,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
     .ok()
     .flatten();
 
-    // Evidence carries the verdict that was reached on it, so a caller can see WHY
-    // a claim scored what it scored — and disagree with the judge if it wants to.
     let evidence_json: Vec<Value> = evidence_list
         .iter()
         .enumerate()
@@ -1064,8 +801,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
         })
         .collect();
 
-    // Say it in words. A bare 0.0 reads as "broken"; "nothing in memory speaks to
-    // this" reads as an answer — and it is the answer the tool exists to give.
     let interpretation = match level {
         "contradicted" => "The stored evidence CONTRADICTS this claim.",
         "verified" => "The stored evidence supports this claim.",
@@ -1098,9 +833,6 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
     Ok(response)
 }
 
-/// Text search using PostgreSQL full-text + trigram similarity.
-/// Temporal filtering: $3=after, $4=before applied to created_at on each table.
-/// V0.8: $5 = project_id (Option<Uuid>) — when None, filter is a no-op.
 async fn text_search(
     pool: &PgPool,
     query: &str,
@@ -1222,7 +954,6 @@ async fn text_search(
         );
     }
 
-    // Search episodes (always included in "all" scope — separate memory system)
     if scope == "all" {
         let rows: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
             "SELECT ep.id, e.name, ep.content, ep.importance::float8,
@@ -1246,7 +977,7 @@ async fn text_search(
         .bind(project_id)
         .fetch_all(pool)
         .await
-        .unwrap_or_default(); // Non-fatal if table doesn't exist
+        .unwrap_or_default();
         results.extend(
             rows.into_iter()
                 .map(|(id, entity_name, content, importance, score)| {
@@ -1265,9 +996,6 @@ async fn text_search(
     Ok(results)
 }
 
-/// Vector search via pgvector cosine similarity.
-/// V8: Returns Result — callers can gracefully degrade on failure.
-/// V0.8: project_id filter (None = no-op).
 async fn vector_search(
     pool: &PgPool,
     query: &str,
@@ -1276,11 +1004,8 @@ async fn vector_search(
     tb: &TimeBounds,
     project_id: Option<uuid::Uuid>,
 ) -> Result<Vec<Value>> {
-    // Gate on real ONNX model — hash fallback embeddings are not semantically
-    // meaningful and querying DB with them against NULL embeddings returns empty
-    // anyway. Early return avoids the semaphore acquisition and embed call.
     if !crate::embeddings::onnx::is_model_loaded() {
-        return Ok(vec![]); // V8: graceful degradation
+        return Ok(vec![]);
     }
 
     let embedding = match crate::embeddings::onnx::embed(query).await {
@@ -1291,13 +1016,6 @@ async fn vector_search(
         }
     };
 
-    // Vector search with temporal filtering on observations.
-    //
-    // `importance` comes back too. It did not, and since a semantic hit usually wins
-    // the fusion, `compact` reported `"i": null` on most results — the field looked
-    // broken in every response where it mattered most. The lexical branch had always
-    // selected it; only this one did not, so which branch a result arrived on decided
-    // whether the caller could see how important the memory was.
     let observations: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
         "SELECT o.id, e.name, o.content, o.importance::float8,
                 1.0 - (o.embedding <=> $1::vector) AS cosine_sim
@@ -1332,7 +1050,6 @@ async fn vector_search(
         })
         .collect();
 
-    // Also search episodes with temporal filtering
     let episodes: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
         "SELECT ep.id, e.name, ep.content,
                 1.0 - (ep.embedding <=> $1::vector) AS cosine_sim
@@ -1366,39 +1083,15 @@ async fn vector_search(
     Ok(results)
 }
 
-// ── Utility Functions ───────────────────────────────────────────
-
-/// §A V3: Smooth sigmoid entropy routing (Mejora 4 — Jaynes 1957).
-///
-/// Replaces V2 step function which had 40% relative jumps at thresholds 2.0/3.5.
-/// The logistic sigmoid is the maximum-entropy smooth monotone transition
-/// between two asymptotes (text-heavy → vector-heavy).
-///
-/// | Entropy | text_w | vector_w |
-/// |---------|--------|----------|
-/// | 0.0     | ~0.70  | ~0.30    |
-/// | 2.75    | 0.50   | 0.50     | (midpoint)
-/// | 5.0+    | ~0.30  | ~0.70    |
 fn entropy_weights(entropy: f64) -> (f64, f64) {
-    let midpoint = 2.75; // Center of original [2.0, 3.5] range
-    let k = 2.0; // Steepness: 10%-90% transition spans ~2.2 units
-    let t = 1.0 / (1.0 + (-k * (entropy - midpoint)).exp()); // sigmoid ∈ [0, 1]
-    let text_w = 0.7 - 0.4 * t; // 0.7 → 0.3
-    let vector_w = 0.3 + 0.4 * t; // 0.3 → 0.7
+    let midpoint = 2.75;
+    let k = 2.0;
+    let t = 1.0 / (1.0 + (-k * (entropy - midpoint)).exp());
+    let text_w = 0.7 - 0.4 * t;
+    let vector_w = 0.3 + 0.4 * t;
     (text_w, vector_w)
 }
 
-/// v0.11: associative multi-hop expansion (HippoRAG-style).
-///
-/// 1. Seed = entities whose name/text matches the query (the query-linked nodes).
-/// 2. Spread activation 2 hops over `brain_relations` (reuses graph::activation).
-/// 3. For the top activated non-seed entities, add their highest-importance
-///    observations that no base signal already surfaced, scored by
-///    activation × importance.
-///
-/// Additive only: it inserts ids absent from `fused_scores`, never lowers an
-/// existing score, so enabling it cannot regress the base ranking. Best-effort:
-/// any DB error is logged and skipped rather than failing the search.
 async fn associative_expand(
     pool: &PgPool,
     query: &str,
@@ -1409,12 +1102,8 @@ async fn associative_expand(
     const EXPAND_ENTITIES: usize = 8;
     const OBS_PER_ENTITY: i64 = 2;
     const MAX_HOPS: usize = 2;
-    // Scaled so a strongly-activated, high-importance associative hit lands
-    // around a mid-rank RRF score (~1/60) — present in the pool, never
-    // dominating an exact lexical/vector match.
     const ASSOC_WEIGHT: f64 = 0.02;
 
-    // 1. Seed entities matching the query.
     let seeds: Vec<(uuid::Uuid,)> = match sqlx::query_as(
         "SELECT id FROM brain_entities
          WHERE (search_vector @@ cuba_or_tsquery($1) OR similarity(name, $1) > 0.3)
@@ -1440,7 +1129,6 @@ async fn associative_expand(
     let seed_ids: Vec<uuid::Uuid> = seeds.iter().map(|(id,)| *id).collect();
     let seed_set: std::collections::HashSet<uuid::Uuid> = seed_ids.iter().copied().collect();
 
-    // 2. Spread activation from the seeds.
     let activated =
         match crate::graph::activation::spread_from_entities(pool, &seed_ids, MAX_HOPS).await {
             Ok(a) => a,
@@ -1450,7 +1138,6 @@ async fn associative_expand(
             }
         };
 
-    // 3. For the top activated NON-seed entities, add their top observations.
     for (entity_id, activation) in activated
         .into_iter()
         .filter(|(id, _)| !seed_set.contains(id))
@@ -1482,7 +1169,7 @@ async fn associative_expand(
         for (id, entity_name, content, obs_type, importance) in obs {
             let id_str = id.to_string();
             if fused.contains_key(&id_str) {
-                continue; // never override a base-signal hit
+                continue;
             }
             let assoc_score = ASSOC_WEIGHT * activation as f64 * importance;
             fused.insert(
@@ -1509,15 +1196,6 @@ async fn associative_expand(
     }
 }
 
-// V3 adaptive_rrf_k REMOVED — k=60 constant per Gemini Deep Research audit 2026-03-14.
-// Rationale: dynamic sqrt-based k introduced non-monotonic ranking instabilities
-// and violated determinism. Cormack et al. 2009, Azure AI Search, Elasticsearch
-// all converge on k=60 as empirically optimal.
-
-/// Get this process's session goals for session-aware boosting.
-///
-/// Scoped to `crate::session`: boosting results with another MCP client's
-/// goals is worse than not boosting at all.
 async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     let Some(sid) = crate::session::session_id() else {
         return Ok(Vec::new());
@@ -1536,11 +1214,6 @@ async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
     }
 }
 
-/// V9: GraphRAG enrichment — fetch degree-1 neighbors for top-K results.
-///
-/// For each top result that has an entity name, we query its related entities
-/// to provide graph context. This helps the AI understand the broader
-/// knowledge structure around search matches.
 async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k: usize) -> Value {
     let mut context: Vec<Value> = Vec::new();
 
@@ -1552,7 +1225,6 @@ async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k
             .and_then(|v: &Value| v.as_str());
 
         if let Some(name) = entity_name {
-            // N+1 fix: single CTE resolves entity id once, no subselect repetition.
             let neighbors: Vec<(String, String, f64)> = match sqlx::query_as(
                 "WITH src AS (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
                  SELECT e.name, r.relation_type, e.importance::float8
@@ -1589,7 +1261,6 @@ async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k
     serde_json::json!(context)
 }
 
-/// Explicit environment override, for experiments and for the threshold sweep.
 fn env_threshold() -> Option<f64> {
     std::env::var("CUBA_OOD_THRESHOLD")
         .ok()
@@ -1597,11 +1268,6 @@ fn env_threshold() -> Option<f64> {
         .filter(|t| t.is_finite() && *t > 0.0)
 }
 
-/// The threshold measured by `cuba-memorys calibrate`, cached per process.
-///
-/// Read once and held: the value changes only when someone re-calibrates, and a
-/// database round-trip on the OOD path would undo the point of caching μ and Σ⁻¹
-/// in the first place.
 async fn calibrated_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
     static CACHE: tokio::sync::OnceCell<Option<f64>> = tokio::sync::OnceCell::const_new();
     *CACHE
@@ -1630,15 +1296,6 @@ fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
     }))
 }
 
-/// V0.9: Out-of-distribution pre-check. Returns Some(answer) if the query
-/// should abstain (no relevant memory exists), or None to proceed with normal
-/// search. Caller is `cuba_faro` with `abstain_ood=true`.
-///
-/// Cheap path: O(d²) Mahalanobis on cached μ, Σ⁻¹ — sub-millisecond.
-/// Falls back to None (no abstention) when:
-/// - ONNX model not loaded (no embeddings to compute distance against)
-/// - Fewer than MIN_SAMPLES_FOR_OOD observations exist (covariance too noisy)
-/// - Embedding fit fails (rank-deficient cov even after ridge)
 async fn check_ood(
     pool: &PgPool,
     query: &str,
@@ -1650,36 +1307,7 @@ async fn check_ood(
     if !crate::embeddings::onnx::is_model_loaded() {
         return None;
     }
-    // NOTE: `embed_passage`, not `embed`. e5 is asymmetric — it prepends
-    // "query: " vs "passage: ", which shifts the vector. The density (μ, Σ⁻¹)
-    // is fitted over stored observations, i.e. *passages*. Embedding the query
-    // with the "query: " prefix would measure it against a distribution it was
-    // never in, inflating every distance and abstaining on in-corpus queries.
-    // For density estimation both sides must share the prefix.
     let query_emb = crate::embeddings::onnx::embed_passage(query).await.ok()?;
-    // Explicit argument → calibrated threshold → theory, in that order.
-    //
-    // The theoretical cutoff stays as a last resort, but it is known to be wrong
-    // on this corpus and the fix above (passage-prefixing both sides) was not
-    // enough. Measured with `cuba-memorys calibrate`, d=384:
-    //
-    //   theory (χ², Wilson-Hilferty)  τ = 21.25
-    //   corpus distances              p50 = 19.5, p99 = 23.5  → τ rejects 14.4%
-    //                                 of the corpus against its OWN distribution
-    //   answerable query distances    min = 23.8, p50 = 27.2  → τ rejects 100%
-    //
-    // Two things break the derivation. Σ is fitted from ~500 embeddings in 384
-    // dimensions (n/d ≈ 1.3), so its inverse amplifies estimation noise; and e5
-    // L2-normalizes, so the vectors live on the unit sphere, where Σ is singular
-    // in the radial direction and the ridge's 1/ε blows up. On top of that,
-    // queries and passages simply occupy different regions — the classic dense
-    // retrieval query-document gap — so a density fitted on passages scores every
-    // query as an outlier.
-    //
-    // `cuba-memorys calibrate` computes a conformal threshold from real
-    // answerable queries: distribution-free, finite-sample, and it holds even
-    // when the underlying Mahalanobis is badly estimated, because it adapts to
-    // whatever scale the score actually produces.
     let tau = match threshold.or_else(env_threshold) {
         Some(t) => t,
         None => calibrated_threshold(pool, query_emb.len())
@@ -1687,28 +1315,12 @@ async fn check_ood(
             .unwrap_or_else(|| default_threshold(query_emb.len())),
     };
 
-    // Cache hit: skip the 500-row fetch entirely. (Previously the SELECT ran
-    // before this check, so the cache saved the fit but never the query.)
     if let Some(stats) = crate::search::ood_cache::get(project_id)
         && let Some(dist) = stats.mahalanobis(&query_emb)
     {
         return ood_abstain_json(query, tau, dist);
     }
 
-    // The fit sample. Two things were wrong with the old one, and together they
-    // were the other half of why abstention rejected everything.
-    //
-    // It took 500 rows for d=384 (n/d ≈ 1.3) and called that "statistically
-    // sufficient". It is not: the sample covariance of 147,456 parameters cannot
-    // be estimated from 500 points, and its inverse amplifies noise, not signal.
-    // Ledoit-Wolf shrinkage now handles the conditioning, but a bigger sample is
-    // still strictly better and this corpus is small enough to afford one.
-    //
-    // Worse, it ordered by importance DESC — so the "distribution of the corpus"
-    // was fitted on the most important tail of it. A density estimated on a
-    // biased sample describes a distribution nothing was ever drawn from.
-    // ORDER BY id is unbiased (v4 UUIDs are random) and, unlike random(),
-    // deterministic — so the eval measures the same thing twice.
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
@@ -1735,7 +1347,6 @@ async fn check_ood(
 mod tests {
     use super::*;
 
-    /// entropy_weights must always sum to 1.0 regardless of input.
     #[test]
     fn test_entropy_weights_sum_to_one() {
         for &e in &[0.0f64, 1.0, 2.0, 2.75, 3.5, 5.0, 10.0] {
@@ -1748,8 +1359,6 @@ mod tests {
         }
     }
 
-    /// text_w must be strictly decreasing and vector_w strictly increasing
-    /// — smooth sigmoid replaces the V2 step function with monotone output.
     #[test]
     fn test_entropy_weights_monotone() {
         let entropies = [0.0f64, 0.5, 1.0, 1.5, 2.0, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0];
@@ -1770,7 +1379,6 @@ mod tests {
         }
     }
 
-    /// Verify asymptotes: low entropy → text-heavy, high entropy → vector-heavy.
     #[test]
     fn test_entropy_weights_asymptotes() {
         let (tw_low, vw_low) = entropy_weights(0.0);
@@ -1793,7 +1401,6 @@ mod tests {
             "high entropy should be vector-heavy: got {vw_high}"
         );
 
-        // Midpoint (entropy = 2.75): exact 50/50 split
         let (tw_mid, vw_mid) = entropy_weights(2.75);
         assert!(
             (tw_mid - 0.5).abs() < 1e-10,
@@ -1805,11 +1412,8 @@ mod tests {
         );
     }
 
-    /// V2 step function had a 40% jump at entropy=2.0. Verify V3 sigmoid
-    /// transition is smooth: Δweight < 0.05 per 0.1 entropy unit around threshold.
     #[test]
     fn test_entropy_weights_no_discontinuity() {
-        // Check around the old V2 thresholds (2.0 and 3.5)
         for &threshold in &[2.0f64, 3.5] {
             let (tw_before, _) = entropy_weights(threshold - 0.1);
             let (tw_after, _) = entropy_weights(threshold + 0.1);
