@@ -6,6 +6,47 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [Unreleased]
+
+### Modos de funcionamiento: `CUBA_MODE=local | red | completo`
+
+Un preset que configura la base de datos, los modelos y la red saliente a la vez, en
+vez de alinear a mano una docena de variables:
+
+- **local** (default) — Postgres en Docker local, modelos locales, sin red saliente.
+- **red** — Postgres gestionado compartido (TLS): dos máquinas con una sola memoria,
+  procedencia por nodo (`origin_node` / `CUBA_NODE_NAME`), sincronización en tiempo real.
+- **completo** — todo: reranker (GPU si hay) + `cuba_docs`. Máxima capacidad.
+
+`doctor` reporta el modo activo como primer check. Las env vars individuales siguen
+ganando sobre el preset.
+
+### El reranker se enciende, y es la mayor mejora del proyecto
+
+Medido: base RRF nDCG **0.2758 → con reranker 0.5300**, **+92%** (bootstrap pareado
+[+0.207, +0.302], mejora 86 de 191 queries). Estaba inerte: nada apuntaba el binario al
+modelo (ahora cae al caché y `doctor` lo reporta) y puntuaba los 50 candidatos de uno en
+uno (ahora una pasada batcheada). En CPU sigue siendo pesado, así que `faro` lo acota con
+un timeout (`CUBA_RERANK_TIMEOUT_SECS`, 20 s) y cae a RRF si se pasa. En GPU es instantáneo.
+
+### GPU: auto-detección CUDA → DirectML → CPU
+
+Las tres sesiones ONNX (embeddings, NLI, reranker) registran los execution providers
+compilados y caen a CPU si el runtime no los soporta. Los binarios de release traen CUDA
+(NVIDIA) y, en Windows, DirectML (cualquier GPU). `cuba-memorys models runtime --gpu`.
+
+### Onboarding cross-platform
+
+- `cuba-memorys models <embed|nli|reranker|runtime|all>` — descarga modelos y runtime en
+  cualquier OS, reemplaza los tres `.sh` (borrados) que no corrían en Windows.
+- Procedencia: columna `origin_node`, se rellena sola desde `CUBA_NODE_NAME` o el hostname.
+
+### Código sin comentarios
+
+Nuevo estándar: código limpio y auto-explicativo, el porqué en los mensajes de commit.
+Se quitaron los comentarios inline de todo el proyecto (~4600 líneas); build, clippy y
+tests en verde.
+
 ## [0.13.1] — 2026-07-14 (Cargo `0.13.1` · npm `0.13.1` · PyPI `1.15.1`)
 
 Two things v0.13.0 shipped that nobody could use, found by installing it instead of
