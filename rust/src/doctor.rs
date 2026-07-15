@@ -468,8 +468,8 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
                     "runtime_role",
                     format!("la app corre como '{usr}' (SUPERUSER)"),
                     "un superuser ignora RLS y puede alterar el audit_log: el aislamiento por \
-                     proyecto y la trazabilidad append-only son decorativos. Usá el rol cuba_app \
-                     (scripts/create-app-role.sql).",
+                     proyecto y la trazabilidad append-only son decorativos. Ejecutá \
+                     `cuba-memorys secure` y apuntá el runtime a cuba_app.",
                 ));
             } else {
                 checks.push(Check::ok("runtime_role", format!("'{usr}' sin superuser — RLS y audit efectivos")));

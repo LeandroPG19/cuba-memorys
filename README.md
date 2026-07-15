@@ -11,7 +11,7 @@
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
-Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **15 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
+Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **16 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
 
 <p align="center">
   <img src="assets/demo.gif" alt="cuba-memorys terminal demo — hybrid search, claim verification with an LLM judge, procedural memory, and the CLI" width="760" />
@@ -91,6 +91,8 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 | `completo` | whatever `DATABASE_URL` implies | **+ reranker (GPU if present) + `cuba_docs`** | `cuba_docs` |
 
 **Two machines, one memory.** Point both at the same managed Postgres (Neon or Supabase free tier both have pgvector and fit the 36 MB corpus many times over), give each a name with `CUBA_NODE_NAME`, and `CUBA_MODE=red`. What one writes, the other reads; every memory records which machine it came from (`origin_node`). Do **not** expose your own Postgres port to the internet — use a managed provider's TLS, or a private network like [Tailscale](https://tailscale.com).
+
+**Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
 
 **Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+92% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
 

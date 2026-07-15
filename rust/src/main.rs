@@ -132,6 +132,14 @@ async fn main() {
             }
             return;
         }
+        Some("secure") => {
+            if let Err(e) = cuba_memorys::secure_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "secure failed");
+                eprintln!("secure: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("doctor") => {
             if let Err(e) = cuba_memorys::doctor::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "doctor failed");
