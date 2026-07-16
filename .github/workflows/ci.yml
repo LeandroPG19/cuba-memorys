@@ -68,6 +68,7 @@ jobs:
       # checks the fetch-on-first-use wiring without needing a network or a release —
       # a broken require or a renamed export here breaks every `npm install`.
       - name: npm wrapper smoke test
+        working-directory: .
         run: node npm/install.test.js
 
   e2e:
