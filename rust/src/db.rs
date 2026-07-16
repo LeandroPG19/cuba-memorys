@@ -6,12 +6,17 @@ use std::time::Duration;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub async fn create_pool(database_url: &str) -> Result<PgPool> {
-    let connect_options = PgConnectOptions::from_str(database_url)
+fn connect_options(database_url: &str) -> Result<PgConnectOptions> {
+    Ok(PgConnectOptions::from_str(database_url)
         .context("invalid DATABASE_URL")?
         .log_statements(tracing::log::LevelFilter::Debug)
-        .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1));
+        .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1)))
+}
 
+/// Shared by both pools. `after_connect` is the part that matters: every
+/// connection must land in UTC, or exponential decay and the REM cycle
+/// silently drift.
+fn pool_options() -> PgPoolOptions {
     let node_name = std::env::var("CUBA_NODE_NAME")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -19,9 +24,8 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
 
-    let pool = PgPoolOptions::new()
+    PgPoolOptions::new()
         .max_connections(10)
-        .min_connections(1)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
@@ -47,7 +51,12 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
                 Ok(())
             })
         })
-        .connect_with(connect_options)
+}
+
+pub async fn create_pool(database_url: &str) -> Result<PgPool> {
+    let pool = pool_options()
+        .min_connections(1)
+        .connect_with(connect_options(database_url)?)
         .await
         .context("failed to connect to PostgreSQL")?;
 
@@ -56,6 +65,24 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
     init_schema(&pool).await?;
 
     Ok(pool)
+}
+
+/// A pool that has not connected to anything yet.
+///
+/// `connect_lazy_with` cannot fail: it hands back a pool whose *first query*
+/// is what reaches PostgreSQL — and what reports it unreachable. That is the
+/// difference between an MCP server that cannot serve a tool call and one
+/// that never speaks the protocol at all.
+///
+/// `min_connections` is deliberately NOT set here. A lazy pool that insists on
+/// keeping one connection open would spend the whole session retrying a
+/// database that is not there.
+///
+/// Migrations are not run: `init_schema` needs a live connection. If
+/// PostgreSQL shows up later, the schema is whatever the last successful
+/// startup left.
+pub fn create_lazy_pool(database_url: &str) -> Result<PgPool> {
+    Ok(pool_options().connect_lazy_with(connect_options(database_url)?))
 }
 
 pub async fn init_schema(pool: &PgPool) -> Result<()> {

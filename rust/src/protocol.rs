@@ -188,11 +188,31 @@ fn server_info() -> Value {
 
 pub async fn run_mcp() -> Result<()> {
     let database_url = crate::setup::resolve_database_url().await;
-    let pool = db::create_pool(&database_url).await?;
 
-    let rem_pool = pool.clone();
-    let rem_handle = tokio::spawn(async move {
-        rem_daemon(rem_pool).await;
+    // Dying here means never speaking the protocol: the client sees a process
+    // that exited, not a server that cannot reach its database — no tool
+    // list, no reason. Start anyway on a pool that has not connected yet.
+    // `initialize` and `tools/list` touch no database, so the client still
+    // gets the full tool list, and each call then fails with the actual error
+    // instead of a corpse.
+    let (pool, connected) = match db::create_pool(&database_url).await {
+        Ok(pool) => (pool, true),
+        Err(why) => {
+            tracing::warn!(
+                error = %format!("{why:#}"),
+                "starting without PostgreSQL — tools will fail until it is reachable"
+            );
+            (db::create_lazy_pool(&database_url)?, false)
+        }
+    };
+
+    // No database, nothing to consolidate: the REM cycle would just wake up
+    // to fail on every tick.
+    let rem_handle = connected.then(|| {
+        let rem_pool = pool.clone();
+        tokio::spawn(async move {
+            rem_daemon(rem_pool).await;
+        })
     });
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
@@ -322,7 +342,9 @@ pub async fn run_mcp() -> Result<()> {
         let _ = tx;
     }
 
-    rem_handle.abort();
+    if let Some(handle) = rem_handle {
+        handle.abort();
+    }
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), writer_handle).await;
     tracing::info!("REM daemon + writer drained, shutting down");
 
