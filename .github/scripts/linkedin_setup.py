@@ -1,22 +1,26 @@
 """Saca las credenciales de LinkedIn que necesita announce.py. Se ejecuta UNA vez.
 
 Hace el baile de OAuth en local: abre el navegador, recoge el codigo, lo cambia
-por los tokens y consulta tu URN de persona. Al final imprime exactamente lo que
-hay que pegar en los secrets del repo.
+por los tokens y consulta tu URN de persona. Los tokens NO se imprimen: van
+directos a los secrets del repo con `gh secret set`, asi que no acaban ni en la
+pantalla ni en el historial del shell.
 
-    LINKEDIN_CLIENT_ID=xxx LINKEDIN_CLIENT_SECRET=yyy python linkedin_setup.py
+    LINKEDIN_CLIENT_ID=772im4q6sicwuu python linkedin_setup.py
 
-Requisito previo: en la app de LinkedIn Developers, en Auth > Redirect URLs,
-tiene que estar dada de alta exactamente esta URL:
+El client secret se pide por teclado (oculto). Requisito previo: en la app de
+LinkedIn Developers, en Auth > Redirect URLs, tiene que estar dada de alta
+exactamente esta URL:
 
     http://localhost:8765/callback
 """
 
 from __future__ import annotations
 
+import getpass
 import http.server
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -26,6 +30,7 @@ import httpx
 
 REDIRECT_URI = "http://localhost:8765/callback"
 SCOPES = "openid profile w_member_social"
+REPO = "LeandroPG19/cuba-memorys"
 
 _code: str | None = None
 _state_ok = False
@@ -55,11 +60,29 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
         pass  # sin ruido en la consola
 
 
+def set_secret(name: str, value: str) -> None:
+    """Guarda el secret en el repo sin que pase por la pantalla."""
+    subprocess.run(
+        ["gh", "secret", "set", name, "-R", REPO],
+        input=value,
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+    print(f"  {name}: guardado")
+
+
 def main() -> int:
     client_id = os.environ.get("LINKEDIN_CLIENT_ID")
-    client_secret = os.environ.get("LINKEDIN_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        print("faltan LINKEDIN_CLIENT_ID y LINKEDIN_CLIENT_SECRET", file=sys.stderr)
+    if not client_id:
+        print("falta LINKEDIN_CLIENT_ID", file=sys.stderr)
+        return 1
+
+    client_secret = os.environ.get("LINKEDIN_CLIENT_SECRET") or getpass.getpass(
+        "Pega el Primary Client Secret de la app (no se vera al escribir): "
+    )
+    if not client_secret:
+        print("sin client secret no puedo seguir", file=sys.stderr)
         return 1
 
     state = secrets.token_urlsafe(16)
@@ -120,19 +143,32 @@ def main() -> int:
             return 1
         person_urn = f"urn:li:person:{userinfo.json()['sub']}"
 
-    print("\nPega esto en Settings > Secrets and variables > Actions:\n")
-    print(f"  LINKEDIN_CLIENT_ID      {client_id}")
-    print(f"  LINKEDIN_CLIENT_SECRET  {client_secret}")
-    print(f"  LINKEDIN_PERSON_URN     {person_urn}")
-    print(f"  LINKEDIN_ACCESS_TOKEN   {tokens['access_token']}")
-    if refresh := tokens.get("refresh_token"):
-        print(f"  LINKEDIN_REFRESH_TOKEN  {refresh}")
-        print("\nCon el refresh token, announce.py renueva el acceso solo.")
+    print(f"\nGuardando los secrets en {REPO} (ninguno se imprime):\n")
+    guardar = {
+        "LINKEDIN_CLIENT_ID": client_id,
+        "LINKEDIN_CLIENT_SECRET": client_secret,
+        "LINKEDIN_PERSON_URN": person_urn,
+        "LINKEDIN_ACCESS_TOKEN": tokens["access_token"],
+    }
+    refresh = tokens.get("refresh_token")
+    if refresh:
+        guardar["LINKEDIN_REFRESH_TOKEN"] = refresh
+
+    try:
+        for name, value in guardar.items():
+            set_secret(name, value)
+    except (subprocess.CalledProcessError, FileNotFoundError) as why:
+        print(f"\nno pude guardarlos con gh: {why}", file=sys.stderr)
+        print("¿estas autenticado? prueba `gh auth status`", file=sys.stderr)
+        return 1
+
+    if refresh:
+        print("\nHay refresh token: announce.py renovara el acceso solo.")
     else:
         expires_days = tokens.get("expires_in", 0) // 86400
         print(
-            f"\nOJO: tu app no da refresh token, y el access token caduca en {expires_days} dias."
-            "\nTendras que volver a ejecutar este script cuando expire."
+            f"\nOJO: tu app no da refresh token y el access token caduca en {expires_days} dias."
+            "\nCuando expire, vuelve a ejecutar este script."
         )
     return 0
 

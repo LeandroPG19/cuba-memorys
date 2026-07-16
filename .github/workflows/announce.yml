@@ -39,7 +39,7 @@ jobs:
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
-          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          REDDIT_REFRESH_TOKEN: ${{ secrets.REDDIT_REFRESH_TOKEN }}
           REDDIT_SUBREDDITS: ${{ vars.REDDIT_SUBREDDITS }}
           VERSION: ${{ inputs.version || github.event.release.tag_name }}
           DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}

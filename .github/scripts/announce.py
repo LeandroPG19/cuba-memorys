@@ -204,13 +204,13 @@ def post_to_linkedin(client: httpx.Client, release: Release) -> str:
 
 
 def reddit_token(client: httpx.Client, user_agent: str) -> str:
+    """Canjea el refresh token permanente. La contraseña no se usa nunca."""
     response = client.post(
         "https://www.reddit.com/api/v1/access_token",
         auth=(os.environ["REDDIT_CLIENT_ID"], os.environ["REDDIT_CLIENT_SECRET"]),
         data={
-            "grant_type": "password",
-            "username": os.environ["REDDIT_USERNAME"],
-            "password": os.environ["REDDIT_PASSWORD"],
+            "grant_type": "refresh_token",
+            "refresh_token": os.environ["REDDIT_REFRESH_TOKEN"],
         },
         headers={"User-Agent": user_agent},
     )
@@ -308,7 +308,7 @@ def main() -> int:
         else:
             print("\nLinkedIn: sin credenciales, me lo salto")
 
-        if subreddits and os.environ.get("REDDIT_CLIENT_ID"):
+        if subreddits and os.environ.get("REDDIT_REFRESH_TOKEN"):
             try:
                 for url in post_to_reddit(client, release, subreddits):
                     print(f"Reddit: {url}")
