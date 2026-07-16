@@ -31,6 +31,8 @@ OPERATIONS:
   dedupe            find entities that are the same thing under different names
   skills <dir>      export procedures as Claude Code skills
   eval              retrieval benchmark (nDCG@10, MRR, recall) — read-only
+  sync              git-friendly export/import of the graph (export|import|diff|status)
+  hook install      wire git so sync export/import run on commit/checkout automatically
   setup             wire this server into your MCP clients; `setup check` audits them
 
   -h, --help        this
@@ -128,6 +130,22 @@ async fn main() {
             if let Err(e) = cuba_memorys::dedupe_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "dedupe failed");
                 eprintln!("dedupe error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("sync") => {
+            if let Err(e) = cuba_memorys::sync_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "sync failed");
+                eprintln!("sync error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("hook") => {
+            if let Err(e) = cuba_memorys::hooks_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "hook failed");
+                eprintln!("hook error: {e:#}");
                 std::process::exit(1);
             }
             return;
