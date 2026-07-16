@@ -1,5 +1,7 @@
 pub mod calibrate_cli;
 pub mod cli;
+pub mod codegraph;
+pub mod codegraph_cli;
 pub mod cognitive;
 pub mod constants;
 pub mod core;

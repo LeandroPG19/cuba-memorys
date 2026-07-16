@@ -33,6 +33,7 @@ OPERATIONS:
   eval              retrieval benchmark (nDCG@10, MRR, recall) — read-only
   sync              git-friendly export/import of the graph (export|import|diff|status)
   hook install      wire git so sync export/import run on commit/checkout automatically
+  codegraph build   parse source (tree-sitter, rust|python) into brain_entities/relations
   setup             wire this server into your MCP clients; `setup check` audits them
 
   -h, --help        this
@@ -138,6 +139,14 @@ async fn main() {
             if let Err(e) = cuba_memorys::sync_cli::run_cli(&argv[2..]).await {
                 tracing::error!(error = %format!("{e:#}"), "sync failed");
                 eprintln!("sync error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some("codegraph") => {
+            if let Err(e) = cuba_memorys::codegraph_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "codegraph failed");
+                eprintln!("codegraph error: {e:#}");
                 std::process::exit(1);
             }
             return;
