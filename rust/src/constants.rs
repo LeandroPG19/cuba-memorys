@@ -144,7 +144,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "bidirectional": {"type": "boolean", "description": "If true, relation goes both ways"},
                     "start_entity": {"type": "string", "description": "Start point for traverse/infer"},
                     "max_depth": {"type": "integer", "description": "Max hops for traverse/infer (default 3, max 5)"},
-                    "entity_name": {"type": "string", "description": "Entity name for predict action (Adamic-Adar link prediction)"}
+                    "entity_name": {"type": "string", "description": "Entity name for predict action (Adamic-Adar link prediction)"},
+                    "persist": {"type": "boolean", "description": "For predict: write the suggestions to brain_relations as provenance='predicted' (relation_type related_to) instead of only returning them. Default false — read-only."}
                 },
                 "required": ["action"]
             }),

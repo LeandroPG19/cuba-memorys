@@ -143,7 +143,7 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let project_id = crate::project::current_project_id(pool).await?;
 
-    let paths: Vec<(String, String, f64, i32)> = sqlx::query_as(
+    let paths: Vec<(String, String, f64, i32, String)> = sqlx::query_as(
         r#"
         WITH RECURSIVE graph_walk AS (
             SELECT
@@ -151,7 +151,8 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
                 r.relation_type,
                 e2.name AS node_name,
                 r.strength,
-                1 AS depth
+                1 AS depth,
+                r.provenance
             FROM brain_relations r
             JOIN brain_entities e2 ON r.to_entity = e2.id
             WHERE r.from_entity = $1
@@ -164,14 +165,15 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
                 r.relation_type,
                 e2.name,
                 r.strength,
-                gw.depth + 1
+                gw.depth + 1,
+                r.provenance
             FROM brain_relations r
             JOIN brain_entities e2 ON r.to_entity = e2.id
             JOIN graph_walk gw ON r.from_entity = gw.current_node
             WHERE gw.depth < $2
               AND ($3::uuid IS NULL OR r.project_id = $3 OR r.project_id IS NULL)
         )
-        SELECT node_name, relation_type, strength, depth
+        SELECT node_name, relation_type, strength, depth, provenance
         FROM graph_walk
         ORDER BY depth, strength DESC
         LIMIT 50
@@ -197,12 +199,13 @@ async fn traverse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let nodes: Vec<Value> = paths
         .iter()
-        .map(|(name, rel_type, strength, depth)| {
+        .map(|(name, rel_type, strength, depth, provenance)| {
             serde_json::json!({
                 "name": name,
                 "relation": rel_type,
                 "strength": strength,
-                "depth": depth
+                "depth": depth,
+                "provenance": provenance
             })
         })
         .collect();
@@ -306,6 +309,10 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         .and_then(|v| v.as_i64())
         .unwrap_or(10)
         .min(50);
+    let persist = args
+        .get("persist")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let project_id = crate::project::current_project_id(pool).await?;
 
@@ -332,7 +339,7 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         }
     };
 
-    let predictions: Vec<(String, String, f64)> = sqlx::query_as(
+    let predictions: Vec<(uuid::Uuid, String, String, f64)> = sqlx::query_as(
         r#"
         WITH entity_neighbors AS (
             SELECT CASE WHEN from_entity = $1 THEN to_entity ELSE from_entity END AS neighbor
@@ -368,7 +375,7 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
             LEFT JOIN neighbor_degrees nd ON cl.shared_neighbor = nd.node
             GROUP BY cl.candidate
         )
-        SELECT e.name, e.entity_type, aa.aa_score::float8
+        SELECT aa.candidate, e.name, e.entity_type, aa.aa_score::float8
         FROM aa_scores aa
         JOIN brain_entities e ON aa.candidate = e.id
         WHERE ($3::uuid IS NULL OR e.project_id = $3 OR e.project_id IS NULL)
@@ -382,14 +389,38 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
     .fetch_all(pool)
     .await?;
 
+    let mut persisted = 0u32;
+    if persist {
+        for (candidate_id, _, _, score) in &predictions {
+            let strength = normalize_aa_score(*score);
+            let result = sqlx::query(
+                "INSERT INTO brain_relations
+                    (from_entity, to_entity, relation_type, strength, project_id, provenance)
+                 VALUES ($1, $2, 'related_to', $3, $4, 'predicted')
+                 ON CONFLICT (from_entity, to_entity, relation_type) DO NOTHING",
+            )
+            .bind(entity_id)
+            .bind(candidate_id)
+            .bind(strength)
+            .bind(project_id)
+            .execute(pool)
+            .await?;
+            persisted += result.rows_affected() as u32;
+        }
+    }
+
     let prediction_json: Vec<Value> = predictions
         .iter()
-        .map(|(name, etype, score)| {
+        .map(|(_, name, etype, score)| {
             serde_json::json!({
                 "entity": name,
                 "entity_type": etype,
                 "adamic_adar_score": score,
-                "recommendation": "Consider creating a relation between these entities"
+                "recommendation": if persist {
+                    "Persisted as a 'predicted' relation (related_to)"
+                } else {
+                    "Consider creating a relation between these entities"
+                }
             })
         })
         .collect();
@@ -422,7 +453,9 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         "entity": entity_name,
         "predictions": merged,
         "count": count,
-        "algorithm": "Adamic-Adar + spreading activation"
+        "algorithm": "Adamic-Adar + spreading activation",
+        "persisted": persist,
+        "relations_created": persisted
     }))
 }
 
@@ -435,4 +468,28 @@ async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
 
     row.map(|(id,)| id)
         .context(format!("Entity '{name}' not found"))
+}
+
+/// Adamic-Adar has no natural ceiling; squash it into the (0, 1] the strength
+/// column requires without pretending the score IS a probability.
+fn normalize_aa_score(score: f64) -> f64 {
+    (score / (score + 1.0)).clamp(0.01, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_stays_within_the_strength_column_bounds() {
+        assert!(normalize_aa_score(0.0) >= 0.01);
+        assert!(normalize_aa_score(1000.0) <= 1.0);
+        assert!(normalize_aa_score(-5.0) >= 0.01, "a pathological negative input must not violate the CHECK constraint");
+    }
+
+    #[test]
+    fn normalize_is_monotonic() {
+        assert!(normalize_aa_score(0.5) < normalize_aa_score(1.0));
+        assert!(normalize_aa_score(1.0) < normalize_aa_score(5.0));
+    }
 }
