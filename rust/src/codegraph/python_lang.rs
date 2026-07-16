@@ -13,7 +13,14 @@ pub fn extract(file: &str, source: &str) -> Result<(Vec<Symbol>, Vec<String>)> {
 
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
-    walk(tree.root_node(), source, file, None, &mut symbols, &mut imports);
+    walk(
+        tree.root_node(),
+        source,
+        file,
+        None,
+        &mut symbols,
+        &mut imports,
+    );
     Ok((symbols, imports))
 }
 
@@ -145,7 +152,8 @@ mod tests {
 
     #[test]
     fn top_level_function_is_extracted() {
-        let (symbols, _) = extract("app.py", "def greet(name):\n    print(f'hi {name}')\n").unwrap();
+        let (symbols, _) =
+            extract("app.py", "def greet(name):\n    print(f'hi {name}')\n").unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].qualified_name, "app.py::greet");
         assert_eq!(symbols[0].kind, SymbolKind::Function);

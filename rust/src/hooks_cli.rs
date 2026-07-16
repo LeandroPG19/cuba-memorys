@@ -144,7 +144,11 @@ fn install() -> Result<()> {
     let checkout_changed = append_hook_block(&hooks.join("post-checkout"), &post_checkout_block)?;
 
     Command::new("git")
-        .args(["config", &format!("merge.{MERGE_DRIVER_NAME}.name"), "cuba-memorys structural merge (union by id)"])
+        .args([
+            "config",
+            &format!("merge.{MERGE_DRIVER_NAME}.name"),
+            "cuba-memorys structural merge (union by id)",
+        ])
         .current_dir(&root)
         .status()
         .context("git config merge.name")?;
@@ -162,10 +166,31 @@ fn install() -> Result<()> {
     let attr_line = format!("{sync_dir}/** merge={MERGE_DRIVER_NAME}");
     let attrs_changed = append_gitattributes_line(&root, &attr_line)?;
 
-    println!("post-commit hook:   {}", if commit_changed { "installed" } else { "already present" });
-    println!("post-checkout hook: {}", if checkout_changed { "installed" } else { "already present" });
+    println!(
+        "post-commit hook:   {}",
+        if commit_changed {
+            "installed"
+        } else {
+            "already present"
+        }
+    );
+    println!(
+        "post-checkout hook: {}",
+        if checkout_changed {
+            "installed"
+        } else {
+            "already present"
+        }
+    );
     println!("merge driver:       configured (merge.{MERGE_DRIVER_NAME}.driver in .git/config)");
-    println!(".gitattributes:     {}", if attrs_changed { format!("added `{attr_line}`") } else { "already present".to_string() });
+    println!(
+        ".gitattributes:     {}",
+        if attrs_changed {
+            format!("added `{attr_line}`")
+        } else {
+            "already present".to_string()
+        }
+    );
     println!(
         "\nNOTE: both hooks are a no-op until this repo's database is set explicitly.\n\
          They deliberately do NOT fall back to auto-detecting a running container —\n\
@@ -183,7 +208,9 @@ fn merge_driver(args: &[String]) -> Result<()> {
     };
 
     let path_lower = path.to_lowercase();
-    let merged: Option<Vec<u8>> = if path_lower.contains("/entities/") || path_lower.ends_with(".json") && path_lower.contains("entities") {
+    let merged: Option<Vec<u8>> = if path_lower.contains("/entities/")
+        || path_lower.ends_with(".json") && path_lower.contains("entities")
+    {
         merge_entity_file(ours, theirs)?
     } else if path_lower.ends_with("relations.json") {
         merge_relations(ours, theirs)?
@@ -320,8 +347,14 @@ mod tests {
         let only_a_id = Uuid::new_v4();
         let only_b_id = Uuid::new_v4();
 
-        let mut a = entity_file(vec![obs(shared_id, "shared"), obs(only_a_id, "only in ours")]);
-        let b = entity_file(vec![obs(shared_id, "shared"), obs(only_b_id, "only in theirs")]);
+        let mut a = entity_file(vec![
+            obs(shared_id, "shared"),
+            obs(only_a_id, "only in ours"),
+        ]);
+        let b = entity_file(vec![
+            obs(shared_id, "shared"),
+            obs(only_b_id, "only in theirs"),
+        ]);
         a.id = b.id;
         a.name = b.name.clone();
 

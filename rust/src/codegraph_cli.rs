@@ -110,7 +110,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn upsert_symbol(pool: &PgPool, symbol: &Symbol, project_id: Option<uuid::Uuid>) -> Result<()> {
+async fn upsert_symbol(
+    pool: &PgPool,
+    symbol: &Symbol,
+    project_id: Option<uuid::Uuid>,
+) -> Result<()> {
     let entity_id: (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO brain_entities (name, entity_type, project_id)
          VALUES ($1, 'code_symbol', $2)
@@ -130,7 +134,12 @@ async fn upsert_symbol(pool: &PgPool, symbol: &Symbol, project_id: Option<uuid::
     };
     let content = format!(
         "{} `{}` in {}:{}-{}\n{}",
-        kind_label, symbol.simple_name, symbol.file, symbol.line_start, symbol.line_end, symbol.signature
+        kind_label,
+        symbol.simple_name,
+        symbol.file,
+        symbol.line_start,
+        symbol.line_end,
+        symbol.signature
     );
 
     sqlx::query(

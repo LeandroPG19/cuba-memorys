@@ -484,7 +484,10 @@ mod tests {
     fn normalize_stays_within_the_strength_column_bounds() {
         assert!(normalize_aa_score(0.0) >= 0.01);
         assert!(normalize_aa_score(1000.0) <= 1.0);
-        assert!(normalize_aa_score(-5.0) >= 0.01, "a pathological negative input must not violate the CHECK constraint");
+        assert!(
+            normalize_aa_score(-5.0) >= 0.01,
+            "a pathological negative input must not violate the CHECK constraint"
+        );
     }
 
     #[test]

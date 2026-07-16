@@ -13,7 +13,14 @@ pub fn extract(file: &str, source: &str) -> Result<(Vec<Symbol>, Vec<String>)> {
 
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
-    walk(tree.root_node(), source, file, None, &mut symbols, &mut imports);
+    walk(
+        tree.root_node(),
+        source,
+        file,
+        None,
+        &mut symbols,
+        &mut imports,
+    );
     Ok((symbols, imports))
 }
 
@@ -161,7 +168,11 @@ mod tests {
 
     #[test]
     fn top_level_function_is_extracted_with_a_bare_qualified_name() {
-        let (symbols, _) = extract("lib.rs", "fn greet(name: &str) { println!(\"hi {name}\"); }").unwrap();
+        let (symbols, _) = extract(
+            "lib.rs",
+            "fn greet(name: &str) { println!(\"hi {name}\"); }",
+        )
+        .unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].qualified_name, "lib.rs::greet");
         assert_eq!(symbols[0].simple_name, "greet");
@@ -195,6 +206,9 @@ mod tests {
     #[test]
     fn syntax_errors_do_not_panic_the_extractor() {
         let result = extract("lib.rs", "fn broken( {{{ not valid rust at all");
-        assert!(result.is_ok(), "tree-sitter recovers from syntax errors instead of failing the whole file");
+        assert!(
+            result.is_ok(),
+            "tree-sitter recovers from syntax errors instead of failing the whole file"
+        );
     }
 }
