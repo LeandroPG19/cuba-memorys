@@ -140,7 +140,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "action": {"type": "string", "enum": ["create", "delete", "traverse", "infer", "predict"], "description": "Operation to perform. 'predict' uses Adamic-Adar to suggest missing relations."},
                     "from_entity": {"type": "string", "description": "Source entity name"},
                     "to_entity": {"type": "string", "description": "Target entity name"},
-                    "relation_type": {"type": "string", "description": "Relation: uses, causes, implements, depends_on, related_to"},
+                    "relation_type": {"type": "string", "description": "Relation: uses, causes, implements, depends_on, related_to. Also used by predict+persist to pick the type for the persisted edge (default related_to)."},
                     "bidirectional": {"type": "boolean", "description": "If true, relation goes both ways"},
                     "start_entity": {"type": "string", "description": "Start point for traverse/infer"},
                     "max_depth": {"type": "integer", "description": "Max hops for traverse/infer (default 3, max 5)"},

@@ -10,17 +10,26 @@ const MERGE_DRIVER_NAME: &str = "cuba-memorys";
 
 pub async fn run_cli(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
-        Some("install") => install(),
+        Some("install") => {
+            let with_codegraph = args[1..].iter().any(|a| a == "--with-codegraph");
+            install(with_codegraph)
+        }
+        Some("uninstall") => uninstall(),
         Some("merge-driver") => merge_driver(&args[1..]),
         Some("-h") | Some("--help") | None => {
             eprintln!(
-                "usage: cuba-memorys hook install\n\n\
+                "usage: cuba-memorys hook <install|uninstall> [--with-codegraph]\n\n\
                  Wires this repo's git so the knowledge graph under .cuba-memorys/\n\
                  (or $CUBA_SYNC_DIR) stays in sync automatically:\n\
                  \x20 - post-commit  runs `sync export` after every commit\n\
                  \x20 - post-checkout runs `sync import` after checkout/branch switch\n\
                  \x20 - a git merge driver that unions observations/relations/entities\n\
                  \x20   by id instead of leaving conflict markers in graph JSON\n\n\
+                 --with-codegraph also runs `codegraph build` (rust,python) after every\n\
+                 commit, so the code graph stays current the way sync keeps memory current.\n\
+                 Off by default — it re-parses the whole tree, which is not free on a large repo.\n\n\
+                 `uninstall` removes exactly what `install` added (hook blocks, merge driver\n\
+                 config, .gitattributes line) and leaves everything else untouched.\n\n\
                  Existing hooks are appended to, never overwritten. Safe to run twice."
             );
             Ok(())
@@ -106,7 +115,7 @@ fn append_gitattributes_line(root: &Path, line: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn install() -> Result<()> {
+fn install(with_codegraph: bool) -> Result<()> {
     let root = git_root()?;
     let hooks = hooks_dir(&root);
     std::fs::create_dir_all(&hooks).context("creating hooks dir")?;
@@ -125,11 +134,19 @@ fn install() -> Result<()> {
     // that, its own DATABASE_URL environment variable — and is a strict no-op if
     // neither is set.
     let resolve_url_sh = "db_url=$(git config --local --get cuba-memorys.database-url 2>/dev/null || true); [ -z \"$db_url\" ] && db_url=\"$DATABASE_URL\"";
+    let codegraph_line = if with_codegraph {
+        format!(
+            " DATABASE_URL=\"$db_url\" \"{exe}\" codegraph build --lang rust,python >/dev/null 2>&1 || true\n"
+        )
+    } else {
+        String::new()
+    };
     let post_commit_block = format!(
         "{MARKER}\n\
          {resolve_url_sh}\n\
          if [ -n \"$db_url\" ]; then\n\
          \x20 DATABASE_URL=\"$db_url\" \"{exe}\" sync export --scope all >/dev/null 2>&1 || true\n\
+         {codegraph_line}\
          fi\n"
     );
     let commit_changed = append_hook_block(&hooks.join("post-commit"), &post_commit_block)?;
@@ -192,12 +209,140 @@ fn install() -> Result<()> {
         }
     );
     println!(
+        "codegraph on commit: {}",
+        if with_codegraph {
+            "enabled"
+        } else {
+            "disabled (pass --with-codegraph to enable)"
+        }
+    );
+    println!(
         "\nNOTE: both hooks are a no-op until this repo's database is set explicitly.\n\
          They deliberately do NOT fall back to auto-detecting a running container —\n\
          on a machine with more than one cuba-memorys database, that guess can export\n\
          from, or import into, the wrong one. Set it once, it persists in .git/config:\n\
          \x20 git config --local cuba-memorys.database-url \"postgresql://...\"\n\
          (DATABASE_URL in the environment also works as a fallback.)"
+    );
+    Ok(())
+}
+
+/// Removes exactly what `install` added: since `append_hook_block` always
+/// writes our block last, truncating the file at the marker's position undoes
+/// it precisely — as long as nothing was appended to the hook after install
+/// ran. That's the normal case; if something was, this says so instead of
+/// silently eating it.
+fn remove_hook_block(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let Some(marker_pos) = content.find(MARKER) else {
+        return Ok(false);
+    };
+
+    let before_marker = &content[..marker_pos];
+    let truncate_at = before_marker.trim_end_matches('\n').len();
+    let remainder = &content[marker_pos..];
+    let our_block_end = remainder
+        .find("\n\n")
+        .map(|i| marker_pos + i + 2)
+        .unwrap_or(content.len());
+    if our_block_end < content.len() {
+        eprintln!(
+            "warning: {path:?} has content after the cuba-memorys block — leaving it, \
+             only the marker line and this tool's own lines were removed"
+        );
+    }
+
+    let kept_before = &content[..truncate_at];
+    let kept_after = &content[our_block_end..];
+    let new_content = format!("{kept_before}\n{kept_after}");
+    let new_content = new_content.trim_end_matches('\n');
+    let new_content = if new_content == "#!/bin/sh" {
+        String::new()
+    } else {
+        format!("{new_content}\n")
+    };
+
+    if new_content.is_empty() {
+        std::fs::remove_file(path).with_context(|| format!("removing empty hook {path:?}"))?;
+    } else {
+        std::fs::write(path, new_content).with_context(|| format!("rewriting hook {path:?}"))?;
+    }
+    Ok(true)
+}
+
+fn uninstall() -> Result<()> {
+    let root = git_root()?;
+    let hooks = hooks_dir(&root);
+
+    let commit_removed = remove_hook_block(&hooks.join("post-commit"))?;
+    let checkout_removed = remove_hook_block(&hooks.join("post-checkout"))?;
+
+    let _ = Command::new("git")
+        .args([
+            "config",
+            "--unset",
+            &format!("merge.{MERGE_DRIVER_NAME}.name"),
+        ])
+        .current_dir(&root)
+        .status();
+    let _ = Command::new("git")
+        .args([
+            "config",
+            "--unset",
+            &format!("merge.{MERGE_DRIVER_NAME}.driver"),
+        ])
+        .current_dir(&root)
+        .status();
+
+    let sync_dir = std::env::var("CUBA_SYNC_DIR").unwrap_or_else(|_| ".cuba-memorys".to_string());
+    let attr_line = format!("{sync_dir}/** merge={MERGE_DRIVER_NAME}");
+    let attrs_path = root.join(".gitattributes");
+    let attrs_removed = if attrs_path.exists() {
+        let existing = std::fs::read_to_string(&attrs_path).unwrap_or_default();
+        let filtered: Vec<&str> = existing
+            .lines()
+            .filter(|l| l.trim() != attr_line.trim())
+            .collect();
+        let changed = filtered.len() != existing.lines().count();
+        if changed {
+            if filtered.is_empty() {
+                std::fs::remove_file(&attrs_path)?;
+            } else {
+                std::fs::write(&attrs_path, format!("{}\n", filtered.join("\n")))?;
+            }
+        }
+        changed
+    } else {
+        false
+    };
+
+    println!(
+        "post-commit hook:   {}",
+        if commit_removed {
+            "removed"
+        } else {
+            "was not installed"
+        }
+    );
+    println!(
+        "post-checkout hook: {}",
+        if checkout_removed {
+            "removed"
+        } else {
+            "was not installed"
+        }
+    );
+    println!("merge driver:       unset (merge.{MERGE_DRIVER_NAME}.* removed from .git/config)");
+    println!(
+        ".gitattributes:     {}",
+        if attrs_removed {
+            "line removed"
+        } else {
+            "unchanged"
+        }
     );
     Ok(())
 }
@@ -390,5 +535,66 @@ mod tests {
         assert!(result.is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_hook_block_deletes_the_file_when_our_block_was_the_only_content() {
+        let dir = std::env::temp_dir().join(format!("cuba-hook-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("post-commit");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n\n{MARKER}\nsome generated line\nfi\n"),
+        )
+        .unwrap();
+
+        let removed = remove_hook_block(&path).unwrap();
+        assert!(removed);
+        assert!(
+            !path.exists(),
+            "nothing but our block was there — the file should be gone"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_hook_block_preserves_a_pre_existing_hook_before_our_marker() {
+        let dir = std::env::temp_dir().join(format!("cuba-hook-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("post-commit");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho 'pre-existing hook'\n\n{MARKER}\nsome generated line\nfi\n"),
+        )
+        .unwrap();
+
+        let removed = remove_hook_block(&path).unwrap();
+        assert!(removed);
+        let remaining = std::fs::read_to_string(&path).unwrap();
+        assert!(remaining.contains("pre-existing hook"));
+        assert!(!remaining.contains(MARKER));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_hook_block_on_a_file_without_our_marker_is_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("cuba-hook-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("post-commit");
+        std::fs::write(&path, "#!/bin/sh\necho 'someone else's hook'\n").unwrap();
+
+        let removed = remove_hook_block(&path).unwrap();
+        assert!(!removed);
+        assert!(path.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_hook_block_on_a_missing_file_is_a_no_op() {
+        let path = std::env::temp_dir().join(format!("cuba-hook-nonexistent-{}", Uuid::new_v4()));
+        assert!(!remove_hook_block(&path).unwrap());
     }
 }

@@ -313,6 +313,11 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
         .get("persist")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let persist_relation_type = args
+        .get("relation_type")
+        .and_then(|v| v.as_str())
+        .filter(|t| VALID_RELATION_TYPES.contains(t))
+        .unwrap_or("related_to");
 
     let project_id = crate::project::current_project_id(pool).await?;
 
@@ -396,11 +401,12 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
             let result = sqlx::query(
                 "INSERT INTO brain_relations
                     (from_entity, to_entity, relation_type, strength, project_id, provenance)
-                 VALUES ($1, $2, 'related_to', $3, $4, 'predicted')
+                 VALUES ($1, $2, $3, $4, $5, 'predicted')
                  ON CONFLICT (from_entity, to_entity, relation_type) DO NOTHING",
             )
             .bind(entity_id)
             .bind(candidate_id)
+            .bind(persist_relation_type)
             .bind(strength)
             .bind(project_id)
             .execute(pool)
@@ -417,9 +423,9 @@ async fn predict_links(pool: &PgPool, args: &Value) -> Result<Value> {
                 "entity_type": etype,
                 "adamic_adar_score": score,
                 "recommendation": if persist {
-                    "Persisted as a 'predicted' relation (related_to)"
+                    format!("Persisted as a 'predicted' relation ({persist_relation_type})")
                 } else {
-                    "Consider creating a relation between these entities"
+                    "Consider creating a relation between these entities".to_string()
                 }
             })
         })
