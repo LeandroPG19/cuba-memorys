@@ -29,9 +29,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # musl, not gnu: the glibc-linked binary required glibc >= 2.39 (built
+          # on ubuntu-latest's runner), which doesn't exist on Debian 12,
+          # Ubuntu 22.04, or RHEL 9 — all still common server distros. A
+          # static-pie musl binary has no glibc dependency at all (same reason
+          # ripgrep/fd/uv ship musl for Linux). rustls (not OpenSSL) for TLS
+          # everywhere in this crate is what makes the musl cross-build
+          # painless; the one real snag is esaxx-rs (a tokenizers dependency)
+          # needing a musl-targeted C++ compiler that plain `musl-tools` on
+          # the runner doesn't provide — `cross`'s Docker image ships one,
+          # same as it already does for the aarch64 target below.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact: cuba-memorys-linux-x64
+            use_cross: true
             features: docs,cuda
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
