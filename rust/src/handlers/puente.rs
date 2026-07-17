@@ -48,7 +48,8 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (from_entity, to_entity, relation_type)
          DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
-                       last_traversed = NOW()
+                       last_traversed = NOW(),
+                       provenance = 'extracted'
          RETURNING (xmax = 0) AS is_insert",
     )
     .bind(from_id)
@@ -75,7 +76,8 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
              VALUES ($1, $2, $3, true, $4)
              ON CONFLICT (from_entity, to_entity, relation_type)
              DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
-                           last_traversed = NOW()",
+                           last_traversed = NOW(),
+                           provenance = 'extracted'",
         )
         .bind(to_id)
         .bind(from_id)
@@ -500,5 +502,82 @@ mod tests {
     fn normalize_is_monotonic() {
         assert!(normalize_aa_score(0.5) < normalize_aa_score(1.0));
         assert!(normalize_aa_score(1.0) < normalize_aa_score(5.0));
+    }
+
+    #[tokio::test]
+    async fn create_resets_provenance_to_extracted_on_conflict() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping create_resets_provenance_to_extracted_on_conflict: DATABASE_URL not set"
+            );
+            return;
+        };
+        let pool = crate::db::create_pool(&url)
+            .await
+            .expect("connect to test database");
+
+        let from = format!("puente_test_from_{}", uuid::Uuid::new_v4());
+        let to = format!("puente_test_to_{}", uuid::Uuid::new_v4());
+        for name in [&from, &to] {
+            sqlx::query("INSERT INTO brain_entities (name) VALUES ($1)")
+                .bind(name)
+                .execute(&pool)
+                .await
+                .expect("create test entity");
+        }
+
+        // Simulate what `predict` does when asked to persist its guesses:
+        // the edge starts out life explicitly marked as a heuristic, not a fact.
+        let from_id = get_entity_id(&pool, &from).await.expect("from_id");
+        let to_id = get_entity_id(&pool, &to).await.expect("to_id");
+        sqlx::query(
+            "INSERT INTO brain_relations (from_entity, to_entity, relation_type, provenance)
+             VALUES ($1, $2, 'related_to', 'predicted')",
+        )
+        .bind(from_id)
+        .bind(to_id)
+        .execute(&pool)
+        .await
+        .expect("seed predicted relation");
+
+        // A human now asserts the same edge explicitly via `create`.
+        create(
+            &pool,
+            &serde_json::json!({
+                "from_entity": from,
+                "to_entity": to,
+                "relation_type": "related_to"
+            }),
+        )
+        .await
+        .expect("create should hit the ON CONFLICT branch and succeed");
+
+        let provenance: (String,) = sqlx::query_as(
+            "SELECT provenance FROM brain_relations
+             WHERE from_entity = $1 AND to_entity = $2 AND relation_type = 'related_to'",
+        )
+        .bind(from_id)
+        .bind(to_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch relation after create");
+
+        assert_eq!(
+            provenance.0, "extracted",
+            "an explicit create() must overwrite a stale 'predicted' provenance, not leave it mislabeled"
+        );
+
+        sqlx::query("DELETE FROM brain_relations WHERE from_entity = $1 OR to_entity = $1 OR from_entity = $2 OR to_entity = $2")
+            .bind(from_id)
+            .bind(to_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM brain_entities WHERE id = $1 OR id = $2")
+            .bind(from_id)
+            .bind(to_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }
