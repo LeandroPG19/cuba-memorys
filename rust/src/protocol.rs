@@ -196,13 +196,21 @@ pub async fn run_mcp() -> Result<()> {
     // gets the full tool list, and each call then fails with the actual error
     // instead of a corpse.
     let (pool, connected) = match db::create_pool(&database_url).await {
-        Ok(pool) => (pool, true),
+        Ok(pool) => {
+            // main.rs's own preliminary create_pool() only catches a mismatch
+            // if PostgreSQL already answers before this process starts. Under
+            // a startup race (DB comes up moments later) that check silently
+            // no-ops, and this pool — the one every tool call actually
+            // uses — is the last chance to say so before serving traffic.
+            db::assert_embedding_dim(&pool).await?;
+            (pool, true)
+        }
         Err(why) => {
             tracing::warn!(
                 error = %format!("{why:#}"),
                 "starting without PostgreSQL — tools will fail until it is reachable"
             );
-            (db::create_lazy_pool(&database_url)?, false)
+            (db::create_lazy_pool(&database_url), false)
         }
     };
 

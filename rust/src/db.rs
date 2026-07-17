@@ -51,6 +51,26 @@ fn pool_options() -> PgPoolOptions {
                 Ok(())
             })
         })
+        // `project::current_project_id` sets `app.current_project` with
+        // `set_config(..., false)` (session-scoped, not transaction-local)
+        // through a bare `.execute(pool)` call, so the value it leaves behind
+        // outlives that single logical request on whichever physical
+        // connection the pool happened to hand it. Without this hook a
+        // connection released back to the idle queue keeps carrying a
+        // previous request's (or previous project's) GUC value into
+        // whatever unrelated request acquires it next. Resetting here on
+        // every release closes that gap: a reused connection always rejoins
+        // the pool at the same '' default `after_connect` establishes for
+        // brand-new connections, instead of leaking a stale project id.
+        .after_release(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('app.current_project', '', false)")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                Ok(true)
+            })
+        })
 }
 
 pub async fn create_pool(database_url: &str) -> Result<PgPool> {
@@ -74,6 +94,12 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 /// difference between an MCP server that cannot serve a tool call and one
 /// that never speaks the protocol at all.
 ///
+/// A `database_url` that `PgConnectOptions::from_str` itself rejects (missing
+/// scheme, stray characters, ...) gets the same treatment instead of
+/// propagating that parse error: falling back to `PgConnectOptions::new()`
+/// keeps this function infallible, so a malformed URL also fails at first
+/// query instead of taking the process down before it can speak MCP.
+///
 /// `min_connections` is deliberately NOT set here. A lazy pool that insists on
 /// keeping one connection open would spend the whole session retrying a
 /// database that is not there.
@@ -81,8 +107,13 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 /// Migrations are not run: `init_schema` needs a live connection. If
 /// PostgreSQL shows up later, the schema is whatever the last successful
 /// startup left.
-pub fn create_lazy_pool(database_url: &str) -> Result<PgPool> {
-    Ok(pool_options().connect_lazy_with(connect_options(database_url)?))
+pub fn create_lazy_pool(database_url: &str) -> PgPool {
+    let options = connect_options(database_url).unwrap_or_else(|_| {
+        PgConnectOptions::new()
+            .log_statements(tracing::log::LevelFilter::Debug)
+            .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1))
+    });
+    pool_options().connect_lazy_with(options)
 }
 
 pub async fn init_schema(pool: &PgPool) -> Result<()> {
@@ -208,5 +239,61 @@ mod tests {
         let mut sorted = versions.clone();
         sorted.sort();
         assert_eq!(versions, sorted, "migrations must be in sorted order");
+    }
+
+    #[tokio::test]
+    async fn create_lazy_pool_survives_a_malformed_database_url() {
+        // A syntactically invalid DATABASE_URL must not make this function
+        // fail: that would propagate out of run_mcp() and exit the process
+        // before it ever speaks the MCP protocol — the exact bug this
+        // fallback exists to avoid, just triggered by a bad string instead
+        // of an unreachable host.
+        for bad_url in ["not a url", "", "://nope", "🦀🦀🦀"] {
+            let pool = create_lazy_pool(bad_url);
+            assert_eq!(
+                pool.size(),
+                0,
+                "a lazy pool must not have connected to anything yet for input {bad_url:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn released_connection_does_not_leak_app_current_project() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping released_connection_does_not_leak_app_current_project: DATABASE_URL not set"
+            );
+            return;
+        };
+
+        // max_connections(1) forces the second query below to reuse the
+        // exact physical connection the first query released, making this
+        // deterministic instead of racing the pool for which connection it
+        // hands back.
+        let pool = pool_options()
+            .max_connections(1)
+            .connect_with(connect_options(&url).expect("valid DATABASE_URL"))
+            .await
+            .expect("connect to test database");
+
+        sqlx::query(
+            "SELECT set_config('app.current_project', 'deadbeef-0000-0000-0000-000000000000', false)",
+        )
+        .execute(&pool)
+        .await
+        .expect("set_config on connection #1");
+
+        let (leaked,): (String,) =
+            sqlx::query_as("SELECT current_setting('app.current_project', true)")
+                .fetch_one(&pool)
+                .await
+                .expect("read back app.current_project on the reused connection");
+
+        assert_eq!(
+            leaked, "",
+            "after_release must reset app.current_project so a reused connection \
+             does not carry a stale project id into the next request"
+        );
     }
 }
