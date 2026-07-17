@@ -191,19 +191,26 @@ pub fn line_of_byte(source: &str, byte_offset: usize) -> usize {
         + 1
 }
 
-pub fn default_extensions_for(langs: &[String]) -> Vec<&'static str> {
+pub fn default_extensions_for(langs: &[String]) -> Result<Vec<&'static str>> {
+    if langs.is_empty() {
+        return Ok(vec!["rs", "py"]);
+    }
     let mut out = Vec::new();
+    let mut unknown = Vec::new();
     for l in langs {
         match l.as_str() {
             "rust" => out.push("rs"),
             "python" => out.push("py"),
-            _ => {}
+            other => unknown.push(other.to_string()),
         }
     }
-    if out.is_empty() {
-        out = vec!["rs", "py"];
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "unknown --lang value(s): {} (supported: rust, python)",
+            unknown.join(", ")
+        );
     }
-    out
+    Ok(out)
 }
 
 pub fn resolve_path(path_arg: Option<&str>) -> PathBuf {
@@ -263,5 +270,23 @@ mod tests {
     fn self_recursive_calls_do_not_create_a_self_loop() {
         let symbols = vec![symbol("f.rs::a", "a", &["a"])];
         assert!(resolve_call_edges(&symbols).is_empty());
+    }
+
+    #[test]
+    fn no_lang_flag_defaults_to_both_languages() {
+        assert_eq!(default_extensions_for(&[]).unwrap(), vec!["rs", "py"]);
+    }
+
+    #[test]
+    fn an_unrecognized_lang_value_is_an_error_not_a_silent_fallback() {
+        let langs = vec!["rus".to_string()];
+        let err = default_extensions_for(&langs).unwrap_err();
+        assert!(err.to_string().contains("rus"), "{err}");
+    }
+
+    #[test]
+    fn recognized_langs_are_not_diluted_by_the_default() {
+        let langs = vec!["python".to_string()];
+        assert_eq!(default_extensions_for(&langs).unwrap(), vec!["py"]);
     }
 }

@@ -55,9 +55,10 @@ fn walk(
                     calls,
                 });
             }
-            // Function bodies can nest closures/inner fns, but not further
-            // impls — no need to recurse for impl_type purposes here.
-            return;
+            // Fall through to the shared recursion below so nested fn/struct
+            // items in the body are extracted as their own symbols too.
+            // collect_calls_rec stops at nested function_item boundaries, so
+            // their calls aren't double-attributed to this outer function.
         }
         "struct_item" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -122,6 +123,11 @@ fn collect_calls_rec(node: Node, source: &str, out: &mut Vec<String>) {
         }
     }
     for child in node.children(&mut node.walk()) {
+        // Nested fn items are extracted as their own symbols with their own
+        // calls; don't also attribute their internal calls to the enclosing fn.
+        if child.kind() == "function_item" {
+            continue;
+        }
         collect_calls_rec(child, source, out);
     }
 }
@@ -195,6 +201,21 @@ mod tests {
         let a = symbols.iter().find(|s| s.simple_name == "a").unwrap();
         assert!(a.calls.contains(&"b".to_string()));
         assert!(a.calls.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn nested_fn_is_extracted_and_does_not_inherit_the_outer_functions_calls() {
+        let src = "fn outer() { fn inner() { helper_call(); } inner(); }";
+        let (symbols, _) = extract("lib.rs", src).unwrap();
+        let names: Vec<_> = symbols.iter().map(|s| s.qualified_name.as_str()).collect();
+        assert!(names.contains(&"lib.rs::outer"));
+        assert!(names.contains(&"lib.rs::inner"));
+
+        let outer = symbols.iter().find(|s| s.simple_name == "outer").unwrap();
+        assert_eq!(outer.calls, vec!["inner".to_string()]);
+
+        let inner = symbols.iter().find(|s| s.simple_name == "inner").unwrap();
+        assert_eq!(inner.calls, vec!["helper_call".to_string()]);
     }
 
     #[test]

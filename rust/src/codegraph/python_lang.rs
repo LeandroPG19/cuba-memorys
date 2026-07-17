@@ -51,7 +51,10 @@ fn walk(
                     calls: collect_calls(node, source),
                 });
             }
-            return;
+            // Fall through to the shared recursion below so nested defs in
+            // the body are extracted as their own symbols too. collect_calls_rec
+            // stops at nested function_definition boundaries, so their calls
+            // aren't double-attributed to this outer function.
         }
         "class_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -128,6 +131,11 @@ fn collect_calls_rec(node: Node, source: &str, out: &mut Vec<String>) {
         }
     }
     for child in node.children(&mut node.walk()) {
+        // Nested defs are extracted as their own symbols with their own
+        // calls; don't also attribute their internal calls to the enclosing fn.
+        if child.kind() == "function_definition" {
+            continue;
+        }
         collect_calls_rec(child, source, out);
     }
 }
@@ -175,6 +183,21 @@ mod tests {
         let a = symbols.iter().find(|s| s.simple_name == "a").unwrap();
         assert!(a.calls.contains(&"b".to_string()));
         assert!(a.calls.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn nested_def_is_extracted_and_does_not_inherit_the_outer_functions_calls() {
+        let src = "def outer():\n    def inner():\n        helper_call()\n    inner()\n";
+        let (symbols, _) = extract("app.py", src).unwrap();
+        let names: Vec<_> = symbols.iter().map(|s| s.qualified_name.as_str()).collect();
+        assert!(names.contains(&"app.py::outer"));
+        assert!(names.contains(&"app.py::inner"));
+
+        let outer = symbols.iter().find(|s| s.simple_name == "outer").unwrap();
+        assert_eq!(outer.calls, vec!["inner".to_string()]);
+
+        let inner = symbols.iter().find(|s| s.simple_name == "inner").unwrap();
+        assert_eq!(inner.calls, vec!["helper_call".to_string()]);
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut langs: Vec<String> = Vec::new();
     let mut dry_run = false;
     let mut json = false;
+    let mut project_arg: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -18,11 +19,12 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     langs = v.split(',').map(|s| s.trim().to_string()).collect();
                 }
             }
+            "--project" => project_arg = it.next().cloned(),
             "--dry-run" => dry_run = true,
             "--json" => json = true,
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: cuba-memorys codegraph build [--path DIR] [--lang rust,python] [--dry-run] [--json]\n\n\
+                    "usage: cuba-memorys codegraph build [--path DIR] [--lang rust,python] [--project NAME] [--dry-run] [--json]\n\n\
                      Parses source with tree-sitter (deterministic, no LLM, nothing leaves\n\
                      this process) and folds it into the SAME knowledge graph cuba_puente\n\
                      and cuba_faro already use: functions/structs/classes become\n\
@@ -30,6 +32,12 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                      statements become brain_relations with provenance='extracted'.\n\n\
                      A call only becomes an edge when its callee name matches exactly one\n\
                      symbol in the parsed batch — ambiguous names are dropped, not guessed.\n\n\
+                     This runs as its own process — a manual invocation or the post-commit\n\
+                     hook from `hook install --with-codegraph` — so it never inherits the\n\
+                     active MCP session's project. --project NAME scopes the graph\n\
+                     explicitly; omitted, it falls back to the current directory's name\n\
+                     (the repo root when run from the hook), same convention as `recall`,\n\
+                     so two different repos never collapse into one unscoped bucket.\n\n\
                      --dry-run prints counts without writing anything."
                 );
                 return Ok(());
@@ -40,7 +48,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
 
     let root = codegraph::resolve_path(path_arg.as_deref());
-    let extensions = codegraph::default_extensions_for(&langs);
+    let extensions = codegraph::default_extensions_for(&langs)?;
 
     let result = codegraph::extract_dir(&root, &extensions)
         .with_context(|| format!("scanning {}", root.display()))?;
@@ -56,7 +64,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             "call_edges_resolved": call_edges.len(),
             "import_statements": result.imports.iter().map(|m| m.paths.len()).sum::<usize>(),
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        if json {
+            println!("{report}");
+        } else {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         return Ok(());
     }
 
@@ -64,6 +76,27 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let pool = crate::db::create_pool(&url)
         .await
         .context("connecting to database for codegraph build")?;
+
+    // This CLI runs as its own process (a manual invocation or the post-commit
+    // hook), so it never inherits an MCP session's `session::set` call — without
+    // this, `current_project_id` below always resolves None and every symbol
+    // gets written project_id=NULL, which RLS's tenant_isolation policy always
+    // lets through regardless of the active project, merging unrelated repos'
+    // code graphs together. Resolve/create the project from `--project` or the
+    // current directory's name (the repo root when run from the hook) and seed
+    // the session so `current_project_id` picks it up the same way it does when
+    // called from a handler.
+    let project_name = project_arg.or_else(|| {
+        std::env::current_dir().ok().and_then(|d| {
+            d.file_name()
+                .and_then(|n| n.to_str())
+                .map(std::string::ToString::to_string)
+        })
+    });
+    if let Some(name) = project_name {
+        let pid = crate::project::upsert_project(&pool, &name).await?;
+        crate::session::set(uuid::Uuid::new_v4(), Some(pid));
+    }
 
     let project_id = crate::project::current_project_id(&pool).await?;
 
@@ -214,7 +247,9 @@ async fn upsert_edge(
         "INSERT INTO brain_relations (from_entity, to_entity, relation_type, project_id, provenance)
          VALUES ($1, $2, $3, $4, 'extracted')
          ON CONFLICT (from_entity, to_entity, relation_type)
-         DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0), last_traversed = NOW()",
+         DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
+                       last_traversed = NOW(),
+                       provenance = 'extracted'",
     )
     .bind(from_id)
     .bind(to_id)
