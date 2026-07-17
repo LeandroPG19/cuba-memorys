@@ -503,7 +503,7 @@ fn meta_tool_defs() -> Vec<Value> {
     vec![
         tool_def(
             "cuba_tools",
-            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 25 tools; \
+            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 29 tools; \
              under CUBA_TOOL_PROFILE=lean only the everyday core is pre-loaded and the rest live here. \
              Search by capability ('audit', 'decay', 'contradiction', 'session'), then call what you \
              find with cuba_call. detail='names' is cheapest, 'full' returns the exact argument schema.",

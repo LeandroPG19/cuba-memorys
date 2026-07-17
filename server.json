@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.LeandroPG19/cuba-memorys",
-  "description": "Persistent memory MCP server. 25 tools, BM25+MMR+OOD retrieval, CFR-21 audit, knowledge graph.",
+  "description": "Persistent memory MCP server. 29 tools, BM25+MMR+OOD retrieval, CFR-21 audit, knowledge graph, tree-sitter codegraph.",
   "repository": {
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.14.1",
+  "version": "0.15.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.14.1",
+      "version": "0.15.0",
       "transport": {
         "type": "stdio"
       },
@@ -70,7 +70,7 @@
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "1.16.1",
+      "version": "1.17.0",
       "transport": {
         "type": "stdio"
       },

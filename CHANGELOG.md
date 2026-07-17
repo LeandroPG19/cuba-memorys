@@ -6,6 +6,47 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.15.0] — 2026-07-17 (Cargo `0.15.0` · npm `0.15.0` · PyPI `1.17.0`)
+
+### Nuevo
+
+- **El servidor arranca aunque PostgreSQL no responda.** Antes moría con
+  `exit(1)` antes de hablar el protocolo — el motivo real por el que el
+  quality-check de Glama nunca pasaba: levanta el contenedor sin base de datos
+  real. Ahora arranca en modo degradado (`tools/list` es estático, cada tool
+  falla con su error real en vez de tirar todo el proceso).
+- **`cuba-memorys hook install`** conecta git a la memoria: `post-commit`
+  exporta, `post-checkout` importa, y un merge driver propio fusiona
+  observaciones/relaciones/entidades por id en vez de dejar conflict markers.
+  `--with-codegraph` además re-indexa el grafo de código en cada commit.
+  `hook uninstall` revierte exactamente lo que `install` agregó.
+- **Proveniencia en las relaciones (`extracted` / `predicted` / `inferred`).**
+  `cuba_puente predict` ahora puede persistir sus sugerencias Adamic-Adar como
+  relaciones reales (`persist: true`, `relation_type` configurable) en vez de
+  solo devolverlas; `traverse` expone la proveniencia de cada arista.
+- **`cuba-memorys codegraph build`**: parsea Rust y Python con tree-sitter
+  (determinístico, sin LLM) y lo integra en el MISMO grafo que ya usan
+  `cuba_faro`/`cuba_puente` — funciones/clases se vuelven entidades buscables,
+  las llamadas/imports resueltos se vuelven relaciones con
+  `provenance='extracted'`. Una llamada solo se resuelve cuando su nombre
+  coincide con exactamente un símbolo del lote parseado; ambiguas se
+  descartan en vez de adivinar.
+
+### Correcciones
+
+- **El binario Linux x64 se compila contra musl, no contra glibc.** Exigía
+  glibc ≥ 2.39 (compilado en el runner de GitHub), inexistente en Debian 12,
+  Ubuntu 22.04 o RHEL 9 — así rompió el primer intento de build de Glama.
+  Ahora es estático (`static-pie`), sin dependencia de la glibc del sistema.
+- **22 bugs encontrados en una auto-auditoría** de todo lo de arriba (cada
+  hallazgo verificado adversarialmente antes de arreglarse), entre ellos: una
+  fuga de `app.current_project` entre conexiones recicladas del pool (podía
+  filtrar el scope de un proyecto a una request de otro), `--conflict
+  overwrite` de `cuba_sync` completamente no-funcional (se comportaba como
+  `skip`), `export()` nunca borraba archivos de filas eliminadas de la DB
+  (podían resucitar en el próximo `import`), y funciones anidadas mal
+  atribuidas en el parser de código (arreglado en Rust y Python).
+
 ## [0.14.1] — 2026-07-15 (Cargo `0.14.1` · npm `0.14.1` · PyPI `1.16.1`)
 
 ### Correcciones
