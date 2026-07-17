@@ -95,6 +95,12 @@ pub struct RelationRow {
     pub bidirectional: bool,
     pub project_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
+    #[serde(default = "default_provenance")]
+    pub provenance: String,
+}
+
+fn default_provenance() -> String {
+    "extracted".to_string()
 }
 
 pub fn payload_hash(s: &str) -> String {
@@ -117,5 +123,46 @@ mod tests {
         assert_eq!(payload_hash("brain"), payload_hash("brain"));
         assert_ne!(payload_hash("a"), payload_hash("b"));
         assert_eq!(payload_hash("x").len(), 64);
+    }
+
+    #[test]
+    fn relation_row_round_trips_provenance_through_json() {
+        let rel = RelationRow {
+            id: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: "related_to".to_string(),
+            strength: 0.42,
+            bidirectional: false,
+            project_id: None,
+            created_at: Utc::now(),
+            provenance: "predicted".to_string(),
+        };
+
+        let json = serde_json::to_string(&rel).unwrap();
+        assert!(
+            json.contains("\"provenance\":\"predicted\""),
+            "exported relations.json must carry provenance, not silently drop it: {json}"
+        );
+
+        let round_tripped: RelationRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.provenance, "predicted");
+    }
+
+    #[test]
+    fn relation_row_defaults_provenance_for_pre_migration_json() {
+        let legacy_json = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "from_entity": Uuid::new_v4(),
+            "to_entity": Uuid::new_v4(),
+            "relation_type": "related_to",
+            "strength": 0.5,
+            "bidirectional": false,
+            "project_id": null,
+            "created_at": Utc::now(),
+        });
+
+        let rel: RelationRow = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(rel.provenance, "extracted");
     }
 }

@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::sync::chunk::{
@@ -34,6 +35,45 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "status" => status(pool, dir_arg).await,
         _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status"),
     }
+}
+
+fn prune_stale_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        if !keep.contains(&path) {
+            std::fs::remove_file(&path).with_context(|| format!("prune stale file {path:?}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn prune_stale_episode_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for month_entry in std::fs::read_dir(dir)? {
+        let month_path = month_entry?.path();
+        if !month_path.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&month_path)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            if !keep.contains(&path) {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("prune stale episode file {path:?}"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn export(
@@ -97,6 +137,7 @@ async fn export(
     let mut obs_count = 0u32;
     let mut emb_blob: Vec<u8> = Vec::new();
     let mut emb_dim: Option<usize> = None;
+    let mut entity_paths: HashSet<PathBuf> = HashSet::new();
 
     for (id, name, entity_type, importance, access_count, p_id, created_at) in entity_rows {
         let observations: Vec<ObservationRow> = sqlx::query_as::<
@@ -176,8 +217,10 @@ async fn export(
         ensure_within(&root, &path)?;
         std::fs::write(&path, serde_json::to_vec_pretty(&file)?)
             .with_context(|| format!("write entity {basename}"))?;
+        entity_paths.insert(path);
         entity_files += 1;
     }
+    prune_stale_files(&entities_dir, &entity_paths)?;
 
     type EpCols = (
         Uuid,
@@ -202,6 +245,7 @@ async fn export(
     .await?;
 
     let mut episode_count = 0u32;
+    let mut episode_paths: HashSet<PathBuf> = HashSet::new();
     for ep in episode_rows {
         let yyyymm = ep.7.format("%Y-%m").to_string();
         let dir = root.join("episodes").join(&yyyymm);
@@ -219,9 +263,11 @@ async fn export(
             started_at: ep.7,
             ended_at: ep.8,
         };
-        std::fs::write(path, serde_json::to_vec_pretty(&f)?)?;
+        std::fs::write(&path, serde_json::to_vec_pretty(&f)?)?;
+        episode_paths.insert(path);
         episode_count += 1;
     }
+    prune_stale_episode_files(&root.join("episodes"), &episode_paths)?;
 
     type ErrCols = (
         Uuid,
@@ -246,6 +292,7 @@ async fn export(
     let errors_dir = root.join("errors");
     std::fs::create_dir_all(&errors_dir)?;
     let mut err_count = 0u32;
+    let mut error_paths: HashSet<PathBuf> = HashSet::new();
     for e in error_rows {
         let path = errors_dir.join(format!("{}.json", e.0));
         ensure_within(&root, &path)?;
@@ -259,9 +306,11 @@ async fn export(
             project_id: e.6,
             created_at: e.7,
         };
-        std::fs::write(path, serde_json::to_vec_pretty(&f)?)?;
+        std::fs::write(&path, serde_json::to_vec_pretty(&f)?)?;
+        error_paths.insert(path);
         err_count += 1;
     }
+    prune_stale_files(&errors_dir, &error_paths)?;
 
     let decisions: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, content FROM brain_observations
@@ -276,13 +325,16 @@ async fn export(
     let dec_dir = root.join("decisions");
     std::fs::create_dir_all(&dec_dir)?;
     let mut dec_count = 0u32;
+    let mut decision_paths: HashSet<PathBuf> = HashSet::new();
     for (id, content) in &decisions {
         let path = dec_dir.join(format!("{id}.json"));
         ensure_within(&root, &path)?;
         let body = serde_json::json!({"id": id.to_string(), "content": content});
-        std::fs::write(path, serde_json::to_vec_pretty(&body)?)?;
+        std::fs::write(&path, serde_json::to_vec_pretty(&body)?)?;
+        decision_paths.insert(path);
         dec_count += 1;
     }
+    prune_stale_files(&dec_dir, &decision_paths)?;
 
     let relation_rows: Vec<RelationRow> = sqlx::query_as::<
         _,
@@ -295,10 +347,11 @@ async fn export(
             bool,
             Option<Uuid>,
             chrono::DateTime<Utc>,
+            String,
         ),
     >(
         "SELECT id, from_entity, to_entity, relation_type, strength::float8,
-                bidirectional, project_id, created_at
+                bidirectional, project_id, created_at, provenance
          FROM brain_relations
          WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
          ORDER BY created_at",
@@ -316,6 +369,7 @@ async fn export(
         bidirectional: t.5,
         project_id: t.6,
         created_at: t.7,
+        provenance: t.8,
     })
     .collect();
     let rel_count = relation_rows.len() as u32;
@@ -411,12 +465,11 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }));
     }
 
-    let on_conflict_clause = match conflict {
-        "skip" | "merge" => "DO NOTHING",
-        "overwrite" => "DO UPDATE SET",
+    let overwrite = match conflict {
+        "skip" | "merge" => false,
+        "overwrite" => true,
         _ => anyhow::bail!("invalid conflict policy: {conflict}"),
     };
-    let _ = on_conflict_clause;
 
     let mut tx = pool.begin().await?;
     let mut inserted = 0u32;
@@ -425,11 +478,16 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     if projects_path.exists() {
         let projects: Vec<ProjectRow> = serde_json::from_slice(&std::fs::read(projects_path)?)?;
         for p in projects {
-            let r = sqlx::query(
+            let r = sqlx::query(&format!(
                 "INSERT INTO brain_projects (id, name, created_at)
                  VALUES ($1, $2, $3)
-                 ON CONFLICT (id) DO NOTHING",
-            )
+                 ON CONFLICT (id) DO {}",
+                if overwrite {
+                    "UPDATE SET name = EXCLUDED.name, created_at = EXCLUDED.created_at"
+                } else {
+                    "NOTHING"
+                }
+            ))
             .bind(p.id)
             .bind(&p.name)
             .bind(p.created_at)
@@ -447,11 +505,18 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 continue;
             }
             let file: EntityFile = serde_json::from_slice(&std::fs::read(&path)?)?;
-            let r = sqlx::query(
+            let r = sqlx::query(&format!(
                 "INSERT INTO brain_entities (id, name, entity_type, importance, access_count, project_id, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (id) DO NOTHING",
-            )
+                 ON CONFLICT (id) DO {}",
+                if overwrite {
+                    "UPDATE SET name = EXCLUDED.name, entity_type = EXCLUDED.entity_type, \
+                     importance = EXCLUDED.importance, access_count = EXCLUDED.access_count, \
+                     project_id = EXCLUDED.project_id, created_at = EXCLUDED.created_at"
+                } else {
+                    "NOTHING"
+                }
+            ))
             .bind(file.id)
             .bind(&file.name)
             .bind(&file.entity_type)
@@ -464,13 +529,22 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             inserted += r.rows_affected() as u32;
 
             for obs in &file.observations {
-                let r = sqlx::query(
+                let r = sqlx::query(&format!(
                     "INSERT INTO brain_observations
                         (id, entity_id, content, observation_type, source, importance,
                          tags, session_id, project_id, embedding_model, created_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                     ON CONFLICT (id) DO NOTHING",
-                )
+                     ON CONFLICT (id) DO {}",
+                    if overwrite {
+                        "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
+                         observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
+                         importance = EXCLUDED.importance, tags = EXCLUDED.tags, \
+                         session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
+                         embedding_model = EXCLUDED.embedding_model, created_at = EXCLUDED.created_at"
+                    } else {
+                        "NOTHING"
+                    }
+                ))
                 .bind(obs.id)
                 .bind(file.id)
                 .bind(&obs.content)
@@ -502,13 +576,21 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                     continue;
                 }
                 let f: EpisodeFile = serde_json::from_slice(&std::fs::read(&path)?)?;
-                let r = sqlx::query(
+                let r = sqlx::query(&format!(
                     "INSERT INTO brain_episodes
                         (id, entity_id, content, actors, artifacts, importance,
                          project_id, started_at, ended_at)
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                     ON CONFLICT (id) DO NOTHING",
-                )
+                     ON CONFLICT (id) DO {}",
+                    if overwrite {
+                        "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
+                         actors = EXCLUDED.actors, artifacts = EXCLUDED.artifacts, \
+                         importance = EXCLUDED.importance, project_id = EXCLUDED.project_id, \
+                         started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at"
+                    } else {
+                        "NOTHING"
+                    }
+                ))
                 .bind(f.id)
                 .bind(f.entity_id)
                 .bind(&f.content)
@@ -533,13 +615,21 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 continue;
             }
             let e: ErrorFile = serde_json::from_slice(&std::fs::read(&path)?)?;
-            let r = sqlx::query(
+            let r = sqlx::query(&format!(
                 "INSERT INTO brain_errors
                     (id, error_type, error_message, solution, resolved,
                      project, project_id, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (id) DO NOTHING",
-            )
+                 ON CONFLICT (id) DO {}",
+                if overwrite {
+                    "UPDATE SET error_type = EXCLUDED.error_type, \
+                     error_message = EXCLUDED.error_message, solution = EXCLUDED.solution, \
+                     resolved = EXCLUDED.resolved, project = EXCLUDED.project, \
+                     project_id = EXCLUDED.project_id, created_at = EXCLUDED.created_at"
+                } else {
+                    "NOTHING"
+                }
+            ))
             .bind(e.id)
             .bind(&e.error_type)
             .bind(&e.error_message)
@@ -558,13 +648,20 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     if relations_path.exists() {
         let rels: Vec<RelationRow> = serde_json::from_slice(&std::fs::read(relations_path)?)?;
         for rel in rels {
-            let r = sqlx::query(
+            let r = sqlx::query(&format!(
                 "INSERT INTO brain_relations
                     (id, from_entity, to_entity, relation_type, strength,
-                     bidirectional, project_id, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 ON CONFLICT (from_entity, to_entity, relation_type) DO NOTHING",
-            )
+                     bidirectional, project_id, created_at, provenance)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT (from_entity, to_entity, relation_type) DO {}",
+                if overwrite {
+                    "UPDATE SET strength = EXCLUDED.strength, \
+                     bidirectional = EXCLUDED.bidirectional, project_id = EXCLUDED.project_id, \
+                     created_at = EXCLUDED.created_at, provenance = EXCLUDED.provenance"
+                } else {
+                    "NOTHING"
+                }
+            ))
             .bind(rel.id)
             .bind(rel.from_entity)
             .bind(rel.to_entity)
@@ -573,6 +670,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             .bind(rel.bidirectional)
             .bind(rel.project_id)
             .bind(rel.created_at)
+            .bind(&rel.provenance)
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
