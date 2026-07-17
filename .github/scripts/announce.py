@@ -11,7 +11,7 @@ Uso:
 Variables de entorno (las que falten, desactivan esa plataforma):
     LINKEDIN_ACCESS_TOKEN   token de acceso (o LINKEDIN_REFRESH_TOKEN + CLIENT_ID/SECRET)
     LINKEDIN_PERSON_URN     urn:li:person:XXXX
-    REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USERNAME / REDDIT_PASSWORD
+    REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USERNAME / REDDIT_REFRESH_TOKEN
     REDDIT_SUBREDDITS       lista separada por comas, p.ej. "rust,opensource"
 """
 

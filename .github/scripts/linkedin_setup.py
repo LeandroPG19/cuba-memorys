@@ -88,7 +88,16 @@ def main() -> int:
     state = secrets.token_urlsafe(16)
     server = http.server.HTTPServer(("localhost", 8765), CallbackHandler)
     server.expected_state = state  # type: ignore[attr-defined]
-    threading.Thread(target=server.handle_request, daemon=True).start()
+
+    def _serve_until_callback() -> None:
+        # Una conexion espuria (probe, health-check, request malformada) no
+        # invoca do_GET y por tanto no marca _done: seguimos escuchando en
+        # vez de agotar el listener one-shot antes de que llegue el redirect
+        # real de LinkedIn.
+        while not _done.is_set():
+            server.handle_request()
+
+    threading.Thread(target=_serve_until_callback, daemon=True).start()
 
     auth_url = (
         "https://www.linkedin.com/oauth/v2/authorization?"
