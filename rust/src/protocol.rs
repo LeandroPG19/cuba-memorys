@@ -255,6 +255,20 @@ pub async fn run_mcp() -> Result<()> {
     let mut lines = reader.lines();
     let mut in_flight: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+    if crate::search::rerank::is_configured() {
+        tokio::spawn(async {
+            let started = tokio::time::Instant::now();
+            if crate::search::rerank::warm_up().await {
+                tracing::info!(
+                    secs = started.elapsed().as_secs_f32(),
+                    "reranker warm — the first search no longer pays for the load"
+                );
+            } else {
+                tracing::warn!("reranker configured but failed to warm up — identity fallback");
+            }
+        });
+    }
+
     tracing::info!("MCP protocol ready on stdin/stdout (V0.9.2 correlator)");
 
     while let Ok(Some(line)) = lines.next_line().await {

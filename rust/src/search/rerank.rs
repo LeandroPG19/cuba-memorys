@@ -27,6 +27,36 @@ pub fn enabled() -> bool {
     matches!(get_status(), RerankerStatus::Loaded)
 }
 
+pub fn is_configured() -> bool {
+    if let Ok(p) = std::env::var("CUBA_RERANKER_PATH") {
+        return PathBuf::from(p).join("model.onnx").exists();
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".cache/cuba-memorys/reranker/model.onnx")
+                .exists()
+        })
+        .unwrap_or(false)
+}
+
+const WARMUP_CANDIDATES: usize = 50;
+const WARMUP_PASSAGE_CHARS: usize = 240;
+
+pub async fn warm_up() -> bool {
+    if !tokio::task::spawn_blocking(enabled).await.unwrap_or(false) {
+        return false;
+    }
+    let passage = "the retrieval pipeline fuses lexical and vector signals before the \
+                   cross-encoder rescores the surviving candidates in a single batch "
+        .repeat(WARMUP_PASSAGE_CHARS / 100 + 1);
+    let passages: Vec<&str> = std::iter::repeat_n(passage.as_str(), WARMUP_CANDIDATES).collect();
+    rerank("which passage answers the question best", &passages)
+        .await
+        .is_ok()
+}
+
 fn get_status() -> &'static RerankerStatus {
     RERANKER_STATUS.get_or_init(|| {
         let path = RERANKER_PATH.get_or_init(|| {
@@ -95,7 +125,11 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
         .with_truncation(Some(truncation))
         .map_err(|e| anyhow::anyhow!("tokenizer truncation: {e}"))?;
     let padding = tokenizers::PaddingParams {
-        strategy: tokenizers::PaddingStrategy::BatchLongest,
+        strategy: if fixed_shape() {
+            tokenizers::PaddingStrategy::Fixed(RERANK_MAX_TOKENS)
+        } else {
+            tokenizers::PaddingStrategy::BatchLongest
+        },
         ..Default::default()
     };
     tokenizer.with_padding(Some(padding));
@@ -131,6 +165,15 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
 }
 
 const RERANK_CHUNK: usize = 16;
+const RERANK_MAX_TOKENS: usize = 512;
+
+pub fn fixed_shape() -> bool {
+    match std::env::var("CUBA_RERANK_FIXED_SHAPE").as_deref() {
+        Ok("0") | Ok("off") | Ok("false") => false,
+        Ok(_) => true,
+        Err(_) => cfg!(any(feature = "cuda", feature = "directml")),
+    }
+}
 
 fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     if candidates.is_empty() {
@@ -148,7 +191,15 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
 
     let mut scores = Vec::with_capacity(candidates.len());
     for chunk in candidates.chunks(RERANK_CHUNK) {
-        scores.extend(score_chunk(&mut session, tokenizer, query, chunk)?);
+        if !fixed_shape() || chunk.len() == RERANK_CHUNK {
+            scores.extend(score_chunk(&mut session, tokenizer, query, chunk)?);
+            continue;
+        }
+        let mut padded: Vec<String> = chunk.to_vec();
+        padded.resize(RERANK_CHUNK, String::new());
+        let mut chunk_scores = score_chunk(&mut session, tokenizer, query, &padded)?;
+        chunk_scores.truncate(chunk.len());
+        scores.extend(chunk_scores);
     }
     Ok(scores)
 }
