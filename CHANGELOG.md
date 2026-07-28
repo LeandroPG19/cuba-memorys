@@ -6,6 +6,108 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.16.0] — 2026-07-28 (Cargo `0.16.0` · npm `0.16.0` · PyPI `1.18.0`)
+
+Esta versión sale de una comparación con el estado del arte (mem0, Zep/Graphiti,
+Letta, cognee, HippoRAG 2, el survey de memoria de agentes arXiv 2602.06052) y de
+medir el corpus real en vez de suponer.
+
+### El grafo ahora crece solo
+
+Medido antes del cambio: **148 de 279 entidades (53%) sin una sola arista**, grado
+medio 1,53, 213 relaciones para 1645 observaciones. Siete algoritmos de grafo ya
+implementados —PageRank personalizado, Louvain, k-core, closeness/harmonic,
+betweenness, Adamic-Adar, activación por propagación estilo HippoRAG— corrían sobre
+un sustrato que la mitad de las veces no existía.
+
+La causa: nada creaba relaciones por su cuenta. `auto_extract` extraía hechos pero
+nunca aristas, y `link` (NPMI) es un comando manual que nadie ejecuta.
+
+- **`auto_extract` ahora pide hechos Y relaciones** en la misma llamada de sampling
+  (mismo coste, $0), y las escribe con `provenance='inferred'`. Los extremos se
+  auto-crean, así que una arista que menciona una tecnología vista por primera vez
+  en esa conversación igual aterriza. El parser acepta tanto la forma nueva como el
+  array plano anterior.
+- **El ciclo REM pasó de 3 a 6 tareas**: además de decay, decay de episodios y
+  PageRank, ahora hace autolink NPMI, backfill de embeddings y chunking. Esto es el
+  *sleep-time compute* que Letta nombró en 2025 — cuba-memorys tenía el daemon desde
+  antes, al 30% de su capacidad.
+- **`cuba-memorys rem`** ejecuta un ciclo bajo demanda en vez de esperar 4 horas.
+- **43 observaciones (2,6%) no tenían embedding** y eran permanentemente invisibles
+  a la búsqueda vectorial, sin nada que las reprocesara. El ciclo REM las rellena,
+  con tope por ciclo (`CUBA_REM_BACKFILL_LIMIT`, 100 por defecto).
+
+Hallazgo honesto: el autolink NPMI creó **0** aristas, y es correcto — 46 de sus 47
+pares candidatos ya tenían relación. La co-ocurrencia está saturada en este corpus;
+lo que densificará el grafo es la extracción por LLM, no NPMI.
+
+### Cuarentena contra envenenamiento de memoria
+
+La memoria persistente tiene una clase de ataque que la inyección de prompt no
+tiene: la escritura y su efecto están separados en el tiempo. MINJA (arXiv
+2601.05504) planta memoria envenenada con turnos de usuario normales —sin
+privilegios, sin acceso al almacén— y reporta **>95% de éxito**; la instrucción
+dispara semanas después. El hash-chain CFR-21 prueba *a posteriori* que algo se
+alteró; no impide que una escritura legítimamente autenticada meta un hecho hostil.
+
+Siguiendo SMSR (arXiv 2606.12703): separar memoria candidata no confiable de la
+memoria confiable, con promoción mediada.
+
+- Migración 0037 añade `brain_observations.trust`, por defecto `trusted`, así que
+  todo lo existente se comporta igual.
+- `cuba_ingesta auto_extract` acepta `untrusted: true` para texto que no controlás.
+  `CUBA_QUARANTINE_INFERENCE=1` aplica la política a toda extracción por LLM.
+- Lo cuarentenado se almacena y es inspeccionable, pero **no se recupera**: ni por
+  `cuba_faro` ni por BM25, y queda fuera de la calibración OOD para que el texto no
+  confiable tampoco pueda mover el umbral de abstención.
+- `cuba_eco` gana la mediación: `pending` lista lo retenido, `promote` lo hace
+  recuperable, `quarantine` lo retira. Ambas transiciones quedan en la cadena de
+  auditoría.
+
+### Chunking: el final de los textos largos deja de ser invisible
+
+El embebedor trunca a 512 tokens. Todo lo que pasa de ~1800 caracteres nunca
+llegaba al modelo. Medido: **48 observaciones (2,9%) con ~29.700 caracteres
+invisibles** a la búsqueda vectorial — y son las más densas (post-mortems, lecciones
+detalladas, decisiones de arquitectura).
+
+- Migración 0038 añade `brain_observation_chunks` con solapamiento. La columna
+  vectorial se crea leyendo la dimensión que ya usa la base, no una fija: esta
+  instalación corre bge-m3 a 1024 mientras las migraciones declaran 384.
+- La búsqueda vectorial une los aciertos directos con los aciertos por chunk y
+  deduplica a la observación padre.
+- Medido: para una consulta que apunta al carácter 3047 de una observación de 3221,
+  la similitud vía documento truncado es **0,6566** y vía el chunk que lo cubre,
+  **1,0000**.
+
+### BEAM, y los dos bugs que destapó en minutos
+
+LOCOMO está saturado (16-26k tokens entran en cualquier ventana moderna) y Zep
+documentó que cambiar el prompt del juez mueve su accuracy dos dígitos. BEAM (ICLR
+2026) es el estándar al que se movió el campo. Se añade `beam_prepare.py`, que
+convierte un shard de BEAM al JSONL del harness y mapea `source_chat_ids` a las
+observaciones ingeridas — permitiendo puntuar el retrieval por id, sin juez.
+
+Medido en BEAM-100K (3 conversaciones, 42 preguntas): nDCG@10 0,283 / 0,444 / 0,250
+y recall@10 0,322 / 0,566 / 0,267, bastante por debajo de los números LOCOMO de este
+repo (0,484 / 0,610), tal como predicen las propias líneas base del paper.
+
+### Correcciones
+
+- **`calibrate --apply --json` descartaba `--apply` en silencio**: la rama JSON
+  retornaba antes de persistir. Toda calibración automatizada imprimía un umbral y
+  no guardaba nada.
+- **Con abstención activada y sin umbral calibrado, el gate OOD rechazaba el 100% de
+  las consultas respondibles** (recall 0,0000, tasa de falsa abstención 1,0). La
+  causa medida: los embeddings del corpus están a distancia Mahalanobis p50 18,7 de
+  su propio centro mientras las consultas están a p50 51,7 —los pasajes se embeben
+  con prefijo contextual y las consultas no—, así que el corte teórico χ² (~21) cae
+  por debajo de toda consulta real. Tras `calibrate --apply` (umbral conformal
+  58,35): recall 0,5660, falsa abstención **0,0**.
+- **Dos tests comparaban contra la constante `EMBEDDING_DIM`** en vez de
+  `embedding_dim()`, así que pasaban en CI (variable sin definir) y fallaban en
+  cualquier máquina configurada con otro modelo.
+
 ## [0.15.0] — 2026-07-17 (Cargo `0.15.0` · npm `0.15.0` · PyPI `1.17.0`)
 
 ### Nuevo
