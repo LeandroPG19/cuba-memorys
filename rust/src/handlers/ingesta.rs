@@ -23,27 +23,23 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("text is required for auto_extract action");
     }
 
-    if !crate::protocol::client_supports_sampling() {
-        return Ok(serde_json::json!({
-            "action": "auto_extract",
-            "extracted": 0,
-            "added": 0,
-            "degraded": true,
-            "note": "client did not advertise MCP sampling capability — cannot call an LLM \
-                     to extract. Use action='parse' (heuristic paragraph split) instead, or \
-                     connect from a sampling-capable client."
-        }));
-    }
-
     let hint = args
         .get("entity_hint")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let prompt = build_extraction_prompt(text, hint);
 
-    let reply = crate::protocol::request_sampling_max(&prompt, 1024)
-        .await
-        .context("MCP sampling for auto_extract failed")?;
+    let Some((reply, backend)) = extraction_reply(&prompt).await else {
+        return Ok(serde_json::json!({
+            "action": "auto_extract",
+            "extracted": 0,
+            "added": 0,
+            "degraded": true,
+            "note": "no LLM reachable: the client advertises no MCP sampling capability and no \
+                     local CLI was found on PATH. Install the Claude Code CLI (or set \
+                     CUBA_JUEZ_CLI), or use action='parse' for a heuristic paragraph split."
+        }));
+    };
 
     let (items, relations) = parse_extraction_reply(&reply);
     let extracted = items.len();
@@ -53,6 +49,7 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "extracted": 0,
             "added": 0,
             "relations_linked": 0,
+            "backend": backend,
             "note": "the model returned no durable facts worth remembering from this text"
         }));
     }
@@ -65,6 +62,7 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "extracted": 0,
             "added": 0,
             "relations_linked": relations_linked,
+            "backend": backend,
             "note": "no durable facts, but the text did support graph relations"
         }));
     }
@@ -106,12 +104,49 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "relations_linked".to_string(),
             serde_json::json!(relations_linked),
         );
+        obj.insert("backend".to_string(), serde_json::json!(backend));
         if supersede_conflicts {
             obj.insert("superseded".to_string(), serde_json::json!(ops.update));
             obj.insert("operations".to_string(), ops.to_json());
         }
     }
     Ok(response)
+}
+
+const EXTRACTION_MAX_TOKENS: u32 = 1024;
+const EXTRACTION_BUDGET_RATIO: f32 = 0.6;
+
+pub fn extraction_budget() -> std::time::Duration {
+    crate::protocol::handler_timeout().mul_f32(EXTRACTION_BUDGET_RATIO)
+}
+
+async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
+    if crate::protocol::client_supports_sampling() {
+        match crate::protocol::request_sampling_max(prompt, EXTRACTION_MAX_TOKENS).await {
+            Ok(reply) => return Some((reply, "mcp_sampling")),
+            Err(why) => {
+                tracing::warn!(error = %why, "MCP sampling failed, falling back to a local LLM CLI")
+            }
+        }
+    }
+
+    let backend = crate::cognitive::judge::resolve_offline_llm()?;
+    let name = backend.backend_name();
+    match tokio::time::timeout(extraction_budget(), backend.run_prompt(prompt)).await {
+        Ok(Ok(raw)) => Some((crate::cognitive::judge::unwrap_cli_reply(&raw), name)),
+        Ok(Err(why)) => {
+            tracing::warn!(error = %why, backend = name, "LLM extraction failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                backend = name,
+                budget_secs = extraction_budget().as_secs(),
+                "LLM extraction exceeded its share of the handler timeout"
+            );
+            None
+        }
+    }
 }
 
 async fn resolve_conflicts(

@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-fn handler_timeout() -> Duration {
+pub fn handler_timeout() -> Duration {
     std::env::var("CUBA_HANDLER_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
