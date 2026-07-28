@@ -23,27 +23,23 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("text is required for auto_extract action");
     }
 
-    if !crate::protocol::client_supports_sampling() {
-        return Ok(serde_json::json!({
-            "action": "auto_extract",
-            "extracted": 0,
-            "added": 0,
-            "degraded": true,
-            "note": "client did not advertise MCP sampling capability — cannot call an LLM \
-                     to extract. Use action='parse' (heuristic paragraph split) instead, or \
-                     connect from a sampling-capable client."
-        }));
-    }
-
     let hint = args
         .get("entity_hint")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let prompt = build_extraction_prompt(text, hint);
 
-    let reply = crate::protocol::request_sampling_max(&prompt, 1024)
-        .await
-        .context("MCP sampling for auto_extract failed")?;
+    let Some((reply, backend)) = extraction_reply(&prompt).await else {
+        return Ok(serde_json::json!({
+            "action": "auto_extract",
+            "extracted": 0,
+            "added": 0,
+            "degraded": true,
+            "note": "no LLM reachable: the client advertises no MCP sampling capability and no \
+                     local CLI was found on PATH. Install the Claude Code CLI (or set \
+                     CUBA_JUEZ_CLI), or use action='parse' for a heuristic paragraph split."
+        }));
+    };
 
     let (items, relations) = parse_extraction_reply(&reply);
     let extracted = items.len();
@@ -53,6 +49,7 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "extracted": 0,
             "added": 0,
             "relations_linked": 0,
+            "backend": backend,
             "note": "the model returned no durable facts worth remembering from this text"
         }));
     }
@@ -65,6 +62,7 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "extracted": 0,
             "added": 0,
             "relations_linked": relations_linked,
+            "backend": backend,
             "note": "no durable facts, but the text did support graph relations"
         }));
     }
@@ -106,12 +104,49 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "relations_linked".to_string(),
             serde_json::json!(relations_linked),
         );
+        obj.insert("backend".to_string(), serde_json::json!(backend));
         if supersede_conflicts {
             obj.insert("superseded".to_string(), serde_json::json!(ops.update));
             obj.insert("operations".to_string(), ops.to_json());
         }
     }
     Ok(response)
+}
+
+const EXTRACTION_MAX_TOKENS: u32 = 1024;
+const EXTRACTION_BUDGET_RATIO: f32 = 0.6;
+
+pub fn extraction_budget() -> std::time::Duration {
+    crate::protocol::handler_timeout().mul_f32(EXTRACTION_BUDGET_RATIO)
+}
+
+async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
+    if crate::protocol::client_supports_sampling() {
+        match crate::protocol::request_sampling_max(prompt, EXTRACTION_MAX_TOKENS).await {
+            Ok(reply) => return Some((reply, "mcp_sampling")),
+            Err(why) => {
+                tracing::warn!(error = %why, "MCP sampling failed, falling back to a local LLM CLI")
+            }
+        }
+    }
+
+    let backend = crate::cognitive::judge::resolve_offline_llm()?;
+    let name = backend.backend_name();
+    match tokio::time::timeout(extraction_budget(), backend.run_prompt(prompt)).await {
+        Ok(Ok(raw)) => Some((crate::cognitive::judge::unwrap_cli_reply(&raw), name)),
+        Ok(Err(why)) => {
+            tracing::warn!(error = %why, backend = name, "LLM extraction failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                backend = name,
+                budget_secs = extraction_budget().as_secs(),
+                "LLM extraction exceeded its share of the handler timeout"
+            );
+            None
+        }
+    }
 }
 
 async fn resolve_conflicts(
@@ -284,6 +319,138 @@ fn relations_from_array(value: &Value) -> Vec<ExtractedRelation> {
 pub async fn link_relations_from_reply(pool: &PgPool, reply: &str) -> Result<u32> {
     let (_, relations) = parse_extraction_reply(reply);
     Ok(link_entities(pool, &relations).await)
+}
+
+const RELATION_SCAN_MAX_OBSERVATIONS: i64 = 12;
+const RELATION_SCAN_MAX_CHARS: usize = 4000;
+const RELATION_SCAN_NEIGHBOURS: i64 = 60;
+
+pub fn build_relation_scan_prompt(
+    entity: &str,
+    entity_type: &str,
+    observations: &[String],
+    known: &[String],
+) -> String {
+    let rel_types = crate::constants::VALID_RELATION_TYPES.join(", ");
+    let mut body = String::new();
+    for obs in observations {
+        body.push_str("- ");
+        body.push_str(obs);
+        body.push('\n');
+        if body.chars().count() > RELATION_SCAN_MAX_CHARS {
+            break;
+        }
+    }
+    let known_line = if known.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nEntities already in the graph — reuse these names verbatim when one of them is \
+             what the notes mean:\n{}\n",
+            known.join(", ")
+        )
+    };
+
+    format!(
+        "You are mapping how one entity connects to others in a knowledge graph built from an \
+         AI coding agent's notes.\n\n\
+         ENTITY: \"{entity}\" (type: {entity_type})\n\n\
+         WHAT THE NOTES SAY ABOUT IT:\n{body}{known_line}\n\
+         List the relations these notes actually support, with \"{entity}\" as one endpoint. \
+         State only what the notes assert — do not invent plausible-sounding links, and do not \
+         relate the entity to itself. If the notes support nothing, return an empty list; that \
+         is a valid and common answer.\n\n\
+         Return STRICT JSON, exactly this shape:\n\
+         {{\"relations\": [{{\"from\": <entity name>, \"to\": <entity name>, \
+         \"relation_type\": one of [{rel_types}]}}]}}\n\n\
+         No prose, no markdown — just the JSON object."
+    )
+}
+
+pub async fn scan_entity_relations(pool: &PgPool, entity_id: uuid::Uuid) -> Result<u32> {
+    let entity: Option<(String, String)> =
+        sqlx::query_as("SELECT name, entity_type FROM brain_entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_optional(pool)
+            .await
+            .context("reading the entity to scan")?;
+    let Some((name, entity_type)) = entity else {
+        return Ok(0);
+    };
+
+    let observations: Vec<(String,)> = sqlx::query_as(
+        "SELECT content FROM brain_observations
+         WHERE entity_id = $1 AND trust = 'trusted'
+         ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(entity_id)
+    .bind(RELATION_SCAN_MAX_OBSERVATIONS)
+    .fetch_all(pool)
+    .await
+    .context("reading observations for the relation scan")?;
+
+    if observations.is_empty() {
+        mark_relations_scanned(pool, entity_id).await;
+        return Ok(0);
+    }
+
+    let known: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM brain_entities
+         WHERE id <> $1
+         ORDER BY (SELECT count(*) FROM brain_relations r
+                   WHERE r.from_entity = brain_entities.id OR r.to_entity = brain_entities.id) DESC,
+                  created_at DESC
+         LIMIT $2",
+    )
+    .bind(entity_id)
+    .bind(RELATION_SCAN_NEIGHBOURS)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let prompt = build_relation_scan_prompt(
+        &name,
+        &entity_type,
+        &observations.into_iter().map(|(c,)| c).collect::<Vec<_>>(),
+        &known.into_iter().map(|(n,)| n).collect::<Vec<_>>(),
+    );
+
+    let Some((reply, _)) = extraction_reply(&prompt).await else {
+        anyhow::bail!("no LLM reachable for the relation scan");
+    };
+
+    let linked = link_relations_from_reply(pool, &reply).await?;
+    mark_relations_scanned(pool, entity_id).await;
+    Ok(linked)
+}
+
+async fn mark_relations_scanned(pool: &PgPool, entity_id: uuid::Uuid) {
+    let _ = sqlx::query("UPDATE brain_entities SET relations_scanned_at = NOW() WHERE id = $1")
+        .bind(entity_id)
+        .execute(pool)
+        .await;
+}
+
+pub async fn entities_awaiting_relation_scan(pool: &PgPool, limit: i64) -> Result<Vec<uuid::Uuid>> {
+    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT e.id FROM brain_entities e
+         WHERE EXISTS (SELECT 1 FROM brain_observations o
+                       WHERE o.entity_id = e.id AND o.trust = 'trusted')
+           AND NOT EXISTS (SELECT 1 FROM brain_relations r
+                           WHERE r.from_entity = e.id OR r.to_entity = e.id)
+           AND (e.relations_scanned_at IS NULL
+                OR EXISTS (SELECT 1 FROM brain_observations o
+                           WHERE o.entity_id = e.id
+                             AND o.created_at > e.relations_scanned_at))
+         ORDER BY e.relations_scanned_at ASC NULLS FIRST,
+                  (SELECT count(*) FROM brain_observations o WHERE o.entity_id = e.id) DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("listing entities awaiting a relation scan")?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 async fn link_entities(pool: &PgPool, relations: &[ExtractedRelation]) -> u32 {

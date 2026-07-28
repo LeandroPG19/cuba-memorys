@@ -71,14 +71,25 @@ fn resolve_llm_judge() -> Box<dyn ContradictionJudge> {
     if crate::protocol::client_supports_sampling() {
         return Box::new(MCPSamplingJudge);
     }
+    resolve_offline_llm().unwrap_or_else(|| Box::new(HeuristicJudge))
+}
+
+pub fn resolve_offline_llm() -> Option<Box<dyn ContradictionJudge>> {
     if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
-        return Box::new(ClaudeCodeJudge::from_env());
+        return Some(Box::new(ClaudeCodeJudge::from_env()));
     }
     #[cfg(feature = "anthropic-api")]
     if env::var("ANTHROPIC_API_KEY").is_ok() {
-        return Box::new(AnthropicApiJudge::from_env());
+        return Some(Box::new(AnthropicApiJudge::from_env()));
     }
-    Box::new(HeuristicJudge)
+    None
+}
+
+pub fn unwrap_cli_reply(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw.trim())
+        .ok()
+        .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
+        .unwrap_or_else(|| raw.to_string())
 }
 
 pub fn default_max_pairs() -> usize {
@@ -120,7 +131,14 @@ impl ContradictionJudge for ClaudeCodeJudge {
     }
     async fn run_prompt(&self, prompt: &str) -> Result<String> {
         let mut child = tokio::process::Command::new(&self.cli)
-            .args(["--model", &self.model, "--print", "--output-format", "json"])
+            .args([
+                "--model",
+                &self.model,
+                "--print",
+                "--output-format",
+                "json",
+                "--strict-mcp-config",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
