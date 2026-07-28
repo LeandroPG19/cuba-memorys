@@ -6,6 +6,83 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.17.0] — 2026-07-28 (Cargo `0.17.0` · npm `0.17.0` · PyPI `1.19.0`)
+
+v0.16.0 prometió que el grafo crecía solo. No crecía: la capacidad estaba ahí y
+nunca llegaba a ejecutarse. Esta versión la hace funcionar de verdad y aplica lo
+mismo al corpus que ya existía.
+
+### La extracción automática nunca se había ejecutado
+
+Consultando producción por origen: 1571 observaciones `source='agent'`, 74
+`source='user'` y **cero** `source='inference'`. Ese último número es la prueba:
+`source='inference'` es lo único que escribe `auto_extract`, y `auto_extract` es la
+única ruta que crea relaciones automáticamente. Cero filas en 1645 observaciones
+significa que nunca corrió.
+
+La causa era una puerta cerrada: `auto_extract` devolvía `degraded` salvo que el
+cliente anunciara `capabilities.sampling`. **Ningún cliente real lo anuncia** —
+verificado en vivo contra Claude Code 2.1.220, que respondió *"client did not
+advertise MCP sampling capability"*. La función estaba fuera de alcance desde todos
+los clientes en uso.
+
+- **`auto_extract` ahora escala igual que `cuba_juez`**: sampling si el cliente lo
+  ofrece, si no un CLI local, si no la API. Ese escalonado ya existía en
+  `resolve_llm_judge()` y llevaba releases funcionando; `auto_extract` simplemente
+  no lo llamaba. La rama de sampling se mantiene aparte porque
+  `MCPSamplingJudge::run_prompt` corta en 256 tokens y la extracción necesita 1024.
+- **La respuesta ahora incluye `backend`**, para que se pueda ver qué LLM contestó
+  en lugar de deducirlo.
+
+### Dos fallos que solo aparecen bajo el protocolo real
+
+Ambos pasaban desapercibidos llamando al handler directamente, que es como estaba
+escrito el test:
+
+- **El handler tiene 30 s y el CLI tardaba ~20 s**, así que el primer intento
+  end-to-end moría con `-32603 Handler timed out`. El LLM recibe ahora una fracción
+  fija del presupuesto (60%) y agotarla degrada a una respuesta normal en vez de
+  tumbar la llamada entera.
+- **`claude --print` cargaba toda la configuración MCP del usuario**, cuba-memorys
+  incluido: un servidor lanzando un cliente que relanza el servidor.
+  `--strict-mcp-config` lo corta — **9,48 s → 3,98 s (−58%)** y adiós recursión.
+  `cuba_juez` comparte backend y hereda la mejora.
+
+### El ciclo REM cablea también lo que ya estaba escrito
+
+Arreglar `auto_extract` solo sirve para memorias nuevas. El corpus existente seguía
+igual: 148 de 279 entidades (53%) con grado 0 y cero relaciones inferidas.
+
+- **Nueva tarea REM**: cada ciclo toma un lote de entidades aisladas que tienen
+  observaciones y pregunta al LLM qué conectan sus propias notas.
+- Al prompt se le pasan **los nombres ya presentes en el grafo**, ordenados por
+  grado, para que reutilice `PostgreSQL` en lugar de acuñar `Postgres` y fragmentar
+  el grafo. Se le dice explícitamente que una lista vacía es respuesta válida,
+  porque un modelo presionado a encontrar enlaces se los inventa.
+- Las entidades se sellan con `relations_scanned_at` para no pagar dos veces por un
+  escaneo que legítimamente no encontró nada. Pero un sello a secas congelaría el
+  grafo, así que la cola devuelve también las entidades cuya observación más nueva
+  es posterior al sello.
+- El lote está acotado: `CUBA_REM_RELATION_BATCH` (por defecto 5, `0` lo desactiva).
+  Cada entidad cuesta una llamada de CLI de ~4 s, así que un ciclo gasta ~20 s cada
+  cuatro horas en vez de vaciar la cola de golpe.
+
+### Migración
+
+- **0039**: `brain_entities.relations_scanned_at` + índice parcial para la cola.
+  Aditiva; se aplica sola al arrancar.
+
+### Medido
+
+Contra una base aislada, por JSON-RPC y sin sampling: 3 hechos extraídos y 3
+relaciones escritas (`cuba-memorys --uses--> Rust`, `--uses--> PostgreSQL`,
+`--depends_on--> pgvector`), todas con `source='inference'` y
+`provenance='inferred'`. El escaneo retroactivo tomó una entidad huérfana con tres
+notas y la dejó como `--depends_on--> PostgreSQL` y `--uses--> Rust`, sellada y
+fuera de la cola; añadirle una nota posterior la devolvió a la cola.
+
+302 tests en verde, clippy sin avisos.
+
 ## [0.16.0] — 2026-07-28 (Cargo `0.16.0` · npm `0.16.0` · PyPI `1.18.0`)
 
 Esta versión sale de una comparación con el estado del arte (mem0, Zep/Graphiti,

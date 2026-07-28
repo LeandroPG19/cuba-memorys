@@ -6,12 +6,12 @@
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.16.0",
+  "version": "0.17.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.16.0",
+      "version": "0.17.0",
       "transport": {
         "type": "stdio"
       },
@@ -64,13 +64,20 @@
           "isRequired": false,
           "isSecret": true,
           "format": "string"
+        },
+        {
+          "name": "CUBA_REM_RELATION_BATCH",
+          "description": "Isolated entities the REM cycle scans for relations per run (default 5, 0 disables).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
         }
       ]
     },
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "1.18.0",
+      "version": "1.19.0",
       "transport": {
         "type": "stdio"
       },
