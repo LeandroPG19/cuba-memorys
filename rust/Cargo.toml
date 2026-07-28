@@ -86,6 +86,9 @@ strip = true
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
+[profile.dev]
+debug = 1
+
 [profile.quick]
 inherits = "release"
 opt-level = 2
