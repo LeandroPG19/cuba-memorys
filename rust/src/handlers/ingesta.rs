@@ -79,6 +79,22 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         crate::cognitive::memory_op::OpBreakdown::default()
     };
 
+    let untrusted = args
+        .get("untrusted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let items = if untrusted {
+        items
+            .into_iter()
+            .map(|mut i| {
+                i["trust"] = serde_json::json!(crate::core::trust::QUARANTINED);
+                i
+            })
+            .collect()
+    } else {
+        items
+    };
+
     let ingest_args = serde_json::json!({ "action": "ingest", "items": items });
     let result = ingest(pool, &ingest_args).await?;
 
@@ -413,12 +429,16 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
                 .get("source")
                 .and_then(|v| v.as_str())
                 .unwrap_or("agent");
-            Some(serde_json::json!({
+            let mut row = serde_json::json!({
                 "entity_name": entity_name,
                 "content": content,
                 "observation_type": obs_type,
                 "source": source
-            }))
+            });
+            if let Some(trust) = item.get("trust").and_then(|v| v.as_str()) {
+                row["trust"] = serde_json::json!(trust);
+            }
+            Some(row)
         })
         .collect();
 

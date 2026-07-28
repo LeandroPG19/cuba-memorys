@@ -181,6 +181,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
              JOIN brain_entities e ON o.entity_id = e.id
              WHERE $1 = ANY(o.tags)
                AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
                AND ($3::uuid IS NULL OR o.project_id = $3 OR o.project_id IS NULL)
              ORDER BY o.importance DESC
              LIMIT $2",
@@ -651,6 +652,7 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
          JOIN brain_entities e ON o.entity_id = e.id
          WHERE similarity(o.content, $1) > 0.3
            AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
            AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
          ORDER BY sim DESC
          LIMIT 10",
@@ -671,6 +673,7 @@ async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>
                          JOIN brain_entities e ON o.entity_id = e.id
                          WHERE o.embedding IS NOT NULL
                            AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
                            AND (o.embedding <=> $1::vector) < 0.8
                            AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
                          ORDER BY o.embedding <=> $1::vector
@@ -892,6 +895,7 @@ async fn text_search(
              WHERE (o.search_vector @@ cuba_or_tsquery($1)
                 OR similarity(o.content, $1) > 0.3)
                AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
                AND o.created_at >= $3 AND o.created_at <= $4
                AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
              ORDER BY score DESC
@@ -1023,6 +1027,7 @@ async fn vector_search(
          JOIN brain_entities e ON o.entity_id = e.id
          WHERE o.embedding IS NOT NULL
            AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
            AND o.created_at >= $3 AND o.created_at <= $4
            AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
          ORDER BY o.embedding <=> $1::vector
@@ -1149,6 +1154,7 @@ async fn associative_expand(
              JOIN brain_entities e ON e.id = o.entity_id
              WHERE o.entity_id = $1
                AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
                AND ($2::uuid IS NULL OR o.project_id = $2 OR o.project_id IS NULL)
              ORDER BY o.importance DESC
              LIMIT $3",
@@ -1324,6 +1330,7 @@ async fn check_ood(
     let raw: Vec<(pgvector::Vector,)> = sqlx::query_as(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
+           AND trust = 'trusted'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
          ORDER BY id
          LIMIT 5000",

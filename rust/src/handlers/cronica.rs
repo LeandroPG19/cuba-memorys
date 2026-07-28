@@ -94,9 +94,11 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
 
     let active_session_id: Option<uuid::Uuid> = crate::session::session_id();
 
+    let trust = crate::core::trust::for_source(source, args.get("trust").and_then(|v| v.as_str()));
+
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id, trust)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(entity_id)
     .bind(content)
@@ -106,6 +108,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .bind(active_session_id)
     .bind(&tags)
     .bind(project_id)
+    .bind(&trust)
     .fetch_one(pool)
     .await
     .context("failed to insert observation")?;
@@ -317,6 +320,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         source: String,
         importance: f64,
         tags: Vec<String>,
+        trust: String,
     }
     struct InsertedObs {
         entity_id: uuid::Uuid,
@@ -384,6 +388,10 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     source: source.to_string(),
                     importance,
                     tags,
+                    trust: crate::core::trust::for_source(
+                        source,
+                        obs.get("trust").and_then(|v| v.as_str()),
+                    ),
                 }));
             }
         }
@@ -401,8 +409,8 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         match action {
             BatchAction::Insert(pending) => {
                 let row: (uuid::Uuid,) = sqlx::query_as(
-                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                    "INSERT INTO brain_observations (entity_id, content, observation_type, source, importance, session_id, tags, project_id, trust)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
                 )
                 .bind(pending.entity_id)
                 .bind(&pending.content)
@@ -412,6 +420,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                 .bind(active_session_id)
                 .bind(&pending.tags)
                 .bind(project_id)
+                .bind(&pending.trust)
                 .fetch_one(&mut *tx)
                 .await?;
                 inserted_for_embed.push((
