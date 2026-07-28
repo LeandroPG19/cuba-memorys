@@ -26,6 +26,7 @@ pub mod project;
 pub mod protocol;
 pub mod recall_cli;
 pub mod reembed_cli;
+pub mod rem_cli;
 pub mod search;
 pub mod secure_cli;
 pub mod session;

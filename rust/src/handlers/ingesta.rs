@@ -45,14 +45,27 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         .await
         .context("MCP sampling for auto_extract failed")?;
 
-    let items = parse_extracted_items(&reply);
+    let (items, relations) = parse_extraction_reply(&reply);
     let extracted = items.len();
+    if extracted == 0 && relations.is_empty() {
+        return Ok(serde_json::json!({
+            "action": "auto_extract",
+            "extracted": 0,
+            "added": 0,
+            "relations_linked": 0,
+            "note": "the model returned no durable facts worth remembering from this text"
+        }));
+    }
+
+    let relations_linked = link_entities(pool, &relations).await;
+
     if extracted == 0 {
         return Ok(serde_json::json!({
             "action": "auto_extract",
             "extracted": 0,
             "added": 0,
-            "note": "the model returned no durable facts worth remembering from this text"
+            "relations_linked": relations_linked,
+            "note": "no durable facts, but the text did support graph relations"
         }));
     }
 
@@ -73,6 +86,10 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     if let Some(obj) = response.as_object_mut() {
         obj.insert("action".to_string(), serde_json::json!("auto_extract"));
         obj.insert("extracted".to_string(), serde_json::json!(extracted));
+        obj.insert(
+            "relations_linked".to_string(),
+            serde_json::json!(relations_linked),
+        );
         if supersede_conflicts {
             obj.insert("superseded".to_string(), serde_json::json!(ops.update));
             obj.insert("operations".to_string(), ops.to_json());
@@ -168,19 +185,153 @@ fn build_extraction_prompt(text: &str, hint: &str) -> String {
     } else {
         format!("\nThe main subject is likely: \"{hint}\". Prefer it as entity_name when it fits.")
     };
+    let rel_types = crate::constants::VALID_RELATION_TYPES.join(", ");
     format!(
         "You extract durable, reusable memories from an AI coding agent's work log.\n\
-         From the text below, extract only facts worth remembering across sessions — \
-         decisions made, lessons learned, errors and their fixes, stable preferences, \
-         key technical facts. Ignore chit-chat, transient state, and anything that will \
-         not matter next week.{hint_line}\n\n\
-         Return STRICT JSON: an array of objects, each\n\
-         {{\"entity_name\": <the project/technology/concept the fact is about>, \
+         From the text below, extract two things:\n\n\
+         1. FACTS worth remembering across sessions — decisions made, lessons learned, \
+         errors and their fixes, stable preferences, key technical facts. Ignore chit-chat, \
+         transient state, and anything that will not matter next week.\n\
+         2. RELATIONS between the entities those facts are about — how they connect. \
+         Only state a relation the text actually supports; do not invent plausible-sounding \
+         links. Both endpoints should be things the text genuinely talks about.{hint_line}\n\n\
+         Return STRICT JSON, exactly this shape:\n\
+         {{\"facts\": [{{\"entity_name\": <the project/technology/concept the fact is about>, \
          \"content\": <one self-contained sentence>, \
-         \"observation_type\": one of [fact, decision, lesson, preference, error, solution, context, tool_usage]}}\n\
-         Return [] if nothing is worth remembering. No prose, no markdown — just the JSON array.\n\n\
+         \"observation_type\": one of [fact, decision, lesson, preference, error, solution, context, tool_usage]}}],\n\
+         \x20\"relations\": [{{\"from\": <entity name>, \"to\": <entity name>, \
+         \"relation_type\": one of [{rel_types}]}}]}}\n\n\
+         Use [] for either list when there is nothing worth recording. \
+         No prose, no markdown — just the JSON object.\n\n\
          TEXT:\n{text}"
     )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtractedRelation {
+    pub from: String,
+    pub to: String,
+    pub relation_type: String,
+}
+
+fn parse_extraction_reply(reply: &str) -> (Vec<Value>, Vec<ExtractedRelation>) {
+    if let Some(obj) = extract_json_object(reply) {
+        let facts = obj.get("facts").map(items_from_array).unwrap_or_default();
+        let relations = obj
+            .get("relations")
+            .map(relations_from_array)
+            .unwrap_or_default();
+        return (facts, relations);
+    }
+    (parse_extracted_items(reply), Vec::new())
+}
+
+fn extract_json_object(reply: &str) -> Option<Value> {
+    let open = reply.find('{')?;
+    if reply.find('[').is_some_and(|bracket| bracket < open) {
+        return None;
+    }
+    let close = reply.rfind('}')?;
+    if close <= open {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(&reply[open..=close]).ok()?;
+    parsed.is_object().then_some(parsed)
+}
+
+fn relations_from_array(value: &Value) -> Vec<ExtractedRelation> {
+    let Some(arr) = value.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let from = item.get("from").and_then(|v| v.as_str())?.trim();
+            let to = item.get("to").and_then(|v| v.as_str())?.trim();
+            let relation_type = item
+                .get("relation_type")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|t| crate::constants::VALID_RELATION_TYPES.contains(t))
+                .unwrap_or("related_to");
+            if from.is_empty() || to.is_empty() || from.eq_ignore_ascii_case(to) {
+                return None;
+            }
+            Some(ExtractedRelation {
+                from: from.to_string(),
+                to: to.to_string(),
+                relation_type: relation_type.to_string(),
+            })
+        })
+        .collect()
+}
+
+pub async fn link_relations_from_reply(pool: &PgPool, reply: &str) -> Result<u32> {
+    let (_, relations) = parse_extraction_reply(reply);
+    Ok(link_entities(pool, &relations).await)
+}
+
+async fn link_entities(pool: &PgPool, relations: &[ExtractedRelation]) -> u32 {
+    let project_id = crate::project::current_project_id(pool)
+        .await
+        .ok()
+        .flatten();
+    let mut created = 0u32;
+
+    for rel in relations {
+        let from_id = upsert_entity(pool, &rel.from, project_id).await;
+        let to_id = upsert_entity(pool, &rel.to, project_id).await;
+        let (Some(from_id), Some(to_id)) = (from_id, to_id) else {
+            continue;
+        };
+
+        let done = sqlx::query(
+            "INSERT INTO brain_relations
+                (from_entity, to_entity, relation_type, project_id, provenance)
+             VALUES ($1, $2, $3, $4, 'inferred')
+             ON CONFLICT (from_entity, to_entity, relation_type)
+             DO UPDATE SET strength = LEAST(brain_relations.strength + 0.1, 1.0),
+                           last_traversed = NOW()",
+        )
+        .bind(from_id)
+        .bind(to_id)
+        .bind(&rel.relation_type)
+        .bind(project_id)
+        .execute(pool)
+        .await;
+
+        match done {
+            Ok(r) if r.rows_affected() > 0 => created += 1,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, from = %rel.from, to = %rel.to, "auto_extract: could not write relation")
+            }
+        }
+    }
+    created
+}
+
+async fn upsert_entity(
+    pool: &PgPool,
+    name: &str,
+    project_id: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    let row: Result<(uuid::Uuid,), _> = sqlx::query_as(
+        "INSERT INTO brain_entities (name, entity_type, project_id)
+         VALUES ($1, 'concept', $2)
+         ON CONFLICT (name) DO UPDATE SET updated_at = NOW()
+         RETURNING id",
+    )
+    .bind(name)
+    .bind(project_id)
+    .fetch_one(pool)
+    .await;
+    match row {
+        Ok((id,)) => Some(id),
+        Err(e) => {
+            tracing::warn!(error = %e, entity = %name, "auto_extract: could not upsert entity");
+            None
+        }
+    }
 }
 
 fn parse_extracted_items(reply: &str) -> Vec<Value> {
@@ -192,7 +343,11 @@ fn parse_extracted_items(reply: &str) -> Vec<Value> {
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    let Some(arr) = parsed.as_array() else {
+    items_from_array(&parsed)
+}
+
+fn items_from_array(value: &Value) -> Vec<Value> {
+    let Some(arr) = value.as_array() else {
         return Vec::new();
     };
 
@@ -409,5 +564,84 @@ mod tests {
         assert!(parse_extracted_items("[]").is_empty());
         assert!(parse_extracted_items("I couldn't find any facts.").is_empty());
         assert!(parse_extracted_items("").is_empty());
+    }
+
+    use super::parse_extraction_reply;
+
+    #[test]
+    fn parses_facts_and_relations_from_the_object_shape() {
+        let reply = r#"{
+            "facts": [{"entity_name":"cuba-memorys","content":"uses pgvector","observation_type":"fact"}],
+            "relations": [{"from":"cuba-memorys","to":"PostgreSQL","relation_type":"depends_on"}]
+        }"#;
+        let (facts, relations) = parse_extraction_reply(reply);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0]["entity_name"], "cuba-memorys");
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].from, "cuba-memorys");
+        assert_eq!(relations[0].to, "PostgreSQL");
+        assert_eq!(relations[0].relation_type, "depends_on");
+    }
+
+    #[test]
+    fn a_bare_array_still_yields_its_facts() {
+        let reply = r#"[{"entity_name":"X","content":"did Y","observation_type":"decision"}]"#;
+        let (facts, relations) = parse_extraction_reply(reply);
+        assert_eq!(facts.len(), 1, "old-format facts must still land");
+        assert!(relations.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_relation_type_falls_back_instead_of_dropping_the_edge() {
+        let reply =
+            r#"{"facts":[],"relations":[{"from":"A","to":"B","relation_type":"invented_type"}]}"#;
+        let (_, relations) = parse_extraction_reply(reply);
+        assert_eq!(relations.len(), 1);
+        assert_eq!(
+            relations[0].relation_type, "related_to",
+            "an unknown type must degrade to the generic one, not violate the DB CHECK"
+        );
+    }
+
+    #[test]
+    fn self_loops_and_empty_endpoints_are_dropped() {
+        let reply = r#"{"facts":[],"relations":[
+            {"from":"A","to":"A","relation_type":"uses"},
+            {"from":"a","to":"A","relation_type":"uses"},
+            {"from":"","to":"B","relation_type":"uses"},
+            {"from":"C","to":"","relation_type":"uses"},
+            {"from":"D","to":"E","relation_type":"uses"}
+        ]}"#;
+        let (_, relations) = parse_extraction_reply(reply);
+        assert_eq!(relations.len(), 1, "only D->E survives");
+        assert_eq!(relations[0].from, "D");
+    }
+
+    #[test]
+    fn missing_relations_key_is_not_an_error() {
+        let reply = r#"{"facts":[{"entity_name":"X","content":"y","observation_type":"fact"}]}"#;
+        let (facts, relations) = parse_extraction_reply(reply);
+        assert_eq!(facts.len(), 1);
+        assert!(relations.is_empty());
+    }
+
+    #[test]
+    fn prose_and_fences_around_the_object_are_tolerated() {
+        let reply = "Here you go:\n```json\n{\"facts\":[],\"relations\":[{\"from\":\"A\",\"to\":\"B\",\"relation_type\":\"causes\"}]}\n```\nDone.";
+        let (_, relations) = parse_extraction_reply(reply);
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].relation_type, "causes");
+    }
+
+    #[test]
+    fn every_relation_type_the_prompt_offers_is_accepted() {
+        for t in crate::constants::VALID_RELATION_TYPES {
+            let reply = format!(
+                r#"{{"facts":[],"relations":[{{"from":"A","to":"B","relation_type":"{t}"}}]}}"#
+            );
+            let (_, relations) = parse_extraction_reply(&reply);
+            assert_eq!(relations.len(), 1, "type {t} was rejected");
+            assert_eq!(relations[0].relation_type, *t);
+        }
     }
 }
