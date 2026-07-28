@@ -120,7 +120,25 @@ pub fn extraction_budget() -> std::time::Duration {
     crate::protocol::handler_timeout().mul_f32(EXTRACTION_BUDGET_RATIO)
 }
 
+const RELATION_SCAN_DEFAULT_TIMEOUT_SECS: u64 = 90;
+
+pub fn relation_scan_budget() -> std::time::Duration {
+    let secs = std::env::var("CUBA_REM_SCAN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(RELATION_SCAN_DEFAULT_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
+    extraction_reply_within(prompt, extraction_budget()).await
+}
+
+async fn extraction_reply_within(
+    prompt: &str,
+    budget: std::time::Duration,
+) -> Option<(String, &'static str)> {
     if crate::protocol::client_supports_sampling() {
         match crate::protocol::request_sampling_max(prompt, EXTRACTION_MAX_TOKENS).await {
             Ok(reply) => return Some((reply, "mcp_sampling")),
@@ -130,9 +148,9 @@ async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
         }
     }
 
-    let backend = crate::cognitive::judge::resolve_offline_llm()?;
+    let backend = crate::cognitive::judge::resolve_offline_llm_within(Some(budget))?;
     let name = backend.backend_name();
-    match tokio::time::timeout(extraction_budget(), backend.run_prompt(prompt)).await {
+    match tokio::time::timeout(budget, backend.run_prompt(prompt)).await {
         Ok(Ok(raw)) => Some((crate::cognitive::judge::unwrap_cli_reply(&raw), name)),
         Ok(Err(why)) => {
             tracing::warn!(error = %why, backend = name, "LLM extraction failed");
@@ -141,8 +159,8 @@ async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
         Err(_) => {
             tracing::warn!(
                 backend = name,
-                budget_secs = extraction_budget().as_secs(),
-                "LLM extraction exceeded its share of the handler timeout"
+                budget_secs = budget.as_secs(),
+                "LLM extraction ran out of its time budget"
             );
             None
         }
@@ -415,7 +433,7 @@ pub async fn scan_entity_relations(pool: &PgPool, entity_id: uuid::Uuid) -> Resu
         &known.into_iter().map(|(n,)| n).collect::<Vec<_>>(),
     );
 
-    let Some((reply, _)) = extraction_reply(&prompt).await else {
+    let Some((reply, _)) = extraction_reply_within(&prompt, relation_scan_budget()).await else {
         anyhow::bail!("no LLM reachable for the relation scan");
     };
 

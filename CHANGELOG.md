@@ -6,6 +6,35 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.17.1] — 2026-07-28 (Cargo `0.17.1` · npm `0.17.1` · PyPI `1.19.1`)
+
+Correcciones encontradas ejecutando el ciclo REM de v0.17.0 contra el corpus real
+de producción, no contra una base de prueba. El escaneo funcionaba en los tests
+porque el test llama a `scan_entity_relations()` directamente con una entidad de
+tres notas; sobre entidades reales el prompt lleva hasta 12 observaciones más 60
+nombres del grafo, y ahí se rompía.
+
+- **El escaneo de relaciones heredaba el presupuesto del handler MCP.** El ciclo
+  REM no corre dentro de un handler y no tiene por qué respetar sus 30 s, pero
+  `extraction_budget()` le imponía el 60% de ese límite: 18 s para un prompt
+  varias veces más largo que el de `auto_extract`. Ahora el escaneo tiene su
+  propio presupuesto (`CUBA_REM_SCAN_TIMEOUT_SECS`, por defecto 90 s).
+- **Los dos timeouts no estaban alineados.** `ClaudeCodeJudge` lleva su propio
+  corte interno de 30 s, así que el presupuesto externo nunca llegaba a aplicarse
+  y el CLI moría antes. `resolve_offline_llm_within()` ajusta ahora el timeout del
+  backend al presupuesto de quien lo llama, de modo que manda un solo número.
+- **Un fallo aislado abortaba el lote completo.** El bucle hacía `break` al primer
+  error, así que una entidad lenta se llevaba por delante a las cuatro restantes
+  del ciclo. Ahora tolera fallos sueltos y solo abandona tras dos consecutivos;
+  el recuento se reporta en `failed`.
+
+Medido en producción antes y después del arreglo: **4 de 5 entidades escaneadas
+con 1 fallo → 5 de 5 con 0 fallos**. Acumulado sobre el corpus real: relaciones
+213 → 228 (15 de ellas `provenance='inferred'`), entidades aisladas 148 → 141,
+48 observaciones largas por fin fragmentadas en chunks.
+
+302 tests en verde, clippy sin avisos.
+
 ## [0.17.0] — 2026-07-28 (Cargo `0.17.0` · npm `0.17.0` · PyPI `1.19.0`)
 
 v0.16.0 prometió que el grafo crecía solo. No crecía: la capacidad estaba ahí y

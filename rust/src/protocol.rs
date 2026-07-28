@@ -575,6 +575,7 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     tracing::info!(
         entities_scanned = scan.scanned,
         edges_created = scan.linked,
+        failed = scan.failed,
         "isolated entities scanned for relations"
     );
 
@@ -587,11 +588,13 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
 }
 
 const REM_RELATION_SCAN_DEFAULT_BATCH: usize = 5;
+const REM_RELATION_SCAN_MAX_FAILURES: usize = 2;
 
 #[derive(Default)]
 pub struct RelationScanReport {
     pub scanned: usize,
     pub linked: u32,
+    pub failed: usize,
 }
 
 pub fn rem_relation_scan_batch() -> usize {
@@ -617,15 +620,25 @@ async fn rem_scan_relations(pool: &PgPool) -> RelationScanReport {
             }
         };
 
+    let mut consecutive_failures = 0usize;
     for id in candidates {
         match crate::handlers::ingesta::scan_entity_relations(pool, id).await {
             Ok(linked) => {
+                consecutive_failures = 0;
                 report.scanned += 1;
                 report.linked += linked;
             }
             Err(why) => {
+                consecutive_failures += 1;
+                report.failed += 1;
                 tracing::warn!(error = %why, entity = %id, "relation scan failed");
-                break;
+                if consecutive_failures >= REM_RELATION_SCAN_MAX_FAILURES {
+                    tracing::warn!(
+                        failures = consecutive_failures,
+                        "giving up on this cycle's relation scan"
+                    );
+                    break;
+                }
             }
         }
     }

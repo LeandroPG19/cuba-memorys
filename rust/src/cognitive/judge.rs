@@ -75,12 +75,24 @@ fn resolve_llm_judge() -> Box<dyn ContradictionJudge> {
 }
 
 pub fn resolve_offline_llm() -> Option<Box<dyn ContradictionJudge>> {
+    resolve_offline_llm_within(None)
+}
+
+pub fn resolve_offline_llm_within(timeout: Option<Duration>) -> Option<Box<dyn ContradictionJudge>> {
     if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
-        return Some(Box::new(ClaudeCodeJudge::from_env()));
+        let mut judge = ClaudeCodeJudge::from_env();
+        if let Some(t) = timeout {
+            judge.timeout = t;
+        }
+        return Some(Box::new(judge));
     }
     #[cfg(feature = "anthropic-api")]
     if env::var("ANTHROPIC_API_KEY").is_ok() {
-        return Some(Box::new(AnthropicApiJudge::from_env()));
+        let mut judge = AnthropicApiJudge::from_env();
+        if let Some(t) = timeout {
+            judge.timeout = t;
+        }
+        return Some(Box::new(judge));
     }
     None
 }
