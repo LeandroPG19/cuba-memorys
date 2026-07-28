@@ -321,6 +321,138 @@ pub async fn link_relations_from_reply(pool: &PgPool, reply: &str) -> Result<u32
     Ok(link_entities(pool, &relations).await)
 }
 
+const RELATION_SCAN_MAX_OBSERVATIONS: i64 = 12;
+const RELATION_SCAN_MAX_CHARS: usize = 4000;
+const RELATION_SCAN_NEIGHBOURS: i64 = 60;
+
+pub fn build_relation_scan_prompt(
+    entity: &str,
+    entity_type: &str,
+    observations: &[String],
+    known: &[String],
+) -> String {
+    let rel_types = crate::constants::VALID_RELATION_TYPES.join(", ");
+    let mut body = String::new();
+    for obs in observations {
+        body.push_str("- ");
+        body.push_str(obs);
+        body.push('\n');
+        if body.chars().count() > RELATION_SCAN_MAX_CHARS {
+            break;
+        }
+    }
+    let known_line = if known.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nEntities already in the graph — reuse these names verbatim when one of them is \
+             what the notes mean:\n{}\n",
+            known.join(", ")
+        )
+    };
+
+    format!(
+        "You are mapping how one entity connects to others in a knowledge graph built from an \
+         AI coding agent's notes.\n\n\
+         ENTITY: \"{entity}\" (type: {entity_type})\n\n\
+         WHAT THE NOTES SAY ABOUT IT:\n{body}{known_line}\n\
+         List the relations these notes actually support, with \"{entity}\" as one endpoint. \
+         State only what the notes assert — do not invent plausible-sounding links, and do not \
+         relate the entity to itself. If the notes support nothing, return an empty list; that \
+         is a valid and common answer.\n\n\
+         Return STRICT JSON, exactly this shape:\n\
+         {{\"relations\": [{{\"from\": <entity name>, \"to\": <entity name>, \
+         \"relation_type\": one of [{rel_types}]}}]}}\n\n\
+         No prose, no markdown — just the JSON object."
+    )
+}
+
+pub async fn scan_entity_relations(pool: &PgPool, entity_id: uuid::Uuid) -> Result<u32> {
+    let entity: Option<(String, String)> =
+        sqlx::query_as("SELECT name, entity_type FROM brain_entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_optional(pool)
+            .await
+            .context("reading the entity to scan")?;
+    let Some((name, entity_type)) = entity else {
+        return Ok(0);
+    };
+
+    let observations: Vec<(String,)> = sqlx::query_as(
+        "SELECT content FROM brain_observations
+         WHERE entity_id = $1 AND trust = 'trusted'
+         ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(entity_id)
+    .bind(RELATION_SCAN_MAX_OBSERVATIONS)
+    .fetch_all(pool)
+    .await
+    .context("reading observations for the relation scan")?;
+
+    if observations.is_empty() {
+        mark_relations_scanned(pool, entity_id).await;
+        return Ok(0);
+    }
+
+    let known: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM brain_entities
+         WHERE id <> $1
+         ORDER BY (SELECT count(*) FROM brain_relations r
+                   WHERE r.from_entity = brain_entities.id OR r.to_entity = brain_entities.id) DESC,
+                  created_at DESC
+         LIMIT $2",
+    )
+    .bind(entity_id)
+    .bind(RELATION_SCAN_NEIGHBOURS)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let prompt = build_relation_scan_prompt(
+        &name,
+        &entity_type,
+        &observations.into_iter().map(|(c,)| c).collect::<Vec<_>>(),
+        &known.into_iter().map(|(n,)| n).collect::<Vec<_>>(),
+    );
+
+    let Some((reply, _)) = extraction_reply(&prompt).await else {
+        anyhow::bail!("no LLM reachable for the relation scan");
+    };
+
+    let linked = link_relations_from_reply(pool, &reply).await?;
+    mark_relations_scanned(pool, entity_id).await;
+    Ok(linked)
+}
+
+async fn mark_relations_scanned(pool: &PgPool, entity_id: uuid::Uuid) {
+    let _ = sqlx::query("UPDATE brain_entities SET relations_scanned_at = NOW() WHERE id = $1")
+        .bind(entity_id)
+        .execute(pool)
+        .await;
+}
+
+pub async fn entities_awaiting_relation_scan(pool: &PgPool, limit: i64) -> Result<Vec<uuid::Uuid>> {
+    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT e.id FROM brain_entities e
+         WHERE EXISTS (SELECT 1 FROM brain_observations o
+                       WHERE o.entity_id = e.id AND o.trust = 'trusted')
+           AND NOT EXISTS (SELECT 1 FROM brain_relations r
+                           WHERE r.from_entity = e.id OR r.to_entity = e.id)
+           AND (e.relations_scanned_at IS NULL
+                OR EXISTS (SELECT 1 FROM brain_observations o
+                           WHERE o.entity_id = e.id
+                             AND o.created_at > e.relations_scanned_at))
+         ORDER BY e.relations_scanned_at ASC NULLS FIRST,
+                  (SELECT count(*) FROM brain_observations o WHERE o.entity_id = e.id) DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("listing entities awaiting a relation scan")?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 async fn link_entities(pool: &PgPool, relations: &[ExtractedRelation]) -> u32 {
     let project_id = crate::project::current_project_id(pool)
         .await

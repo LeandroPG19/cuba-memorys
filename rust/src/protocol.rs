@@ -571,12 +571,65 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     let chunked = rem_backfill_chunks(pool).await;
     tracing::info!(observations_chunked = chunked, "long observations chunked");
 
+    let scan = rem_scan_relations(pool).await;
+    tracing::info!(
+        entities_scanned = scan.scanned,
+        edges_created = scan.linked,
+        "isolated entities scanned for relations"
+    );
+
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
     tracing::info!("REM consolidation complete");
 
     Ok(())
+}
+
+const REM_RELATION_SCAN_DEFAULT_BATCH: usize = 5;
+
+#[derive(Default)]
+pub struct RelationScanReport {
+    pub scanned: usize,
+    pub linked: u32,
+}
+
+pub fn rem_relation_scan_batch() -> usize {
+    std::env::var("CUBA_REM_RELATION_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(REM_RELATION_SCAN_DEFAULT_BATCH)
+}
+
+async fn rem_scan_relations(pool: &PgPool) -> RelationScanReport {
+    let batch = rem_relation_scan_batch();
+    let mut report = RelationScanReport::default();
+    if batch == 0 {
+        return report;
+    }
+
+    let candidates =
+        match crate::handlers::ingesta::entities_awaiting_relation_scan(pool, batch as i64).await {
+            Ok(ids) => ids,
+            Err(why) => {
+                tracing::warn!(error = %why, "could not list entities for the relation scan");
+                return report;
+            }
+        };
+
+    for id in candidates {
+        match crate::handlers::ingesta::scan_entity_relations(pool, id).await {
+            Ok(linked) => {
+                report.scanned += 1;
+                report.linked += linked;
+            }
+            Err(why) => {
+                tracing::warn!(error = %why, entity = %id, "relation scan failed");
+                break;
+            }
+        }
+    }
+    report
 }
 
 fn rem_autolink_enabled() -> bool {
