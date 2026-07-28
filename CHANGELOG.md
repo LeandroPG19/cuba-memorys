@@ -6,6 +6,71 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.18.0] — 2026-07-28 (Cargo `0.18.0` · npm `0.18.0` · PyPI `1.20.0`)
+
+Dos cosas que llevaban releases documentadas como pendientes: el reranker que
+medía +92% y estaba apagado, y un codegraph que se corrompía solo al segundo
+build.
+
+### El reranker en GPU: +93% nDCG por 1,1 s de latencia
+
+El cross-encoder costaba ~15 s por consulta en CPU, así que nunca se activaba.
+El crate ya tenía la feature `cuda`, `gpu::configure()` cableado en los tres
+modelos y el provider CUDA descargado — **nunca se había compilado con ello**.
+
+Compilar con `--features cuda` no bastaba. Tres cosas separaban el camino GPU
+de uno usable:
+
+- **El modelo se cargaba dentro del handler de la primera búsqueda**, que tiene
+  30 s. Cargar más la primera inferencia se los pasaba de largo, así que la
+  primera búsqueda tras cada arranque moría con `-32603`. Ahora el servidor
+  precalienta el reranker en una tarea de fondo al arrancar, fuera de todo
+  handler.
+- **Precalentar con un pasaje corto no servía de nada**: ONNX Runtime compila
+  kernels CUDA *por forma de entrada*, y el camino real son 50 candidatos.
+  Precalentar con la forma real saca ese coste de la ruta de consulta.
+- **El tokenizador rellenaba con `BatchLongest`**, así que cada consulta
+  generaba formas de tensor nuevas y volvía a pagar la compilación. Rellenar a
+  512 fijo con lotes de tamaño constante bajó el precalentamiento de **42,8 s a
+  8,9 s**. Es una ganancia exclusiva de GPU — en CPU un 512 constante solo hace
+  cada lote más grande —, así que por defecto se activa únicamente en builds con
+  `cuda`/`directml`, y `CUBA_RERANK_FIXED_SHAPE` lo fuerza en cualquier sentido.
+
+Medido sobre 60 preguntas contra el corpus real, k=10:
+
+| métrica | sin rerank | con rerank | cambio |
+|---|---|---|---|
+| nDCG@10 | 0,3039 | **0,5873** | **+93%** |
+| MRR | 0,2366 | **0,4914** | +108% |
+| R@10 | 0,4346 | **0,6961** | +60% |
+| tokens/respuesta | 5252 | **4026** | **−23%** |
+
+La ganancia (+0,283) supera el efecto mínimo detectable que el propio evaluador
+calcula (0,245), así que no es ruido. La mediana por consulta pasa de 4,23 s a
+5,35 s; ese mismo trabajo costaba ~15 s en CPU.
+
+### codegraph: el segundo build ya no corrompe el grafo
+
+Tres defectos que solo aparecen al reconstruir un repo que ha cambiado — que es
+justo el único caso que importa en una herramienta que sigue código vivo:
+
+- **El contenido de la observación llevaba dentro el rango de líneas del símbolo,
+  y el dedup comparaba esa cadena exacta.** Añade un comentario encima de una
+  función y su rango se desplaza: el `WHERE NOT EXISTS` no encuentra nada, entra
+  una fila nueva y la vieja se queda para siempre. **Cada edición multiplicaba las
+  filas.** La identidad ahora es `` {tipo} `{nombre}` in {fichero}: `` —sin números
+  de línea— comparada con `left(content, n)` para no depender de escapes de `LIKE`,
+  y un símbolo que se mueve actualiza su fila en lugar de duplicarla.
+- **El recorrido usaba `path.is_dir()`, que sigue enlaces simbólicos.** Un enlace
+  a un directorio ancestro y el recorrido no termina nunca. Ahora usa
+  `entry.file_type()`, que no los sigue, y registra el salto para que un árbol
+  enlazado se vea omitido en vez de desaparecer en silencio.
+- **La persistencia eran cientos de sentencias sueltas contra el pool.** Un fallo
+  a media faena dejaba el grafo a medio escribir sin forma de saberlo. Las tres
+  pasadas comparten ahora una transacción y confirman juntas.
+
+306 tests en verde, clippy sin avisos.
+
 ## [0.17.1] — 2026-07-28 (Cargo `0.17.1` · npm `0.17.1` · PyPI `1.19.1`)
 
 Correcciones encontradas ejecutando el ciclo REM de v0.17.0 contra el corpus real

@@ -6,12 +6,12 @@
     "url": "https://github.com/LeandroPG19/cuba-memorys",
     "source": "github"
   },
-  "version": "0.17.1",
+  "version": "0.18.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "cuba-memorys",
-      "version": "0.17.1",
+      "version": "0.18.0",
       "transport": {
         "type": "stdio"
       },
@@ -71,13 +71,27 @@
           "isRequired": false,
           "isSecret": false,
           "format": "string"
+        },
+        {
+          "name": "CUBA_RERANKER_PATH",
+          "description": "Directory holding the bge-reranker ONNX model; enables cross-encoder reranking (+93% nDCG on GPU).",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "CUBA_RERANK_FIXED_SHAPE",
+          "description": "Pad reranker batches to a constant 512 tokens. Defaults on for GPU builds, off on CPU.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
         }
       ]
     },
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "1.19.1",
+      "version": "1.20.0",
       "transport": {
         "type": "stdio"
       },
