@@ -78,7 +78,9 @@ pub fn resolve_offline_llm() -> Option<Box<dyn ContradictionJudge>> {
     resolve_offline_llm_within(None)
 }
 
-pub fn resolve_offline_llm_within(timeout: Option<Duration>) -> Option<Box<dyn ContradictionJudge>> {
+pub fn resolve_offline_llm_within(
+    timeout: Option<Duration>,
+) -> Option<Box<dyn ContradictionJudge>> {
     if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
         let mut judge = ClaudeCodeJudge::from_env();
         if let Some(t) = timeout {
