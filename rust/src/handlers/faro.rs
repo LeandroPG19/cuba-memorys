@@ -1021,16 +1021,39 @@ async fn vector_search(
     };
 
     let observations: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
-        "SELECT o.id, e.name, o.content, o.importance::float8,
-                1.0 - (o.embedding <=> $1::vector) AS cosine_sim
-         FROM brain_observations o
-         JOIN brain_entities e ON o.entity_id = e.id
-         WHERE o.embedding IS NOT NULL
-           AND o.observation_type != 'superseded'
+        "WITH direct AS (
+             SELECT o.id, e.name, o.content, o.importance::float8 AS importance,
+                    1.0 - (o.embedding <=> $1::vector) AS cosine_sim
+             FROM brain_observations o
+             JOIN brain_entities e ON o.entity_id = e.id
+             WHERE o.embedding IS NOT NULL
+               AND o.observation_type != 'superseded'
                AND o.trust = 'trusted'
-           AND o.created_at >= $3 AND o.created_at <= $4
-           AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
-         ORDER BY o.embedding <=> $1::vector
+               AND o.created_at >= $3 AND o.created_at <= $4
+               AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
+             ORDER BY o.embedding <=> $1::vector
+             LIMIT $2
+         ),
+         via_chunk AS (
+             SELECT DISTINCT ON (o.id)
+                    o.id, e.name, o.content, o.importance::float8 AS importance,
+                    1.0 - (c.embedding <=> $1::vector) AS cosine_sim
+             FROM brain_observation_chunks c
+             JOIN brain_observations o ON o.id = c.observation_id
+             JOIN brain_entities e ON o.entity_id = e.id
+             WHERE c.embedding IS NOT NULL
+               AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
+               AND o.created_at >= $3 AND o.created_at <= $4
+               AND ($5::uuid IS NULL OR o.project_id = $5 OR o.project_id IS NULL)
+             ORDER BY o.id, c.embedding <=> $1::vector
+         )
+         SELECT id, name, content, importance, cosine_sim FROM (
+             SELECT DISTINCT ON (id) id, name, content, importance, cosine_sim
+             FROM (SELECT * FROM direct UNION ALL SELECT * FROM via_chunk) merged
+             ORDER BY id, cosine_sim DESC
+         ) deduped
+         ORDER BY cosine_sim DESC
          LIMIT $2",
     )
     .bind(pgvector::Vector::from(embedding.clone()))

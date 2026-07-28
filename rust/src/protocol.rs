@@ -568,6 +568,9 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "missing embeddings backfilled"
     );
 
+    let chunked = rem_backfill_chunks(pool).await;
+    tracing::info!(observations_chunked = chunked, "long observations chunked");
+
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
@@ -604,6 +607,22 @@ async fn rem_autolink(pool: &PgPool) -> usize {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(error = %e, "REM: autolink apply failed");
+            0
+        }
+    }
+}
+
+async fn rem_backfill_chunks(pool: &PgPool) -> usize {
+    use crate::embeddings::backfill;
+
+    let limit = backfill::backfill_limit();
+    if limit == 0 {
+        return 0;
+    }
+    match backfill::backfill_chunks(pool, limit).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: chunk backfill failed");
             0
         }
     }

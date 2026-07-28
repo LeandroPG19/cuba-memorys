@@ -8,6 +8,108 @@ pub struct BackfillReport {
     pub attempted: usize,
     pub embedded: usize,
     pub failed: usize,
+    pub chunked: usize,
+}
+
+pub async fn store_chunks(
+    pool: &PgPool,
+    observation_id: uuid::Uuid,
+    content: &str,
+    entity_type: &str,
+    entity_name: &str,
+    project_id: Option<uuid::Uuid>,
+) -> Result<usize> {
+    let pieces = crate::embeddings::chunk::chunks_for(content);
+    if pieces.is_empty() {
+        return Ok(0);
+    }
+
+    sqlx::query("DELETE FROM brain_observation_chunks WHERE observation_id = $1")
+        .bind(observation_id)
+        .execute(pool)
+        .await?;
+
+    let model = crate::embeddings::onnx::current_model();
+    let mut stored = 0usize;
+    for (idx, piece) in pieces.iter().enumerate() {
+        let Ok(vector) =
+            crate::embeddings::onnx::embed_passage_contextual(piece, entity_type, entity_name)
+                .await
+        else {
+            continue;
+        };
+        let done = sqlx::query(
+            "INSERT INTO brain_observation_chunks
+                (observation_id, chunk_index, content, embedding, embedding_model, project_id)
+             VALUES ($1, $2, $3, $4::vector, $5, $6)
+             ON CONFLICT (observation_id, chunk_index)
+             DO UPDATE SET content = EXCLUDED.content,
+                           embedding = EXCLUDED.embedding,
+                           embedding_model = EXCLUDED.embedding_model",
+        )
+        .bind(observation_id)
+        .bind(idx as i32)
+        .bind(piece)
+        .bind(pgvector::Vector::from(vector))
+        .bind(&model)
+        .bind(project_id)
+        .execute(pool)
+        .await;
+        match done {
+            Ok(_) => stored += 1,
+            Err(e) => {
+                tracing::warn!(error = %e, obs_id = %observation_id, chunk = idx, "could not persist chunk")
+            }
+        }
+    }
+    Ok(stored)
+}
+
+pub async fn count_unchunked(pool: &PgPool) -> Result<i64> {
+    let threshold = crate::embeddings::chunk::threshold_chars() as i32;
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM brain_observations o
+         WHERE o.observation_type != 'superseded'
+           AND char_length(o.content) > $1
+           AND NOT EXISTS (SELECT 1 FROM brain_observation_chunks c WHERE c.observation_id = o.id)",
+    )
+    .bind(threshold)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
+pub async fn backfill_chunks(pool: &PgPool, limit: i64) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let threshold = crate::embeddings::chunk::threshold_chars() as i32;
+    let rows: Vec<(uuid::Uuid, String, String, String, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT o.id, o.content, e.entity_type, e.name, o.project_id
+         FROM brain_observations o
+         JOIN brain_entities e ON e.id = o.entity_id
+         WHERE o.observation_type != 'superseded'
+           AND char_length(o.content) > $1
+           AND NOT EXISTS (SELECT 1 FROM brain_observation_chunks c WHERE c.observation_id = o.id)
+         ORDER BY char_length(o.content) DESC
+         LIMIT $2",
+    )
+    .bind(threshold)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let mut done = 0usize;
+    for (id, content, entity_type, entity_name, project_id) in rows {
+        if store_chunks(pool, id, &content, &entity_type, &entity_name, project_id)
+            .await
+            .unwrap_or(0)
+            > 0
+        {
+            done += 1;
+        }
+    }
+    Ok(done)
 }
 
 pub fn backfill_limit() -> i64 {

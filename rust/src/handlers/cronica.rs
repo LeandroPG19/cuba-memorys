@@ -172,6 +172,27 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
                     tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "ONNX embed failed — skipping");
                 }
             }
+
+            if crate::embeddings::chunk::needs_chunking(&content_for_embed) {
+                let stored = crate::embeddings::backfill::store_chunks(
+                    &embed_pool,
+                    obs_id_for_embed,
+                    &content_for_embed,
+                    &entity_type,
+                    &entity_name_for_embed,
+                    project_id,
+                )
+                .await;
+                match stored {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(obs_id = %obs_id_for_embed, chunks = n, "long observation chunked")
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(obs_id = %obs_id_for_embed, error = %e, "chunking failed")
+                    }
+                }
+            }
         }
     });
 
