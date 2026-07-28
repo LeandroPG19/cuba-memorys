@@ -26,11 +26,30 @@ async fn a_long_observation_becomes_reachable_past_the_truncation_limit() {
     let entity = unique_name("chunk_entity");
     let tail_marker = unique_name("tailconcept");
 
-    let filler = "This paragraph describes routine build configuration details. ".repeat(45);
-    let content = format!("{filler}\n\nThe distinguishing conclusion is about {tail_marker}.");
+    let head = "The build pipeline compiles the Rust workspace, caches cargo registry \
+                artifacts between runs, links the ONNX runtime, and uploads the resulting \
+                binaries. Compiler flags, linker paths, and container base images are \
+                configured per target architecture. "
+        .repeat(9);
+    let tail = format!(
+        "Beekeeping notes on {tail_marker}: the colony overwinters best when the hive is \
+         insulated and the entrance reduced. Foragers return with pollen once the maples \
+         bloom, and the queen resumes laying as daylight lengthens. Inspect brood frames \
+         for chalkbrood, and never harvest honey below the winter reserve. Swarm control \
+         with {tail_marker} means giving the colony room before it decides to leave. "
+    )
+    .repeat(3);
+    let content = format!("{head}\n\n{tail}");
+
+    let threshold = cuba_memorys::embeddings::chunk::threshold_chars();
     assert!(
-        content.chars().count() > cuba_memorys::embeddings::chunk::threshold_chars(),
+        content.chars().count() > threshold,
         "the fixture must exceed the chunking threshold"
+    );
+    assert!(
+        head.chars().count() > threshold,
+        "the head alone must already fill the truncation window, so the tail is what the \
+         whole-document embedding cannot see"
     );
 
     let entity_id: (Uuid,) = sqlx::query_as(
@@ -70,7 +89,7 @@ async fn a_long_observation_becomes_reachable_past_the_truncation_limit() {
     assert!(stored > 1, "a text this long must produce several chunks");
 
     let query_vec = cuba_memorys::embeddings::onnx::embed(&format!(
-        "the distinguishing conclusion about {tail_marker}"
+        "how does the bee colony overwinter, and what is {tail_marker} swarm control"
     ))
     .await
     .expect("embedding the query");
