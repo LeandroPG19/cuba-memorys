@@ -80,6 +80,13 @@ pub struct ExtractionResult {
     pub files_skipped: Vec<(String, String)>,
 }
 
+fn relative_to(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
 pub fn extract_dir(root: &Path, extensions: &[&str]) -> Result<ExtractionResult> {
     let mut result = ExtractionResult::default();
     walk(root, root, extensions, &mut result)?;
@@ -97,7 +104,17 @@ fn walk(root: &Path, dir: &Path, extensions: &[&str], out: &mut ExtractionResult
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        if path.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            out.files_skipped
+                .push((relative_to(root, &path), "symlink".to_string()));
+            continue;
+        }
+
+        if file_type.is_dir() {
             if matches!(
                 name.as_ref(),
                 "target" | "node_modules" | ".git" | "dist" | "build" | "__pycache__" | ".venv"
@@ -115,11 +132,7 @@ fn walk(root: &Path, dir: &Path, extensions: &[&str], out: &mut ExtractionResult
             continue;
         }
 
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
+        let rel = relative_to(root, &path);
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {

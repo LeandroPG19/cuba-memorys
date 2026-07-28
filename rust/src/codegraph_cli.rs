@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
 
 use crate::codegraph::{self, EdgeKind, Symbol, SymbolKind};
 
@@ -100,15 +99,17 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
 
     let project_id = crate::project::current_project_id(&pool).await?;
 
+    let mut tx = pool.begin().await?;
+
     let mut entities_written = 0u32;
     for symbol in &result.symbols {
-        upsert_symbol(&pool, symbol, project_id).await?;
+        upsert_symbol(&mut tx, symbol, project_id).await?;
         entities_written += 1;
     }
 
     let mut edges_written = 0u32;
     for edge in &call_edges {
-        if upsert_edge(&pool, &edge.from, &edge.to, edge.kind, project_id).await? {
+        if upsert_edge(&mut tx, &edge.from, &edge.to, edge.kind, project_id).await? {
             edges_written += 1;
         }
     }
@@ -116,14 +117,16 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut import_edges_written = 0u32;
     for module in &result.imports {
         let from = format!("{}::<module>", module.file);
-        upsert_placeholder_entity(&pool, &from, "module", project_id).await?;
+        upsert_placeholder_entity(&mut tx, &from, "module", project_id).await?;
         for path in &module.paths {
-            upsert_placeholder_entity(&pool, path, "external_dependency", project_id).await?;
-            if upsert_edge(&pool, &from, path, EdgeKind::Imports, project_id).await? {
+            upsert_placeholder_entity(&mut tx, path, "external_dependency", project_id).await?;
+            if upsert_edge(&mut tx, &from, path, EdgeKind::Imports, project_id).await? {
                 import_edges_written += 1;
             }
         }
     }
+
+    tx.commit().await?;
 
     let report = serde_json::json!({
         "action": "codegraph_build",
@@ -143,8 +146,21 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn symbol_identity(kind_label: &str, simple_name: &str, file: &str) -> String {
+    format!("{kind_label} `{simple_name}` in {file}:")
+}
+
+fn kind_label(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Class => "class",
+        SymbolKind::Module => "module",
+    }
+}
+
 async fn upsert_symbol(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     symbol: &Symbol,
     project_id: Option<uuid::Uuid>,
 ) -> Result<()> {
@@ -156,37 +172,49 @@ async fn upsert_symbol(
     )
     .bind(&symbol.qualified_name)
     .bind(project_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
 
-    let kind_label = match symbol.kind {
-        SymbolKind::Function => "function",
-        SymbolKind::Struct => "struct",
-        SymbolKind::Class => "class",
-        SymbolKind::Module => "module",
-    };
+    let identity = symbol_identity(kind_label(symbol.kind), &symbol.simple_name, &symbol.file);
     let content = format!(
-        "{} `{}` in {}:{}-{}\n{}",
-        kind_label,
-        symbol.simple_name,
-        symbol.file,
-        symbol.line_start,
-        symbol.line_end,
-        symbol.signature
+        "{}{}-{}\n{}",
+        identity, symbol.line_start, symbol.line_end, symbol.signature
     );
+
+    let refreshed = sqlx::query(
+        "UPDATE brain_observations
+         SET content = $2, updated_at = NOW()
+         WHERE entity_id = $1
+           AND observation_type = 'context'
+           AND source = 'agent'
+           AND left(content, $3) = $4
+           AND content <> $2",
+    )
+    .bind(entity_id.0)
+    .bind(&content)
+    .bind(identity.chars().count() as i32)
+    .bind(&identity)
+    .execute(&mut *conn)
+    .await?;
+
+    if refreshed.rows_affected() > 0 {
+        return Ok(());
+    }
 
     sqlx::query(
         "INSERT INTO brain_observations (entity_id, content, observation_type, source, project_id)
          SELECT $1, $2, 'context', 'agent', $3
          WHERE NOT EXISTS (
              SELECT 1 FROM brain_observations
-             WHERE entity_id = $1 AND content = $2
+             WHERE entity_id = $1 AND left(content, $4) = $5
          )",
     )
     .bind(entity_id.0)
     .bind(&content)
     .bind(project_id)
-    .execute(pool)
+    .bind(identity.chars().count() as i32)
+    .bind(&identity)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())
@@ -200,7 +228,7 @@ async fn upsert_symbol(
 /// when X is an external crate or stdlib module with no parsed symbols of its
 /// own.
 async fn upsert_placeholder_entity(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     name: &str,
     entity_type: &str,
     project_id: Option<uuid::Uuid>,
@@ -213,13 +241,13 @@ async fn upsert_placeholder_entity(
     .bind(name)
     .bind(entity_type)
     .bind(project_id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
 
 async fn upsert_edge(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     from_name: &str,
     to_name: &str,
     kind: EdgeKind,
@@ -228,7 +256,7 @@ async fn upsert_edge(
     let from_id: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
             .bind(from_name)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?;
     let Some((from_id,)) = from_id else {
         return Ok(false);
@@ -237,7 +265,7 @@ async fn upsert_edge(
     let to_id: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
             .bind(to_name)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?;
     let Some((to_id,)) = to_id else {
         return Ok(false);
@@ -255,7 +283,7 @@ async fn upsert_edge(
     .bind(to_id)
     .bind(kind.as_relation_type())
     .bind(project_id)
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(result.rows_affected() > 0)
