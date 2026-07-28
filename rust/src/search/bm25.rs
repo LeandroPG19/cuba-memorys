@@ -20,6 +20,7 @@ pub async fn bm25_search(
              JOIN brain_entities e ON o.entity_id = e.id
              WHERE o.search_vector @@ cuba_or_tsquery($1)
                AND o.observation_type != 'superseded'
+               AND o.trust = 'trusted'
                AND ($3::uuid IS NULL OR o.project_id = $3 OR o.project_id IS NULL)
              ORDER BY bm25 DESC
              LIMIT $2",

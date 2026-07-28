@@ -34,6 +34,7 @@ OPERATIONS:
   sync              git-friendly export/import of the graph (export|import|diff|status)
   hook install      wire git so sync export/import run on commit/checkout automatically
   codegraph build   parse source (tree-sitter, rust|python) into brain_entities/relations
+  rem               run one consolidation cycle now (decay, autolink, backfill, PageRank)
   setup             wire this server into your MCP clients; `setup check` audits them
 
   -h, --help        this
@@ -141,6 +142,15 @@ async fn main() {
                 eprintln!("sync error: {e:#}");
                 std::process::exit(1);
             }
+            return;
+        }
+        Some("rem") => {
+            if let Err(e) = cuba_memorys::rem_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "rem failed");
+                eprintln!("rem error: {e:#}");
+                std::process::exit(1);
+            }
+            drain_background_tasks().await;
             return;
         }
         Some("codegraph") => {

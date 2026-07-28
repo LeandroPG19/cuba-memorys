@@ -470,7 +470,7 @@ async fn rem_daemon(pool: PgPool) {
     }
 }
 
-async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
+pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     let active_session: Option<(uuid::Uuid, Vec<String>)> = match crate::session::session_id() {
         Some(sid) => {
             let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
@@ -558,12 +558,90 @@ async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "episode power-law decay applied"
     );
 
+    let linked = rem_autolink(pool).await;
+    tracing::info!(edges_created = linked, "NPMI autolink applied");
+
+    let backfilled = rem_backfill_embeddings(pool).await;
+    tracing::info!(
+        embedded = backfilled.embedded,
+        failed = backfilled.failed,
+        "missing embeddings backfilled"
+    );
+
+    let chunked = rem_backfill_chunks(pool).await;
+    tracing::info!(observations_chunked = chunked, "long observations chunked");
+
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
     tracing::info!("REM consolidation complete");
 
     Ok(())
+}
+
+fn rem_autolink_enabled() -> bool {
+    !matches!(
+        std::env::var("CUBA_REM_AUTOLINK").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    )
+}
+
+async fn rem_autolink(pool: &PgPool) -> usize {
+    if !rem_autolink_enabled() {
+        return 0;
+    }
+    use crate::graph::autolink::{self, DEFAULT_NPMI_THRESHOLD, MIN_CO_SESSIONS};
+
+    let candidates = match autolink::candidates(pool, MIN_CO_SESSIONS, DEFAULT_NPMI_THRESHOLD).await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: autolink candidate search failed");
+            return 0;
+        }
+    };
+    if candidates.is_empty() {
+        return 0;
+    }
+    match autolink::apply(pool, &candidates).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: autolink apply failed");
+            0
+        }
+    }
+}
+
+async fn rem_backfill_chunks(pool: &PgPool) -> usize {
+    use crate::embeddings::backfill;
+
+    let limit = backfill::backfill_limit();
+    if limit == 0 {
+        return 0;
+    }
+    match backfill::backfill_chunks(pool, limit).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: chunk backfill failed");
+            0
+        }
+    }
+}
+
+async fn rem_backfill_embeddings(pool: &PgPool) -> crate::embeddings::backfill::BackfillReport {
+    use crate::embeddings::backfill;
+
+    let limit = backfill::backfill_limit();
+    if limit == 0 {
+        return backfill::BackfillReport::default();
+    }
+    match backfill::backfill_missing(pool, limit).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: embedding backfill failed");
+            backfill::BackfillReport::default()
+        }
+    }
 }
 
 async fn list_resources(pool: &PgPool) -> Result<Value> {

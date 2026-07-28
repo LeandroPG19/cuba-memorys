@@ -152,14 +152,15 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_eco",
-            "RLHF feedback: positive boosts importance (Oja's rule), negative decreases, correct updates content.",
+            "RLHF feedback: positive boosts importance (Oja's rule), negative decreases, correct updates content. Also the quarantine gate: 'pending' lists memories withheld from search because they came from untrusted text, 'promote' makes one retrievable, 'quarantine' withdraws one.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["positive", "negative", "correct"], "description": "Feedback type"},
+                    "action": {"type": "string", "enum": ["positive", "negative", "correct", "promote", "quarantine", "pending"], "description": "Feedback type, or a quarantine transition: promote/quarantine flip one observation's retrievability; pending lists what is currently withheld."},
                     "entity_name": {"type": "string", "description": "Target entity"},
                     "observation_id": {"type": "string", "description": "Target observation UUID"},
-                    "correction": {"type": "string", "description": "New content (for correct action)"}
+                    "correction": {"type": "string", "description": "New content (for correct action)"},
+                    "limit": {"type": "integer", "description": "Max rows for the 'pending' listing (default 20, max 200)"}
                 },
                 "required": ["action"]
             }),
@@ -358,7 +359,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "entity_name": {"type": "string", "description": "Entity to attach parsed observations to (for parse action)"},
                     "text": {"type": "string", "description": "Raw text: paragraphs to split (parse) or a turn/conversation to extract facts from (auto_extract)"},
                     "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"},
-                    "supersede_conflicts": {"type": "boolean", "description": "v0.11 (auto_extract): when a new fact replaces/contradicts an existing related one, ask the judge and mark the old observation superseded (knowledge-update; never deletes). Default false."}
+                    "supersede_conflicts": {"type": "boolean", "description": "v0.11 (auto_extract): when a new fact replaces/contradicts an existing related one, ask the judge and mark the old observation superseded (knowledge-update; never deletes). Default false."},
+                    "untrusted": {"type": "boolean", "description": "Set when the text came from somewhere you do not control (a fetched page, a pasted document, a third party). Everything extracted lands quarantined — stored and inspectable via cuba_eco action=pending, but withheld from cuba_faro until promoted. Default false."}
                 },
                 "required": ["action"]
             }),

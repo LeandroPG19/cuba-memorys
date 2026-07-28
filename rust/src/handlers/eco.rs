@@ -11,8 +11,107 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "positive" => positive(pool, entity_name, observation_id).await,
         "negative" => negative(pool, entity_name, observation_id).await,
         "correct" => correct(pool, observation_id, &args).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use positive/negative/correct"),
+        "promote" => set_trust(pool, observation_id, crate::core::trust::TRUSTED).await,
+        "quarantine" => set_trust(pool, observation_id, crate::core::trust::QUARANTINED).await,
+        "pending" => list_quarantined(pool, &args).await,
+        _ => anyhow::bail!(
+            "Invalid action: {action}. Use positive/negative/correct/promote/quarantine/pending"
+        ),
     }
+}
+
+async fn set_trust(pool: &PgPool, observation_id: Option<&str>, trust: &str) -> Result<Value> {
+    let obs_id_str = observation_id.context("observation_id is required")?;
+    let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
+    let project_id = crate::project::current_project_id(pool).await?;
+    if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
+        anyhow::bail!("observation not in current project scope");
+    }
+
+    let result =
+        sqlx::query("UPDATE brain_observations SET trust = $1, updated_at = NOW() WHERE id = $2")
+            .bind(trust)
+            .bind(obs_id)
+            .execute(pool)
+            .await
+            .context("updating observation trust")?;
+
+    if result.rows_affected() == 0 {
+        anyhow::bail!("observation not found: {obs_id}");
+    }
+
+    let event = if trust == crate::core::trust::TRUSTED {
+        "memory.promote"
+    } else {
+        "memory.quarantine"
+    };
+    crate::handlers::archivo::handle(
+        pool,
+        serde_json::json!({
+            "action": "append",
+            "event_action": event,
+            "payload": { "observation_id": obs_id.to_string(), "trust": trust }
+        }),
+    )
+    .await
+    .ok();
+
+    Ok(serde_json::json!({
+        "action": if trust == crate::core::trust::TRUSTED { "promote" } else { "quarantine" },
+        "observation_id": obs_id.to_string(),
+        "trust": trust,
+        "retrievable": trust == crate::core::trust::TRUSTED,
+    }))
+}
+
+async fn list_quarantined(pool: &PgPool, args: &Value) -> Result<Value> {
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(20)
+        .clamp(1, 200);
+    let project_id = crate::project::current_project_id(pool).await?;
+
+    let rows: Vec<(
+        uuid::Uuid,
+        String,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT o.id, e.name, o.content, o.source, o.created_at
+             FROM brain_observations o
+             JOIN brain_entities e ON e.id = o.entity_id
+             WHERE o.trust = 'quarantined'
+               AND ($1::uuid IS NULL OR o.project_id = $1 OR o.project_id IS NULL)
+             ORDER BY o.created_at DESC
+             LIMIT $2",
+    )
+    .bind(project_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("listing quarantined observations")?;
+
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|(id, entity, content, source, created)| {
+            serde_json::json!({
+                "observation_id": id.to_string(),
+                "entity": entity,
+                "content": content,
+                "source": source,
+                "created_at": created.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "action": "pending",
+        "count": items.len(),
+        "quarantined": items,
+        "note": "these are withheld from cuba_faro until promoted with action=promote",
+    }))
 }
 
 async fn positive(

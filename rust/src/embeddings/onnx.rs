@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_embedding_dimension() {
         let emb = compute_hash_embedding("hello world").unwrap();
-        assert_eq!(emb.len(), EMBEDDING_DIM);
+        assert_eq!(emb.len(), embedding_dim());
     }
 
     #[test]
@@ -449,6 +449,6 @@ mod tests {
     #[test]
     fn test_fallback_mode() {
         let emb = compute_hash_embedding("test").unwrap();
-        assert_eq!(emb.len(), EMBEDDING_DIM);
+        assert_eq!(emb.len(), embedding_dim());
     }
 }

@@ -61,6 +61,7 @@ async fn fit_stats(pool: &PgPool, sample_limit: i64) -> Result<(OodStats, usize)
     let rows = sqlx::query(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
+           AND trust = 'trusted'
          ORDER BY id LIMIT $1",
     )
     .bind(sample_limit)
@@ -87,6 +88,7 @@ pub async fn corpus_distances(pool: &PgPool, stats: &OodStats, limit: i64) -> Re
     let rows = sqlx::query(
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
+           AND trust = 'trusted'
          ORDER BY id LIMIT $1",
     )
     .bind(limit)
