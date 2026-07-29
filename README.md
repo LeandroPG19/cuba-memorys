@@ -11,7 +11,7 @@
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
-Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **16 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
+Written in Rust. Backed by PostgreSQL + pgvector. **28 MCP tools** (29 with `CUBA_DOCS=1`), **19 CLI commands**, and every number below measured on a benchmark that — as of v0.12 — actually measures what it claims to. (The previous one did not. See [Measured](#measured--and-the-benchmark-that-was-lying).)
 
 <p align="center">
   <img src="assets/demo.gif" alt="cuba-memorys terminal demo — hybrid search, claim verification with an LLM judge, procedural memory, and the CLI" width="760" />
@@ -125,7 +125,7 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 
 **Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
 
-**Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+92% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
+**Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+93% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
 
 Fetching the GPU runtime is only half of it: **the binary itself has to be built with `--features cuda`**, or `gpu::configure()` registers no provider and every model quietly runs on CPU. That is not a hypothetical — it is what a 50-candidate rerank costs on a 6-core laptop, measured with `cargo run --release --example rerank_bench`:
 
@@ -201,10 +201,11 @@ This exists because the failure mode of a hybrid search engine is not a crash �
 
 ## The CLI: your memory without an LLM in the middle
 
-Fourteen commands. `cuba-memorys --help` lists them all.
+Nineteen commands. `cuba-memorys --help` lists them all.
 
 | | |
 |---|---|
+| **`serve`** | One shared HTTP daemon for every client, instead of one process (and one copy of the models) per editor window |
 | `search <query>` · `save` · `delete` · `export` | Read and write the brain from a shell |
 | `dashboard` | A self-contained HTML view of what is in there |
 | **`doctor`** | Health check: schema, dimensions, config coherence, stale processes |
@@ -262,7 +263,11 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
-| `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+92% nDCG); on CPU it falls back to RRF past the budget |
+| `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+93% nDCG); on CPU it falls back to RRF past the budget |
+| `CUBA_RERANK_INTRA_THREADS` | physical cores | ONNX threads per rerank inference. Past the physical core count it gets *slower* — measure with `rerank_bench` before raising it |
+| `CUBA_RERANK_LENGTH_BUCKETING` | on (off under fixed shape) | Batch similar-length candidates so padding does not become compute. Scores are unchanged |
+| `CUBA_HTTP_ADDR` · `CUBA_HTTP_TOKEN` | `127.0.0.1:8787` · unset | Address for `serve`, and the bearer token it requires. A token is mandatory to bind anything but loopback |
+| `CUBA_HANDSHAKE_TIMEOUT_SECS` | `60` | stdio exits if no MCP handshake arrives, instead of holding the models for a client that gave up. `0` disables |
 | `CUBA_DOCS` | **off** | `1` enables `cuba_docs`, the only tool that leaves your machine. Unset, it is not even advertised. |
 | `CUBA_COMPACT_CHARS` | `1200` | Compact truncation (measured knee) |
 | `CUBA_OOD_THRESHOLD` | calibrated | Override the abstention threshold |
@@ -328,8 +333,13 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 git clone https://github.com/LeandroPG19/cuba-memorys.git
 cd cuba-memorys/rust && cargo build --release
 
-./scripts/demo.sh          # runs on a throwaway Postgres it removes on exit
-./scripts/merge-gate.sh    # fmt · clippy -D warnings · 223 tests · audit · integration
+# On an NVIDIA machine, build this way instead — without it every model runs on
+# CPU and the reranker spends its whole budget for a ranking that gets discarded.
+cargo build --release --features docs,cuda
+
+./scripts/demo.sh                  # runs on a throwaway Postgres it removes on exit
+./scripts/merge-gate.sh            # fmt · clippy -D warnings · 316 tests · audit · integration
+cargo run --release --example rerank_bench   # does the reranker fit its budget here?
 ```
 
 Publishing is tag-driven: `v*` triggers GitHub Release binaries (5 platforms), PyPI wheels, npm, and the MCP Registry. A test pins all four files that hold a version number to the same value, because they used to drift and nothing caught it.
