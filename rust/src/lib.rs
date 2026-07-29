@@ -16,6 +16,7 @@ pub mod gpu;
 pub mod graph;
 pub mod handlers;
 pub mod hooks_cli;
+pub mod http;
 pub mod link_cli;
 pub mod mode;
 pub mod models_cli;

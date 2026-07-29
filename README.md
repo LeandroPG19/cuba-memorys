@@ -61,6 +61,37 @@ Needs the `vector` and `pg_trgm` extensions. `cuba-memorys doctor` will tell you
 </details>
 
 <details>
+<summary><b>One shared daemon instead of one process per client</b></summary>
+
+stdio gives every client its own process, and every process loads its own copy of the models — embeddings, reranker and NLI together are several GB. Three editor windows meant three copies, and on a 16 GB laptop that is the whole machine.
+
+`serve` loads them once and answers every client over loopback HTTP, which is also the shape the [2026-07-28 MCP specification](https://blog.modelcontextprotocol.io/posts/2026-07-28/) settled on: no session handshake, every request self-describing.
+
+```bash
+cuba-memorys serve                      # 127.0.0.1:8787 by default
+cuba-memorys serve 127.0.0.1:9000       # or pick the address
+```
+
+Point every client at it, and give each one its own `Mcp-Client-Id` so their sessions stay separate — without it `jornada start` in one window becomes the active session of the next:
+
+```json
+{
+  "mcpServers": {
+    "cuba-memorys": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Mcp-Client-Id": "editor-window-1" }
+    }
+  }
+}
+```
+
+`GET /health` reports uptime, database reachability and the clients seen so far. `CUBA_HTTP_ADDR` overrides the address; `CUBA_HTTP_TOKEN` requires `Authorization: Bearer`, and is mandatory if you bind anything other than loopback — the daemon serves the entire graph with no authentication by default.
+
+Models load in the background *after* the port opens, so a client that connects during startup waits on its first search instead of timing out the connection. Under stdio that timeout was how you ended up with abandoned multi-GB processes: the client gives up at 30 s but never closes stdin, so the server sat there holding every model it had loaded. Stdio now exits if no handshake arrives within `CUBA_HANDSHAKE_TIMEOUT_SECS` (60 s, `0` disables).
+</details>
+
+<details>
 <summary><b>Semantic embeddings & models (recommended)</b></summary>
 
 Without a model, embeddings are hash-based: deterministic, and semantically meaningless. Search still works through the lexical and BM25 branches, but nothing understands *meaning*.
@@ -95,6 +126,16 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 **Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
 
 **Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+92% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
+
+Fetching the GPU runtime is only half of it: **the binary itself has to be built with `--features cuda`**, or `gpu::configure()` registers no provider and every model quietly runs on CPU. That is not a hypothetical — it is what a 50-candidate rerank costs on a 6-core laptop, measured with `cargo run --release --example rerank_bench`:
+
+| build | 50 candidates, mixed lengths | inside the 20 s budget? |
+|---|---|---|
+| CPU, `with_intra_threads(2)` | 106,9 s | no — scores computed, then discarded |
+| CPU, physical cores | 61,0 s | no |
+| **`--features cuda`** | **4,1 s** | **yes** |
+
+Same ranking either way — CPU and GPU agree candidate for candidate, differing only in the fifth decimal of the score. Run `rerank_bench` on any machine to see whether the reranker fits its budget there or is silently throwing the work away, and `cuba-memorys doctor` reports whether this build has a GPU provider at all.
 
 Individual env vars (`CUBA_DOCS`, `CUBA_RERANKER_PATH`, …) always override the preset.
 </details>

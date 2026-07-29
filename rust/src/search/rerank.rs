@@ -23,8 +23,42 @@ fn semaphore() -> &'static tokio::sync::Semaphore {
     RERANKER_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(2))
 }
 
+/// How many threads ONNX Runtime may use inside a single inference.
+///
+/// This was hardcoded to 2. The cross-encoder is an XLM-RoBERTa-large — 24
+/// layers, 1024 hidden — and every candidate is a full forward pass over up to
+/// 512 tokens, so two threads is what pushed a 50-candidate rerank past its own
+/// 20 s budget: the model ran, and the scores were thrown away for a timeout.
+///
+/// Physical cores, not SMT siblings: GEMM kernels saturate the vector units, so
+/// hyperthreads add scheduling overhead without adding throughput.
+fn intra_threads() -> usize {
+    if let Some(n) = std::env::var("CUBA_RERANK_INTRA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 8))
+        .unwrap_or(2)
+}
+
+/// Whether the cross-encoder is loaded and usable.
+///
+/// Loading is lazy, so the first call pays for a multi-GB model read. That makes
+/// this a *blocking* call: never invoke it straight from an async task — wrap it
+/// in `spawn_blocking`, or one client's first search stalls the whole runtime,
+/// which under the shared daemon means every other client too.
 pub fn enabled() -> bool {
     matches!(get_status(), RerankerStatus::Loaded)
+}
+
+/// True once the status has been resolved, without resolving it. Lets callers
+/// (and tests) tell "not loaded" from "not asked yet" without paying the load.
+pub fn status_resolved() -> bool {
+    RERANKER_STATUS.get().is_some()
 }
 
 pub fn is_configured() -> bool {
@@ -100,7 +134,7 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
 
     let builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
-        .with_intra_threads(2)
+        .with_intra_threads(intra_threads())
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
@@ -140,9 +174,9 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
 }
 
 pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)>> {
-    if !enabled() {
-        return Ok(identity_pairs(candidates.len()));
-    }
+    // Nothing to rank: answer before touching the model. This used to sit *after*
+    // the `enabled()` check, so reranking an empty list paid a multi-GB lazy load
+    // in full and then returned the empty vector anyway.
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -155,9 +189,22 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
         .await
         .map_err(|_| anyhow::anyhow!("reranker semaphore closed"))?;
 
-    let scored = tokio::task::spawn_blocking(move || score_pairs(&query_owned, &candidates_owned))
-        .await
-        .context("reranker task panicked")??;
+    // `enabled()` may load the model, so it belongs on the blocking pool with the
+    // inference it gates — not on an async worker where it would stall every
+    // other client the daemon is serving.
+    let n = candidates.len();
+    let scored = tokio::task::spawn_blocking(move || {
+        if !enabled() {
+            return Ok(None);
+        }
+        score_pairs(&query_owned, &candidates_owned).map(Some)
+    })
+    .await
+    .context("reranker task panicked")??;
+
+    let Some(scored) = scored else {
+        return Ok(identity_pairs(n));
+    };
 
     let mut indexed: Vec<(usize, f64)> = scored.into_iter().enumerate().collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -175,6 +222,25 @@ pub fn fixed_shape() -> bool {
     }
 }
 
+/// Whether to group similar-length candidates into the same batch.
+///
+/// A batch pads to its longest member, and every padded position is still a full
+/// column of attention and GEMM work. Real candidate sets mix one-line notes with
+/// long postmortems, so an unsorted batch can spend most of its compute on
+/// padding. Sorting by length first cuts that away.
+///
+/// Scores are unaffected: the attention mask already zeroes padded positions, so
+/// each (query, passage) pair is scored on exactly its own tokens regardless of
+/// who it shares a batch with. Pointless under `fixed_shape`, where every batch
+/// is padded to `RERANK_MAX_TOKENS` by construction.
+fn length_bucketing() -> bool {
+    match std::env::var("CUBA_RERANK_LENGTH_BUCKETING").as_deref() {
+        Ok("0") | Ok("off") | Ok("false") => false,
+        Ok(_) => true,
+        Err(_) => !fixed_shape(),
+    }
+}
+
 fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
     if candidates.is_empty() {
         return Ok(Vec::new());
@@ -189,17 +255,31 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         .get()
         .context("reranker tokenizer not initialized")?;
 
-    let mut scores = Vec::with_capacity(candidates.len());
-    for chunk in candidates.chunks(RERANK_CHUNK) {
-        if !fixed_shape() || chunk.len() == RERANK_CHUNK {
-            scores.extend(score_chunk(&mut session, tokenizer, query, chunk)?);
-            continue;
+    // Longest first: the biggest batch runs while the machine is coldest, and a
+    // ragged final chunk carries the shortest inputs instead of the longest.
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    if length_bucketing() {
+        order.sort_by_key(|&i| std::cmp::Reverse(candidates[i].len()));
+    }
+
+    let mut scores = vec![0.0_f64; candidates.len()];
+    for chunk in order.chunks(RERANK_CHUNK) {
+        let texts: Vec<String> = chunk.iter().map(|&i| candidates[i].clone()).collect();
+
+        let chunk_scores = if !fixed_shape() || texts.len() == RERANK_CHUNK {
+            score_chunk(&mut session, tokenizer, query, &texts)?
+        } else {
+            let mut padded = texts.clone();
+            padded.resize(RERANK_CHUNK, String::new());
+            let mut s = score_chunk(&mut session, tokenizer, query, &padded)?;
+            s.truncate(texts.len());
+            s
+        };
+
+        // Back to the caller's order — `rerank` pairs these with their indices.
+        for (pos, &original) in chunk.iter().enumerate() {
+            scores[original] = chunk_scores[pos];
         }
-        let mut padded: Vec<String> = chunk.to_vec();
-        padded.resize(RERANK_CHUNK, String::new());
-        let mut chunk_scores = score_chunk(&mut session, tokenizer, query, &padded)?;
-        chunk_scores.truncate(chunk.len());
-        scores.extend(chunk_scores);
     }
     Ok(scores)
 }
@@ -306,10 +386,22 @@ fn identity_pairs(n: usize) -> Vec<(usize, f64)> {
 mod tests {
     use super::*;
 
+    /// Resolves the status against a directory that exists but holds no model,
+    /// so the fallback path is exercised without reading the real multi-GB one.
+    /// If something already resolved it, that wins — `OnceLock` is per process.
+    fn force_fallback_if_unresolved() {
+        if !status_resolved() {
+            // SAFETY: single-threaded setup before the status is first read; the
+            // only reader of this variable is `get_status`, gated by a OnceLock.
+            unsafe { std::env::set_var("CUBA_RERANKER_PATH", std::env::temp_dir()) };
+        }
+    }
+
     #[tokio::test]
     async fn identity_when_disabled() {
+        force_fallback_if_unresolved();
         if enabled() {
-            eprintln!("SKIP: reranker model present; identity path not exercised");
+            eprintln!("SKIP: reranker already loaded; identity path not exercised");
             return;
         }
         let pairs = rerank("anything", &["a", "b", "c"]).await.unwrap();
@@ -326,9 +418,39 @@ mod tests {
         }
     }
 
+    /// The regression that hung this suite: reranking nothing used to run the
+    /// lazy model load to completion before returning the empty vector.
     #[tokio::test]
-    async fn empty_candidates_returns_empty() {
+    async fn empty_candidates_returns_empty_without_loading_the_model() {
+        let resolved_before = status_resolved();
+        let started = std::time::Instant::now();
+
         let pairs = rerank("q", &[]).await.unwrap();
+
         assert!(pairs.is_empty());
+        assert_eq!(
+            status_resolved(),
+            resolved_before,
+            "an empty rerank must not resolve — let alone load — the model"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "empty rerank took {:?}; it should not touch the model at all",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn intra_threads_is_configurable_and_never_zero() {
+        // SAFETY: no other thread reads this variable during the test.
+        unsafe { std::env::set_var("CUBA_RERANK_INTRA_THREADS", "6") };
+        assert_eq!(intra_threads(), 6);
+
+        unsafe { std::env::set_var("CUBA_RERANK_INTRA_THREADS", "0") };
+        assert!(intra_threads() >= 1, "0 must fall through to the default");
+
+        unsafe { std::env::remove_var("CUBA_RERANK_INTRA_THREADS") };
+        let auto = intra_threads();
+        assert!((1..=8).contains(&auto), "auto value out of range: {auto}");
     }
 }

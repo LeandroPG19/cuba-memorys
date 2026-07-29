@@ -21,16 +21,55 @@ const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    id: Option<Value>,
-    method: String,
+pub(crate) struct JsonRpcRequest {
+    pub(crate) jsonrpc: String,
+    pub(crate) id: Option<Value>,
+    pub(crate) method: String,
     #[serde(default)]
-    params: Option<Value>,
+    pub(crate) params: Option<Value>,
 }
 
 static CLIENT_SUPPORTS_SAMPLING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// Set by the first `initialize`. The watchdog below reads it to tell a client
+/// that is still coming up from one that gave up and left.
+static HANDSHAKE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn handshake_timeout() -> Option<Duration> {
+    match std::env::var("CUBA_HANDSHAKE_TIMEOUT_SECS") {
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("off") => None,
+        Ok(v) => v.parse::<u64>().ok().map(Duration::from_secs),
+        Err(_) => Some(Duration::from_secs(60)),
+    }
+}
+
+/// Exits if no client ever completes the handshake.
+///
+/// This is the bug that started all of it: loading the models can outrun the
+/// client's 30 s connection timeout, and when the client gives up it does *not*
+/// close our stdin — it just stops reading. The process stayed alive holding
+/// every model it had loaded, one abandoned copy per attempt, until the machine
+/// was swapping. Nobody is ever going to talk to a server whose handshake never
+/// landed, so it should not outlive the attempt.
+fn spawn_handshake_watchdog() {
+    let Some(limit) = handshake_timeout() else {
+        return;
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(limit).await;
+        if HANDSHAKE_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        tracing::error!(
+            secs = limit.as_secs(),
+            "no MCP handshake — the client gave up before the models finished loading. \
+             Exiting instead of holding them for nobody (set CUBA_HANDSHAKE_TIMEOUT_SECS=0 \
+             to disable, or run `cuba-memorys serve` so the models load once and stay warm)"
+        );
+        std::process::exit(1);
+    });
+}
 
 pub fn client_supports_sampling() -> bool {
     CLIENT_SUPPORTS_SAMPLING.load(std::sync::atomic::Ordering::Relaxed)
@@ -63,10 +102,21 @@ impl CancelToken {
     }
 }
 
-fn outbound() -> &'static mpsc::UnboundedSender<Value> {
-    OUTBOUND
-        .get()
-        .expect("OUTBOUND not initialized — run_mcp must be invoked first")
+/// The server->client channel, which only the stdio transport has. HTTP is
+/// request/response, so this is `None` there — and it used to `.expect()`, which
+/// under `panic = "abort"` would have taken the whole daemon (every client's
+/// session with it) down on the first server-initiated message.
+fn outbound() -> Option<&'static mpsc::UnboundedSender<Value>> {
+    OUTBOUND.get()
+}
+
+fn send_outbound(msg: Value) {
+    match outbound() {
+        Some(tx) => {
+            let _ = tx.send(msg);
+        }
+        None => tracing::debug!("no stdio channel — dropping server-initiated message"),
+    }
 }
 
 fn pending() -> &'static Mutex<std::collections::HashMap<u64, oneshot::Sender<Value>>> {
@@ -88,6 +138,16 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
              set CUBA_JUDGE=claude_cli or rely on auto fallback"
         );
     }
+
+    // Resolve the channel before registering anything: on the HTTP daemon there
+    // is none, and an early return after the insert would leak a pending entry
+    // that nothing will ever answer.
+    let channel = outbound().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no server->client channel: sampling needs the stdio transport. \
+             Under the HTTP daemon the judge falls back to the local NLI model"
+        )
+    })?;
 
     let id = NEXT_SERVER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tx, rx) = oneshot::channel::<Value>();
@@ -111,9 +171,10 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
             }
         }
     });
-    outbound()
-        .send(req)
-        .map_err(|_| anyhow::anyhow!("outbound channel closed"))?;
+    if let Err(e) = channel.send(req) {
+        pending().lock().await.remove(&id);
+        return Err(anyhow::anyhow!("outbound channel closed: {e}"));
+    }
 
     let response = match tokio::time::timeout(handler_timeout(), rx).await {
         Ok(Ok(v)) => v,
@@ -269,6 +330,8 @@ pub async fn run_mcp() -> Result<()> {
         });
     }
 
+    spawn_handshake_watchdog();
+
     tracing::info!("MCP protocol ready on stdin/stdout (V0.9.2 correlator)");
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -281,7 +344,7 @@ pub async fn run_mcp() -> Result<()> {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "invalid JSON-RPC");
-                let _ = outbound().send(serde_json::json!({
+                send_outbound(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": Value::Null,
                     "error": { "code": -32700, "message": "Parse error", "data": e.to_string() }
@@ -312,7 +375,7 @@ pub async fn run_mcp() -> Result<()> {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "invalid JSON-RPC envelope");
-                let _ = outbound().send(serde_json::json!({
+                send_outbound(serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": id_value.unwrap_or(Value::Null),
                     "error": { "code": -32600, "message": "Invalid request", "data": e.to_string() }
@@ -349,7 +412,7 @@ pub async fn run_mcp() -> Result<()> {
                     })
                 }
             };
-            let _ = outbound().send(envelope);
+            send_outbound(envelope);
         });
     }
 
@@ -373,18 +436,32 @@ pub async fn run_mcp() -> Result<()> {
     Ok(())
 }
 
-async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value> {
+pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value> {
     match request.method.as_str() {
         "initialize" => {
+            HANDSHAKE_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(params) = &request.params {
                 let sampling_advertised = params
                     .get("capabilities")
                     .and_then(|c| c.get("sampling"))
                     .is_some();
-                CLIENT_SUPPORTS_SAMPLING
-                    .store(sampling_advertised, std::sync::atomic::Ordering::Relaxed);
-                if sampling_advertised {
-                    tracing::info!("client supports MCP sampling — judge auto-prefers it");
+                // One process, many clients: this flag is global, so honouring
+                // it would let one client's capabilities decide how another
+                // client's judge runs. The daemon has no server->client channel
+                // anyway — leave it false and let the judge use the local NLI.
+                if crate::session::daemon_mode() {
+                    if sampling_advertised {
+                        tracing::debug!(
+                            "client advertises sampling, but the HTTP daemon cannot \
+                             call back — judge stays on the local NLI model"
+                        );
+                    }
+                } else {
+                    CLIENT_SUPPORTS_SAMPLING
+                        .store(sampling_advertised, std::sync::atomic::Ordering::Relaxed);
+                    if sampling_advertised {
+                        tracing::info!("client supports MCP sampling — judge auto-prefers it");
+                    }
                 }
             }
             Ok(server_info())
@@ -465,7 +542,7 @@ async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Result<Value>
     }
 }
 
-async fn rem_daemon(pool: PgPool) {
+pub(crate) async fn rem_daemon(pool: PgPool) {
     let mut interval = tokio::time::interval(REM_INTERVAL);
     interval.tick().await;
 
@@ -485,21 +562,45 @@ async fn rem_daemon(pool: PgPool) {
 }
 
 pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
-    let active_session: Option<(uuid::Uuid, Vec<String>)> = match crate::session::session_id() {
-        Some(sid) => {
-            let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
-                "SELECT id, goals FROM brain_sessions WHERE id = $1 AND ended_at IS NULL",
-            )
-            .bind(sid)
-            .fetch_optional(pool)
-            .await?;
-
-            row.map(|(id, goals)| {
-                let goal_list: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
-                (id, goal_list)
-            })
+    // The REM cycle runs outside any request, so under the daemon there is no
+    // client in scope and `session_id()` is deliberately blind. Ask the daemon's
+    // table for every client's session instead, and fall back to the database so
+    // a cycle that fires before anyone has called `jornada start` still protects
+    // whatever session is genuinely open.
+    let candidates: Vec<uuid::Uuid> = match crate::session::session_id() {
+        Some(sid) => vec![sid],
+        None if crate::session::daemon_mode() => {
+            let from_memory: Vec<uuid::Uuid> = crate::session::all_active()
+                .into_iter()
+                .map(|s| s.session_id)
+                .collect();
+            if from_memory.is_empty() {
+                sqlx::query_scalar("SELECT id FROM brain_sessions WHERE ended_at IS NULL")
+                    .fetch_all(pool)
+                    .await?
+            } else {
+                from_memory
+            }
         }
-        None => None,
+        None => vec![],
+    };
+
+    let active_session: Option<(uuid::Uuid, Vec<String>)> = if candidates.is_empty() {
+        None
+    } else {
+        let row: Option<(uuid::Uuid, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, goals FROM brain_sessions
+             WHERE id = ANY($1) AND ended_at IS NULL
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(&candidates)
+        .fetch_optional(pool)
+        .await?;
+
+        row.map(|(id, goals)| {
+            let goal_list: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
+            (id, goal_list)
+        })
     };
 
     let protected_entity_ids: Vec<uuid::Uuid> = if let Some((_session_id, _)) = &active_session {
