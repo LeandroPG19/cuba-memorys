@@ -6,6 +6,81 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.19.0] — 2026-07-29 (Cargo `0.19.0` · npm `0.19.0` · PyPI `1.21.0`)
+
+Un servidor para todos los clientes, y el reranker de v0.18.0 aplicándose de
+verdad en la máquina donde estaba instalado.
+
+### `serve`: un proceso en lugar de uno por ventana
+
+stdio da a cada cliente su propio proceso, y a cada proceso su propia copia de
+los modelos. Con embeddings + reranker + NLI eso son ~6 GB **por ventana de
+editor**; tres sesiones abiertas se comían 18,5 GB de un portátil de 16 GB, y el
+escritorio entero acababa en swap.
+
+`cuba-memorys serve` carga los modelos una vez y atiende a todos por HTTP en
+loopback — que es además la forma que fijó la [especificación MCP del
+2026-07-28](https://blog.modelcontextprotocol.io/posts/2026-07-28/): núcleo sin
+estado, sin handshake de sesión, cada petición se describe a sí misma.
+
+- **Las sesiones se aíslan por cliente.** `session.rs` guardaba la sesión activa
+  en un `static` global; compartido, un `jornada start` en una ventana se
+  convertía en la sesión activa de las demás. Ahora resuelve contra un
+  task-local con la identidad del cliente (`Mcp-Client-Id`), y el global sigue
+  siendo el camino de stdio y de los subcomandos. Fuera de una petición —el
+  ciclo REM, una tarea de fondo— el daemon no responde ninguna sesión en vez de
+  responder la de otro.
+- **El ciclo REM corre una vez.** Bajo stdio cada ventana consolidaba la misma
+  base en paralelo.
+- **Un panic ya no se lleva a todos por delante.** El perfil release pasa a
+  `panic = "unwind"` y el transporte contiene cada petición, porque con un
+  proceso compartido un fallo en el handler de un cliente abortaba el servidor
+  de todos. `outbound()` devolvía `.expect()` — con `panic = "abort"`, eso era
+  el proceso entero al primer mensaje iniciado por el servidor sobre HTTP.
+- **stdio ya no deja procesos huérfanos.** Si los modelos tardan más que el
+  timeout de conexión del cliente (30 s), el cliente se rinde pero *no* cierra
+  nuestro stdin: el proceso se quedaba vivo sujetando cada modelo que había
+  cargado, uno por intento, hasta que la máquina no daba más. Ahora sale si no
+  llega ningún handshake en `CUBA_HANDSHAKE_TIMEOUT_SECS` (60 s; `0` desactiva).
+
+### El reranker: lo que faltaba después de v0.18.0
+
+v0.18.0 dejó el camino GPU listo. Lo que no comprobaba nadie es que **el binario
+instalado se hubiera compilado con `--features cuda`** — el de esta máquina no,
+así que el cross-encoder corría en CPU, se pasaba de su presupuesto de 20 s en
+cada consulta y `faro` descartaba los scores. Se pagaba la inferencia completa
+para devolver el orden de RRF. Medido con `examples/rerank_bench` (50
+candidatos, longitudes mixtas como las reales):
+
+| configuración | media | ¿dentro del presupuesto? |
+|---|---|---|
+| CPU, 2 hilos (lo que había) | 106,9 s | no — 5,3× por encima |
+| CPU, 6 hilos (núcleos físicos) | 61,0 s | no |
+| **GPU (`--features cuda`)** | **4,1 s** | **sí** |
+
+El ranking de GPU y el de CPU son idéntico candidato a candidato; solo difieren
+en la quinta cifra decimal del score.
+
+Tres defectos reales aparecieron por el camino:
+
+- **Reordenar una lista vacía cargaba el modelo entero.** La comprobación de
+  `enabled()` iba antes que la de lista vacía, así que `rerank(q, &[])` pagaba
+  una carga perezosa de 1,1 GB para devolver el vector vacío que ya sabía
+  devolver. Era también lo que colgaba dos tests de la suite.
+- **`enabled()` se llamaba desde una tarea async.** Puede cargar el modelo, así
+  que bloqueaba el executor: en el daemon, la primera búsqueda de un cliente
+  congelaba a todos los demás. Ahora va al pool de bloqueo junto con la
+  inferencia que controla.
+- **`with_intra_threads(2)` estaba fijo** para un XLM-RoBERTa-large. Ahora son
+  los núcleos físicos (`CUBA_RERANK_INTRA_THREADS` lo fuerza): 1,74× en CPU, y
+  medido que pasarse a los hilos SMT empeora (12 hilos → 16,5 s vs 10,8 s con 6).
+- **Los lotes se agrupan por longitud** (`CUBA_RERANK_LENGTH_BUCKETING`) cuando
+  el padding no es fijo, para no gastar cómputo en relleno. Los scores no
+  cambian: la máscara de atención ya anula las posiciones rellenadas.
+
+`examples/rerank_bench` mide todo esto en cualquier máquina y dice si el
+reranker cabe en su presupuesto o si se está tirando el trabajo.
+
 ## [0.18.0] — 2026-07-28 (Cargo `0.18.0` · npm `0.18.0` · PyPI `1.20.0`)
 
 Dos cosas que llevaban releases documentadas como pendientes: el reranker que
