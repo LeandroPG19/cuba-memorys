@@ -1,0 +1,35 @@
+[Unit]
+Description=cuba-memorys — shared MCP knowledge-graph daemon
+Documentation=https://github.com/LeandroPG19/cuba-memorys
+# The brain lives in a Docker Postgres. If it is not up yet the daemon still
+# starts on a lazy pool and tools report the real error, so this is only a hint.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/cuba-memorys-daemon serve 127.0.0.1:8787
+Restart=always
+RestartSec=3
+
+# One process holds every ONNX model, so this is where the memory shows up.
+# A soft limit makes the kernel reclaim before the desktop starts swapping,
+# without the hard kill that MemoryMax would bring.
+MemoryHigh=7G
+
+Environment=DATABASE_URL=postgresql://cuba:memorys2026@127.0.0.1:5488/brain
+Environment=ONNX_MODEL_PATH=%h/.cache/cuba-memorys/models-bge-m3
+Environment=ORT_DYLIB_PATH=%h/.cache/cuba-memorys/onnxruntime/libonnxruntime.so
+Environment=CUBA_EMBEDDING_DIM=1024
+Environment=CUBA_EMBED_MODEL=bge-m3
+Environment=CUBA_POOLING=cls
+Environment=CUBA_QUERY_PREFIX=
+Environment=CUBA_PASSAGE_PREFIX=
+Environment=CUBA_MODE=completo
+Environment=CUBA_NODE_NAME=leandro-pop-dev
+Environment=CUBA_SKIP_MIGRATIONS=1
+Environment=LD_LIBRARY_PATH=%h/.cache/cuba-memorys/onnxruntime
+Environment=RUST_LOG=cuba_memorys=info
+
+[Install]
+WantedBy=default.target

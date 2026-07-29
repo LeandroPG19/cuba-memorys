@@ -1,6 +1,6 @@
 [package]
 name = "cuba-memorys"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 description = "Knowledge Graph MCP Server — 29 tools, sqlx-migrate, BM25/MMR/OOD search, conformal prediction, testing-effect/Δt-Hebbian/Robbins-Monro cognitive, source credibility, closeness/harmonic/k-core graph, working-memory + Allen interval + ADWIN drift + MI tagging, audit hash-chain (CFR-21) + RLS, MCP Resources URI scheme, optional Prometheus /metrics + MCPSamplingJudge, tree-sitter codegraph, git-native sync hooks, relation provenance"
 license = "AGPL-3.0-only"
@@ -50,6 +50,8 @@ zstd = "0.13"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -80,7 +82,10 @@ observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# `serve` puts every client in one process, so an aborting panic would take down
+# every editor window at once. Unwinding lets the HTTP transport contain a panic
+# to the single request that caused it.
+panic = "unwind"
 strip = true
 
 [lints.rust]

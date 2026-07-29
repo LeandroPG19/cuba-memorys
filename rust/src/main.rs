@@ -13,7 +13,17 @@ fn print_help() {
 
 USAGE:
   cuba-memorys                  run the MCP server on stdio (how an MCP client launches it)
+  cuba-memorys serve [addr]     run one shared daemon over HTTP for every client
   cuba-memorys <command> [args]
+
+ONE PROCESS FOR EVERY CLIENT:
+  serve             stdio gives each client its own process, and each process its
+                    own ~6 GB of ONNX models. `serve` loads them once and answers
+                    every editor window over loopback HTTP (default 127.0.0.1:8787).
+                    Point clients at http://127.0.0.1:8787/mcp with \"type\": \"http\",
+                    and give each one an Mcp-Client-Id header so their sessions
+                    stay separate. CUBA_HTTP_ADDR overrides the address;
+                    CUBA_HTTP_TOKEN requires a bearer token.
 
 THE BRAIN, WITHOUT AN LLM IN BETWEEN:
   search <query>    hybrid search (use --format verbose for the score breakdown)
@@ -208,6 +218,20 @@ async fn main() {
                 eprintln!("setup: {e:#}");
                 std::process::exit(1);
             }
+            return;
+        }
+
+        Some("serve") => {
+            let addr = argv
+                .get(2)
+                .cloned()
+                .unwrap_or_else(cuba_memorys::http::bind_addr);
+            if let Err(e) = cuba_memorys::http::serve(&addr).await {
+                tracing::error!(error = %format!("{e:#}"), "daemon failed");
+                eprintln!("serve: {e:#}");
+                std::process::exit(1);
+            }
+            drain_background_tasks().await;
             return;
         }
 
