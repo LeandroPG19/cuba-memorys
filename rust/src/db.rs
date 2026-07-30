@@ -24,8 +24,11 @@ fn pool_options() -> PgPoolOptions {
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
 
+    // One process now answers every client (see http.rs), so the pool sizes
+    // for a handful of local MCP sessions, not one connection per editor
+    // window like the old stdio-per-client model needed.
     PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(4)
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))

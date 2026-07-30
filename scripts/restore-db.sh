@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-if [[ $
+if [[ $# -lt 1 ]]; then
   echo "usage: $0 <brain_*.dump>" >&2
   exit 1
 fi

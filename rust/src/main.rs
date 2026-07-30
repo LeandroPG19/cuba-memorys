@@ -67,7 +67,11 @@ async fn drain_background_tasks() {
     }
 }
 
-#[tokio::main]
+// The default is one worker per core — 12 here — on top of the intra-op pool
+// every ONNX session builds for itself. This daemon serves a handful of local
+// MCP clients and hands its real work to `spawn_blocking`, so the wide default
+// bought nothing and made the runtime and ONNX fight over the same cores.
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     tracing_subscriber::fmt()
         .with_target(false)
