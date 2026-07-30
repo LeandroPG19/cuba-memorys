@@ -6,6 +6,25 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [Unreleased]
+
+### Corregido
+
+- **`packaging/cuba-memorys.service` se quedó atrás en 0.20.0.** La unidad que se
+  distribuye seguía siendo la de 0.19.0, así que quien la copiara no obtenía nada
+  de lo que anuncia esta versión. Tres problemas concretos: `Restart=always`
+  habría relanzado el daemon al instante tras un apagado por inactividad,
+  anulándolo por completo; faltaban todas las variables nuevas
+  (`CUBA_*_DEVICE`, `CUBA_GPU_MEM_LIMIT_MB`, `CUBA_RERANK_CHUNK`), de modo que la
+  colocación por modelo no se aplicaba; y traía `CUBA_NODE_NAME=leandro-pop-dev`
+  hardcodeado — el nombre de una máquina concreta en un paquete público, cuando
+  el código ya cae al hostname si la variable no está.
+- **Añadido `packaging/cuba-memorys.socket`.** El README de 0.20.0 documenta la
+  activación por socket pero el paquete no incluía la unidad que hace falta.
+  `Restart=on-failure`, `MemoryHigh`/`MemoryMax` según el pico medido (~3,9 GB), y
+  `CUBA_IDLE_SHUTDOWN_SECS` comentado con la advertencia de que sin el `.socket`
+  habilitado nada vuelve a levantar el daemon.
+
 ## [0.20.0] — 2026-07-29 (Cargo `0.20.0` · npm `0.20.0` · PyPI `1.22.0`)
 
 El daemon dejó de ser algo que corre siempre. En la GPU de 6 GB donde se midió
