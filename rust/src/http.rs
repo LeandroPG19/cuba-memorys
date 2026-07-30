@@ -10,7 +10,6 @@
 //! `jornada start` in one window does not become the active session of another.
 
 use std::net::SocketAddr;
-use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -69,7 +68,13 @@ fn idle_shutdown_after() -> Option<Duration> {
 /// this unit is socket-activated (`LISTEN_FDS=1`, `LISTEN_PID` naming this
 /// process). Adopting it instead of binding is what lets the daemon start
 /// dormant and only pay for the port on the first real connection.
+///
+/// Unix only — `std::os::fd` does not exist on Windows, and neither does
+/// systemd. Everywhere else this returns `None` and `serve` binds normally.
+#[cfg(unix)]
 fn systemd_listener() -> Option<std::net::TcpListener> {
+    use std::os::fd::{FromRawFd, RawFd};
+
     let pid: u32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
     if pid != std::process::id() {
         return None;
@@ -78,13 +83,18 @@ fn systemd_listener() -> Option<std::net::TcpListener> {
     if fds == 0 {
         return None;
     }
-    const SD_LISTEN_FDS_START: std::os::fd::RawFd = 3;
+    const SD_LISTEN_FDS_START: RawFd = 3;
     // SAFETY: systemd guarantees fd 3 is a valid, already-listening socket
     // when LISTEN_PID/LISTEN_FDS name this process — that is the activation
     // protocol's whole contract.
     let listener = unsafe { std::net::TcpListener::from_raw_fd(SD_LISTEN_FDS_START) };
     listener.set_nonblocking(true).ok()?;
     Some(listener)
+}
+
+#[cfg(not(unix))]
+fn systemd_listener() -> Option<std::net::TcpListener> {
+    None
 }
 
 fn auth_token() -> Option<String> {
