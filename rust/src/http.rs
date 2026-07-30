@@ -10,8 +10,9 @@
 //! `jornada start` in one window does not become the active session of another.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::os::fd::FromRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -45,10 +46,45 @@ struct AppState {
     started: Instant,
     served: Arc<AtomicU64>,
     seen: Arc<std::sync::RwLock<std::collections::HashMap<String, Instant>>>,
+    last_activity: Arc<Mutex<Instant>>,
 }
 
 pub fn bind_addr() -> String {
     std::env::var("CUBA_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string())
+}
+
+/// How long with zero MCP requests (from any client) before the daemon exits.
+/// Unset or `0` keeps the daemon up forever — the behaviour this had before
+/// socket activation existed, and still what a long-lived server deployment
+/// wants. The desktop unit sets this; a bare `cuba-memorys serve` does not.
+fn idle_shutdown_after() -> Option<Duration> {
+    let secs: u64 = std::env::var("CUBA_IDLE_SHUTDOWN_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// systemd hands the already-bound, already-listening socket over as fd 3 when
+/// this unit is socket-activated (`LISTEN_FDS=1`, `LISTEN_PID` naming this
+/// process). Adopting it instead of binding is what lets the daemon start
+/// dormant and only pay for the port on the first real connection.
+fn systemd_listener() -> Option<std::net::TcpListener> {
+    let pid: u32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
+    if pid != std::process::id() {
+        return None;
+    }
+    let fds: u32 = std::env::var("LISTEN_FDS").ok()?.parse().ok()?;
+    if fds == 0 {
+        return None;
+    }
+    const SD_LISTEN_FDS_START: std::os::fd::RawFd = 3;
+    // SAFETY: systemd guarantees fd 3 is a valid, already-listening socket
+    // when LISTEN_PID/LISTEN_FDS name this process — that is the activation
+    // protocol's whole contract.
+    let listener = unsafe { std::net::TcpListener::from_raw_fd(SD_LISTEN_FDS_START) };
+    listener.set_nonblocking(true).ok()?;
+    Some(listener)
 }
 
 fn auth_token() -> Option<String> {
@@ -107,10 +143,20 @@ pub async fn serve(addr: &str) -> Result<()> {
         started: Instant::now(),
         served: Arc::new(AtomicU64::new(0)),
         seen: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        last_activity: Arc::new(Mutex::new(Instant::now())),
     };
 
     let reaper_seen = state.seen.clone();
     tokio::spawn(async move { reap_idle_clients(reaper_seen).await });
+
+    // Signalled instead of exited: `main` still has to drain the background
+    // tasks after `serve` returns, and those tasks are what persist embeddings.
+    let idle_shutdown = Arc::new(tokio::sync::Notify::new());
+    if let Some(idle_after) = idle_shutdown_after() {
+        let last_activity = state.last_activity.clone();
+        let notify = idle_shutdown.clone();
+        tokio::spawn(async move { shutdown_when_idle(last_activity, idle_after, notify).await });
+    }
 
     let app = Router::new()
         .route("/mcp", post(mcp_endpoint))
@@ -118,9 +164,13 @@ pub async fn serve(addr: &str) -> Result<()> {
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("cannot bind {addr} — is another daemon already running?"))?;
+    let listener = match systemd_listener() {
+        Some(std_listener) => tokio::net::TcpListener::from_std(std_listener)
+            .context("failed to adopt systemd-activated socket")?,
+        None => tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("cannot bind {addr} — is another daemon already running?"))?,
+    };
 
     tracing::info!(
         %addr,
@@ -139,7 +189,7 @@ pub async fn serve(addr: &str) -> Result<()> {
     });
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(idle_shutdown))
         .await
         .context("http server failed")?;
 
@@ -147,7 +197,7 @@ pub async fn serve(addr: &str) -> Result<()> {
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(idle: Arc<tokio::sync::Notify>) {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     let terminate = async {
@@ -167,7 +217,23 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("SIGINT received"),
         _ = terminate => tracing::info!("SIGTERM received"),
+        _ = idle.notified() => tracing::info!("idle shutdown requested"),
     }
+}
+
+/// Whether the reranker pays its load at startup rather than on its first batch.
+///
+/// Measured on this machine: warming the embedder alone takes 0.26 s, warming
+/// both takes 11 s — the cross-encoder is 1.08 GB and its warm-up runs a real
+/// 50-candidate batch. Under socket activation with an idle shutdown the daemon
+/// starts far more often than it reranks, and plenty of those starts only ever
+/// answer a `save` or a `jornada`. The reranker already loads lazily on its
+/// first real batch, so the default is to let it.
+fn warm_reranker_eagerly() -> bool {
+    matches!(
+        std::env::var("CUBA_WARM_RERANKER").as_deref(),
+        Ok("1") | Ok("on") | Ok("true") | Ok("yes")
+    )
 }
 
 /// Pays the model load once, at startup, instead of on some client's first
@@ -175,7 +241,11 @@ async fn shutdown_signal() {
 /// moves the cost — it changes no behaviour and no model.
 async fn warm_models() {
     if crate::search::rerank::is_configured() {
-        if crate::search::rerank::warm_up().await {
+        if !warm_reranker_eagerly() {
+            tracing::info!(
+                "reranker deferred — loads on its first batch (CUBA_WARM_RERANKER=1 to preload)"
+            );
+        } else if crate::search::rerank::warm_up().await {
             tracing::info!("reranker warm");
         } else {
             tracing::warn!("reranker configured but failed to warm up — identity fallback");
@@ -188,6 +258,41 @@ async fn warm_models() {
             "embedding model warm"
         ),
         Err(e) => tracing::warn!(error = %format!("{e:#}"), "embedding warm-up failed"),
+    }
+}
+
+/// Zero requests from any client for `idle_after` — nothing is holding the ONNX
+/// models in RAM/VRAM for, so give it back.
+///
+/// This notifies the shutdown path rather than calling `process::exit`. An exit
+/// here would skip the drain `main` runs after `serve` returns, and that drain is
+/// what flushes in-flight embedding writes — killing the process instead loses
+/// them silently, which is the one failure mode this daemon must not have.
+///
+/// Returning through the normal path still exits 0, so the unit's
+/// `Restart=on-failure` leaves the daemon down and the paired `.socket` unit is
+/// what brings it back on the next real request.
+async fn shutdown_when_idle(
+    last_activity: Arc<Mutex<Instant>>,
+    idle_after: Duration,
+    notify: Arc<tokio::sync::Notify>,
+) {
+    const CHECK_INTERVAL: Duration = Duration::from_secs(30);
+    let mut ticker = tokio::time::interval(CHECK_INTERVAL);
+    loop {
+        ticker.tick().await;
+        let elapsed = last_activity
+            .lock()
+            .map(|guard| guard.elapsed())
+            .unwrap_or_default();
+        if elapsed >= idle_after {
+            tracing::info!(
+                idle_secs = elapsed.as_secs(),
+                "idle timeout — shutting down"
+            );
+            notify.notify_one();
+            return;
+        }
     }
 }
 
@@ -319,6 +424,9 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
     let key = client_key(&headers, &payload);
     if let Ok(mut guard) = state.seen.write() {
         guard.insert(key.clone(), Instant::now());
+    }
+    if let Ok(mut guard) = state.last_activity.lock() {
+        *guard = Instant::now();
     }
 
     let batch = payload.as_array().cloned();
@@ -496,6 +604,7 @@ mod tests {
             started: Instant::now(),
             served: Arc::new(AtomicU64::new(0)),
             seen: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
         };
 
         assert!(authorized(

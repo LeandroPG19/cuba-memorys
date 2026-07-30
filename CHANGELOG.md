@@ -6,6 +6,122 @@ All notable changes to cuba-memorys are documented here. Format follows
 versioning is independent (~ +1.0 offset since v0.6.0 era to allow wheel
 revisions without binary changes).
 
+## [0.20.0] — 2026-07-29 (Cargo `0.20.0` · npm `0.20.0` · PyPI `1.22.0`)
+
+El daemon dejó de ser algo que corre siempre. En la GPU de 6 GB donde se midió
+esto pasó de retener **5228 MiB de VRAM desde el arranque** —el 93% de la
+tarjeta— a **1470 MiB mientras busca y 0 en reposo**. Ese 93% era la razón por la
+que otros programas de GPU dejaban de arrancar: el driver devolvía
+`NV_ERR_NO_MEMORY` al crear un canal, que es exactamente donde falla un juego o
+una terminal acelerada.
+
+Dos columnas, porque no todo viene gratis: la primera es lo que trae el código
+publicado; la segunda añade una variable de entorno y el reranker refusionado que
+documenta el README.
+
+| | antes | **defaults 0.20.0** | + `CUBA_RERANK_CHUNK=4` y artefacto fusionado |
+|---|---|---|---|
+| VRAM buscando | 5228 MiB | **2950 MiB** | **1460 MiB** |
+| VRAM en reposo | 5228 MiB | **0** — el proceso no existe | 0 |
+| Arranque hasta responder | 11,1 s | **0,027 s** | 0,027 s |
+| Búsqueda en caliente | 5,90 s | 5,25 s | **1,70 s** |
+| Embedding de una query | 52,3 ms | **35,8 ms** | 35,8 ms |
+
+Ninguna función se quitó.
+
+### Colocación por modelo, no por proceso
+
+`gpu::configure()` registraba CUDA para las tres sesiones ONNX. El README decía
+que sin `--features cuda` «todos los modelos corren en CPU», dando a entender que
+con el feature los tres irían a la GPU. **Solo el reranker fue nunca.**
+
+- **El embedder no puede usar CUDA.** Viene cuantizado dinámicamente a INT8: 96
+  `DynamicQuantizeLinear` alimentando 144 `MatMulInteger`, y el provider CUDA no
+  registra kernel para ninguno de los dos (verificado contra el `.so` instalado y
+  documentado por Optimum: *«nodes such as MatMulInteger and
+  DynamicQuantizeLinear … cannot be consumed by the CUDA execution provider»*).
+  ONNX Runtime los particionaba a CPU de todos modos. Registrar CUDA solo
+  reservaba un arena en el que el modelo nunca computó: **374 MiB retenidos
+  mientras los 544 MB de pesos vivían en RAM del host**, midiendo la sesión
+  aislada.
+- **El NLI tiene el problema opuesto.** Es FP32 y ahí se queda: mDeBERTa está
+  documentado aguas arriba como no compatible con FP16, y la build INT8 devuelve
+  entailments falsas con confianza (ya estaba anotado en `nli.rs`). Se invoca
+  poco y tolera latencia, así que en CPU cuesta 150-400 ms medidos y libera más
+  de un gigabyte de VRAM.
+- **Corolario:** cuantizar el reranker a INT8 sería contraproducente — lo
+  expulsaría de la GPU igual que al embedder. Su FP16 es la representación
+  correcta.
+
+Nuevas `CUBA_EMBED_DEVICE` / `CUBA_RERANK_DEVICE` / `CUBA_NLI_DEVICE` (`cpu` ·
+`gpu` · `cpu`) para medir una colocación sin recompilar. `doctor` ahora informa
+cuál corre dónde, porque tener GPU no dice nada sobre qué sesiones la usan.
+
+### El arena de CUDA dejó de duplicarse
+
+`ArenaExtendStrategy::NextPowerOfTwo` es el default de ONNX Runtime y reserva en
+potencias de dos en lugar de lo que la sesión pidió. Así 1,65 GB de pesos se
+convertían en 5+ GB. Ahora se fija `SameAsRequested` con un tope explícito
+(`CUBA_GPU_MEM_LIMIT_MB`, 2048 por defecto). **El tope es por sesión**, que es
+sostenible solo porque exactamente un modelo pide CUDA.
+
+`CUBA_RERANK_CHUNK` (16) expone el otro extremo: bajo `fixed_shape` cada lote se
+rellena a 512 tokens, así que es la palanca principal sobre el arena — 16 → 2938
+MiB, 4 → 2364 MiB. Los scores no cambian: una búsqueda `verbose` a 16 y a 4
+volvió byte a byte idéntica.
+
+### El reranker carga en su primer lote
+
+Calentar solo el embedder cuesta 0,026 s; calentar los dos, 11 s — el
+cross-encoder son 1,08 GB y su warm-up corre un lote real de 50 candidatos. Bajo
+activación por socket el daemon arranca muchas más veces de las que rerankea, y
+buena parte de esos arranques solo atienden un `save`. `CUBA_WARM_RERANKER=1`
+restaura la precarga.
+
+### Un daemon que no corre cuando nadie pregunta
+
+`CUBA_IDLE_SHUTDOWN_SECS` apaga el daemon tras ese tiempo sin peticiones de
+ningún cliente. `serve` adopta el socket que systemd pasa como fd 3
+(`LISTEN_FDS`), de modo que una unidad `.socket` retiene el puerto mientras el
+daemon no corre y ningún cliente ve una conexión rechazada.
+
+Se apaga por el camino normal —`serve` retorna, el drenaje de fondo vacía las
+escrituras de embeddings en vuelo, `sqlx` cierra su pool— y no llamando a
+`process::exit`, que se saltaba ese drenaje y perdía esas escrituras en silencio.
+El README documenta el par de unidades systemd.
+
+### Hilos, pool y arranque
+
+- **`CUBA_EMBED_INTRA_THREADS`.** Estaba fijo en 2, de cuando se esperaba que
+  CUDA hiciera el trabajo. Nunca lo hizo, así que esos hilos *son* el embedder.
+  Medido en 12 hilos por query: 1 → 94,8 ms · 2 → 52,3 ms · **4 → 35,8 ms** · 6 →
+  68,1 ms · 12 → 155,4 ms. Pasado medio núcleo lógico la sincronización cuesta
+  más de lo que la paralelización aporta.
+- **`with_intra_threads` del reranker baja a 2 en GPU.** Ahí los GEMM corren en
+  kernels CUDA y esos hilos solo mueven tensores.
+- **`with_memory_pattern(false)`** en embedder y NLI: el planificador de memoria
+  de ONNX Runtime solo rinde con shapes estáticos, y la longitud de entrada varía
+  en cada llamada.
+- **`with_intra_op_spinning(false)`** en el NLI: los veredictos llegan de uno en
+  uno, con minutos entre medias.
+- **Pool de Postgres 10 → 4.** Era el default de sqlx, nunca ajustado; un proceso
+  atiende ahora a todos los clientes en lugar de uno por ventana.
+- **`worker_threads = 4`** en tokio (era uno por núcleo, 12) — el trabajo real va
+  a `spawn_blocking` y el default hacía competir al runtime con los pools
+  intra-op de ONNX.
+- **`fixed_shape()`** se decide por la colocación real y no por el feature de
+  compilación, para que apuntar el reranker a CPU no lo deje rellenando todo a
+  512 tokens.
+
+### Corregido
+
+- **`scripts/backup-db.sh` y `scripts/restore-db.sh` estaban rotos desde
+  `e96df5d`.** Aquel commit de estilo quitaba comentarios y trató `${#OLD[@]}` y
+  `$#` como el inicio de uno, comiéndose el resto de la línea: `if ((${` y
+  `if [[ $`. El gate de merge fallaba con error de sintaxis de bash, y el script
+  de restauración —el camino de recuperación ante desastre— no arrancaba. Ambas
+  líneas restauradas a su forma original.
+
 ## [0.19.0] — 2026-07-29 (Cargo `0.19.0` · npm `0.19.0` · PyPI `1.21.0`)
 
 Un servidor para todos los clientes, y el reranker de v0.18.0 aplicándose de

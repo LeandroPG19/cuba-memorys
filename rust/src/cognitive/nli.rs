@@ -106,9 +106,18 @@ fn init(dir: &std::path::Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(intra_threads())
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
+        // Premise and hypothesis lengths vary per verdict, so the memory pattern
+        // planner would keep planning for shapes that never recur.
+        .with_memory_pattern(false)
+        .map_err(|e| anyhow::anyhow!("memory pattern: {e}"))?
+        // Verdicts arrive in ones, minutes apart. Spinning between ops buys
+        // latency for back-to-back inference and burns a core the rest of the
+        // time, which is the wrong trade for a judge on a laptop.
+        .with_intra_op_spinning(false)
+        .map_err(|e| anyhow::anyhow!("intra-op spinning: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
-    let session = crate::gpu::configure(builder)?
+    let session = crate::gpu::configure(builder, crate::gpu::Workload::Nli)?
         .commit_from_file(&model_file)
         .map_err(|e| anyhow::anyhow!("cargando {model_file:?}: {e}"))?;
 

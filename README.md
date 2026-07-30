@@ -127,7 +127,7 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 
 **Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+93% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
 
-Fetching the GPU runtime is only half of it: **the binary itself has to be built with `--features cuda`**, or `gpu::configure()` registers no provider and every model quietly runs on CPU. That is not a hypothetical — it is what a 50-candidate rerank costs on a 6-core laptop, measured with `cargo run --release --example rerank_bench`:
+Fetching the GPU runtime is only half of it: **the binary itself has to be built with `--features cuda`**, or `gpu::configure()` registers no provider and the reranker runs on CPU. That is not a hypothetical — it is what a 50-candidate rerank costs on a 6-core laptop, measured with `cargo run --release --example rerank_bench`:
 
 | build | 50 candidates, mixed lengths | inside the 20 s budget? |
 |---|---|---|
@@ -136,6 +136,10 @@ Fetching the GPU runtime is only half of it: **the binary itself has to be built
 | **`--features cuda`** | **4,1 s** | **yes** |
 
 Same ranking either way — CPU and GPU agree candidate for candidate, differing only in the fifth decimal of the score. Run `rerank_bench` on any machine to see whether the reranker fits its budget there or is silently throwing the work away, and `cuba-memorys doctor` reports whether this build has a GPU provider at all.
+
+**This section used to say "every model quietly runs on CPU", implying all three would run on the GPU once you built with `--features cuda`. Only the reranker ever did.** The embedder ships dynamically quantised to INT8, which means 96 `DynamicQuantizeLinear` feeding 144 `MatMulInteger` — and the CUDA provider registers no kernel for either, so ONNX Runtime partitions them onto the CPU no matter what you build. Registering CUDA for that session bought nothing and cost a VRAM arena the model never computed in: **374 MiB held while all 544 MB of weights sat in host RAM.** The NLI cross-encoder has the opposite problem — it is FP32 and stuck there, because mDeBERTa is documented upstream as not supporting FP16 and the INT8 build returns confident false entailments.
+
+So placement is now decided per model rather than once per process, and only the reranker asks for the GPU. On the 6 GB card this was measured on, the daemon went from **5228 MiB of VRAM to 2950 MiB while searching, and 0 while idle** — and down to 1460 MiB with the two opt-in steps in [Footprint](#footprint) below.
 
 Individual env vars (`CUBA_DOCS`, `CUBA_RERANKER_PATH`, …) always override the preset.
 </details>
@@ -264,14 +268,100 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
 | `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+93% nDCG); on CPU it falls back to RRF past the budget |
-| `CUBA_RERANK_INTRA_THREADS` | physical cores | ONNX threads per rerank inference. Past the physical core count it gets *slower* — measure with `rerank_bench` before raising it |
+| `CUBA_RERANK_INTRA_THREADS` | physical cores (2 on GPU) | ONNX threads per rerank inference. Past the physical core count it gets *slower* — measure with `rerank_bench` before raising it |
 | `CUBA_RERANK_LENGTH_BUCKETING` | on (off under fixed shape) | Batch similar-length candidates so padding does not become compute. Scores are unchanged |
+| `CUBA_RERANK_CHUNK` | `16` | Candidates per forward pass. Under fixed shapes every batch pads to 512 tokens, making this the main lever on the GPU arena: `16` → 2938 MiB, `4` → 2364 MiB. Scores are unchanged — a verbose search at 16 and at 4 came back byte-identical |
+| `CUBA_EMBED_DEVICE` · `CUBA_RERANK_DEVICE` · `CUBA_NLI_DEVICE` | `cpu` · `gpu` · `cpu` | Per-model placement. Only the reranker gains from a GPU; the INT8 embedder cannot use one and the FP32 NLI is not worth the VRAM. Set to `gpu`/`cpu` to A/B a placement without rebuilding |
+| `CUBA_GPU_MEM_LIMIT_MB` | `2048` | Caps the CUDA arena and pins `arena_extend_strategy` to `SameAsRequested`. The default (`NextPowerOfTwo`) doubles its reservation on every growth, which is how 1,65 GB of weights became 5+ GB of VRAM. The cap is **per session** |
+| `CUBA_EMBED_INTRA_THREADS` | half the logical cores, max 4 | ONNX threads per embedding. Measured on 12 threads: 1 → 94,8 ms, 2 → 52,3 ms, **4 → 35,8 ms**, 6 → 68,1 ms, 12 → 155,4 ms per query |
+| `CUBA_IDLE_SHUTDOWN_SECS` | `0` (off) | Exit after this long with no request from any client. Pairs with a systemd `.socket` unit so the next call brings the daemon back — see [Footprint](#footprint) |
+| `CUBA_WARM_RERANKER` | off | Load the cross-encoder at startup instead of on its first batch. Off, a cold start costs 0,027 s instead of 11 s and holds no VRAM until something actually reranks |
 | `CUBA_HTTP_ADDR` · `CUBA_HTTP_TOKEN` | `127.0.0.1:8787` · unset | Address for `serve`, and the bearer token it requires. A token is mandatory to bind anything but loopback |
 | `CUBA_HANDSHAKE_TIMEOUT_SECS` | `60` | stdio exits if no MCP handshake arrives, instead of holding the models for a client that gave up. `0` disables |
 | `CUBA_DOCS` | **off** | `1` enables `cuba_docs`, the only tool that leaves your machine. Unset, it is not even advertised. |
 | `CUBA_COMPACT_CHARS` | `1200` | Compact truncation (measured knee) |
 | `CUBA_OOD_THRESHOLD` | calibrated | Override the abstention threshold |
 | `CUBA_BITEMPORAL` | on | Mirror observations into `brain_facts` |
+
+---
+
+## Footprint
+
+A memory server is infrastructure: it is running when you are not using it. On the 6 GB laptop GPU this was measured on, it used to hold **5228 MiB of VRAM from boot** — 93% of the card — and other GPU programs stopped being able to start. The NVIDIA driver was returning `NV_ERR_NO_MEMORY` on channel creation, which is what a game or a GPU-accelerated terminal fails on.
+
+Two of the numbers below ship as defaults; two need a line of config, and this table keeps them apart rather than quoting the best one as if it came free.
+
+| | before | **0.20.0 defaults** | `CUBA_RERANK_CHUNK=4` | + fused artifact |
+|---|---|---|---|---|
+| VRAM while searching | 5228 MiB | **2950 MiB** | 2364 MiB | **1460 MiB** |
+| VRAM idle | 5228 MiB | **0** — the process is gone | 0 | 0 |
+| Cold start to answering | 11,1 s | **0,027 s** | 0,027 s | 0,027 s |
+| Search, warm | 5,90 s | 5,25 s | 3,73 s | **1,70 s** |
+| Embedding one query | 52,3 ms | **35,8 ms** | 35,8 ms | 35,8 ms |
+
+Everything in the defaults column is code that ships. `CUBA_RERANK_CHUNK=4` is one env var. The last column additionally needs the rebuilt reranker described below. None of it removed a feature.
+
+Four things got it there:
+
+**Placement per model, not per process.** Only the reranker is accelerated by a GPU — the INT8 embedder cannot be, and the FP32 NLI is not worth a gigabyte of VRAM for a judge that runs occasionally and tolerates 150-400 ms. The arena cap is per session, so three sessions asking for CUDA on a 6 GB card is a 3× overcommit waiting to fail.
+
+**A CUDA arena that stops doubling.** `ArenaExtendStrategy::NextPowerOfTwo` is the ONNX Runtime default and it reserves in powers of two rather than what the session asked for.
+
+**The reranker loads on its first batch.** Under socket activation the daemon starts far more often than it reranks, and plenty of those starts only ever answer a `save`.
+
+**A daemon that is not running when nobody is asking.** `CUBA_IDLE_SHUTDOWN_SECS` plus a systemd `.socket` unit: the socket owns the port, the daemon starts on the first real connection and exits after the idle window. It shuts down through the normal path — `serve` returns, the background drain flushes in-flight embedding writes, `sqlx` closes its pool — because exiting the process directly loses those writes silently.
+
+<details>
+<summary>The systemd pair</summary>
+
+```ini
+# ~/.config/systemd/user/cuba-memorys.socket
+[Socket]
+ListenStream=127.0.0.1:8787
+Accept=no
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/cuba-memorys.service — no [Install]; the socket starts it
+[Unit]
+Requires=cuba-memorys.socket
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/cuba-memorys serve 127.0.0.1:8787
+# An idle shutdown exits 0 — Restart=always would bounce it straight back up.
+Restart=on-failure
+Environment=CUBA_IDLE_SHUTDOWN_SECS=1200
+Environment=CUBA_EMBED_DEVICE=cpu
+Environment=CUBA_RERANK_DEVICE=gpu
+Environment=CUBA_NLI_DEVICE=cpu
+```
+
+`serve` adopts the socket systemd passes as fd 3 (`LISTEN_FDS`), so the port is held while the daemon is not running and no client sees a refused connection.
+</details>
+
+### The reranker artifact
+
+The published `bge-reranker-v2-m3` ONNX is converted to FP16 **before** any graph fusion, which leaves 785 `Cast` nodes threaded through it. ONNX Runtime claws some of that back at load time (2023 → 897 nodes, 49 `SkipLayerNormalization`), but it cannot fuse Gelu and it repeats the work on every cold start. Rebuilding from the FP32 export and fusing *first*:
+
+```bash
+python -m onnxruntime.transformers.optimizer \
+  --input model.onnx --output model.onnx \
+  --model_type bert --num_heads 16 --hidden_size 1024 \
+  --opt_level 1 --use_gpu --float16
+```
+
+| | VRAM | search p50 | load + warm |
+|---|---|---|---|
+| shipped FP16 | 2364 MiB | 3,73 s | 22,8 s |
+| **fused, then FP16** | **1460 MiB** | **1,70 s** | **10,2 s** |
+
+Identical top-10 order on a real search, `fused_score` differing by at most 0,0029; on synthetic logits at the real batch shapes, Pearson ≥ 0,9997 with the same ranking in every batch.
+
+**Attention does not fuse, and that is not fixable here.** `is_fully_optimized: Attention (or MultiHeadAttention) not fused`, at `opt_level` 0, 1, 2 and 99, on both the FP16 artifact and the clean FP32 one. The export builds its Q/K/V reshapes from dynamic shape subgraphs (`Shape → Gather → Unsqueeze → Concat → Reshape`) and `AttentionFusion` needs a `Reshape` with a constant shape to read `num_heads` and `head_size` off it. So flash/efficient attention stays unavailable without a re-export using static shapes — worth knowing before anyone spends an afternoon on it.
 
 ---
 
@@ -333,8 +423,9 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 git clone https://github.com/LeandroPG19/cuba-memorys.git
 cd cuba-memorys/rust && cargo build --release
 
-# On an NVIDIA machine, build this way instead — without it every model runs on
-# CPU and the reranker spends its whole budget for a ranking that gets discarded.
+# On an NVIDIA machine, build this way instead — without it the reranker spends
+# its whole budget for a ranking that gets discarded. It accelerates the
+# reranker only; see Footprint for why the other two models stay on the CPU.
 cargo build --release --features docs,cuda
 
 ./scripts/demo.sh                  # runs on a throwaway Postgres it removes on exit

@@ -40,6 +40,12 @@ fn intra_threads() -> usize {
     {
         return n;
     }
+    // On the GPU the GEMMs run as CUDA kernels and these threads only marshal
+    // tensors across the boundary, so a wide pool is idle stacks contending with
+    // the embedder's — and the embedder is the one that really runs on the CPU.
+    if crate::gpu::wants_gpu(crate::gpu::Workload::Reranker) {
+        return 2;
+    }
     std::thread::available_parallelism()
         .map(|n| (n.get() / 2).clamp(1, 8))
         .unwrap_or(2)
@@ -138,7 +144,7 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
-    let session = crate::gpu::configure(builder)?
+    let session = crate::gpu::configure(builder, crate::gpu::Workload::Reranker)?
         .commit_from_file(&model_file)
         .map_err(|e| anyhow::anyhow!("load model: {e}"))?;
     RERANKER_SESSION
@@ -214,11 +220,34 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
 const RERANK_CHUNK: usize = 16;
 const RERANK_MAX_TOKENS: usize = 512;
 
+/// How many candidates cross the encoder in one forward pass.
+///
+/// Activation memory scales with `chunk × tokens`, and under `fixed_shape` every
+/// batch is padded to the full `RERANK_MAX_TOKENS`, which makes this the single
+/// biggest lever on the GPU arena this session reserves. 16 keeps the device
+/// busy; halving it roughly halves peak activations for the price of more
+/// passes over the same total work. Tunable without a rebuild so the tradeoff
+/// can be measured against `nvidia-smi` on the machine that has to live with it.
+fn rerank_chunk() -> usize {
+    std::env::var("CUBA_RERANK_CHUNK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(RERANK_CHUNK)
+}
+
+/// Whether every batch is padded to `RERANK_MAX_TOKENS`.
+///
+/// Fixed shapes keep the GPU from re-planning per batch, but they also mean a
+/// one-line note costs the same as a full 512-token passage — which is only
+/// worth it when the device is actually running the model. Keyed off the real
+/// placement rather than the compile-time feature, so pointing the reranker at
+/// the CPU does not silently leave it padding everything to 512.
 pub fn fixed_shape() -> bool {
     match std::env::var("CUBA_RERANK_FIXED_SHAPE").as_deref() {
         Ok("0") | Ok("off") | Ok("false") => false,
         Ok(_) => true,
-        Err(_) => cfg!(any(feature = "cuda", feature = "directml")),
+        Err(_) => crate::gpu::wants_gpu(crate::gpu::Workload::Reranker),
     }
 }
 
@@ -262,15 +291,16 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         order.sort_by_key(|&i| std::cmp::Reverse(candidates[i].len()));
     }
 
+    let chunk_size = rerank_chunk();
     let mut scores = vec![0.0_f64; candidates.len()];
-    for chunk in order.chunks(RERANK_CHUNK) {
+    for chunk in order.chunks(chunk_size) {
         let texts: Vec<String> = chunk.iter().map(|&i| candidates[i].clone()).collect();
 
-        let chunk_scores = if !fixed_shape() || texts.len() == RERANK_CHUNK {
+        let chunk_scores = if !fixed_shape() || texts.len() == chunk_size {
             score_chunk(&mut session, tokenizer, query, &texts)?
         } else {
             let mut padded = texts.clone();
-            padded.resize(RERANK_CHUNK, String::new());
+            padded.resize(chunk_size, String::new());
             let mut s = score_chunk(&mut session, tokenizer, query, &padded)?;
             s.truncate(texts.len());
             s

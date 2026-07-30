@@ -1,6 +1,6 @@
 {
   "name": "cuba-memorys",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "mcpName": "io.github.LeandroPG19/cuba-memorys",
   "description": "Persistent memory MCP server (v0.18) \u2014 self-growing knowledge graph that works without MCP sampling, poisoning quarantine, PostgreSQL + pgvector, bitemporal facts, BM25+RRF hybrid search, graph metrics/communities, Hebbian learning, episodic memory, audit log, project scoping, tree-sitter codegraph.",
   "license": "AGPL-3.0-only",

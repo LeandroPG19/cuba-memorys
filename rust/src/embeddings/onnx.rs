@@ -158,14 +158,50 @@ fn get_model_status() -> &'static ModelStatus {
     })
 }
 
+/// How many threads ONNX Runtime may use inside a single embedding.
+///
+/// This was hardcoded to 2, from when the CUDA provider was expected to do the
+/// work. It never did — the INT8 graph runs on the CPU (see `gpu::Workload`), so
+/// these threads *are* the embedder. Measured on this 12-thread machine with
+/// bge-m3 INT8, p50 per embed:
+///
+/// | intra | query (32 tok) | document (512 tok) |
+/// |-------|----------------|--------------------|
+/// | 1     | 94.8 ms        | 1428 ms            |
+/// | 2     | 52.3 ms        | 956 ms             |
+/// | **4** | **35.8 ms**    | **673 ms**         |
+/// | 6     | 68.1 ms        | 828 ms             |
+/// | 12    | 155.4 ms       | 1784 ms            |
+///
+/// Past half the logical cores the sync overhead and contention with the rest of
+/// the desktop cost more than the extra parallelism buys, so this clamps rather
+/// than scaling with core count.
+fn intra_threads() -> usize {
+    if let Some(n) = std::env::var("CUBA_EMBED_INTRA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 4))
+        .unwrap_or(2)
+}
+
 fn init_onnx_session(model_file: &std::path::Path, model_dir: &std::path::Path) -> Result<()> {
     let builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
-        .with_intra_threads(2)
+        .with_intra_threads(intra_threads())
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
+        // Query length varies per call, and ONNX Runtime's memory pattern
+        // planner only pays off when shapes are static — with dynamic input it
+        // plans for shapes that never come back.
+        .with_memory_pattern(false)
+        .map_err(|e| anyhow::anyhow!("memory pattern: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("optimization level: {e}"))?;
-    let session = crate::gpu::configure(builder)?
+    let session = crate::gpu::configure(builder, crate::gpu::Workload::Embedder)?
         .commit_from_file(model_file)
         .map_err(|e| anyhow::anyhow!("load model: {e}"))?;
 

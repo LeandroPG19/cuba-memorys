@@ -68,7 +68,7 @@ echo "Wrote metadata $META"
 echo "Backup size: $SIZE_BYTES bytes ($(du -h "$OUT" | cut -f1))"
 
 mapfile -t OLD < <(ls -1t "$BACKUP_DIR"/brain_*.dump 2>/dev/null || true)
-if ((${
+if ((${#OLD[@]} > KEEP_COUNT)); then
   for f in "${OLD[@]:KEEP_COUNT}"; do
     base="${f%.dump}"
     rm -f "$f" "${base}.meta.json"
