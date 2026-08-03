@@ -327,6 +327,16 @@ fn is_relevant_by_marker(content: &str, markers: &[String]) -> bool {
         .any(|m| !m.is_empty() && lower.contains(&m.to_lowercase()))
 }
 
+pub fn percentile_ms(values: &[f64], q: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,14 +411,4 @@ mod tests {
             );
         }
     }
-}
-
-pub fn percentile_ms(values: &[f64], q: f64) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
 }

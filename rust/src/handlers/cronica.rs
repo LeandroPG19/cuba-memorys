@@ -86,7 +86,7 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
                 "message": "Very similar observation exists. Reinforced existing instead."
             }));
         }
-        DedupResult::Unique => {}
+        DedupResult::Unique(_) => {}
     }
 
     let importance = crate::constants::importance_prior(obs_type, density);
@@ -332,7 +332,10 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
         );
     }
 
+    type PendingEmbed = (uuid::Uuid, String, String, String, Option<Vec<f32>>);
+
     struct PendingObs {
+        precomputed_embedding: Option<Vec<f32>>,
         entity_id: uuid::Uuid,
         entity_name: String,
         entity_type: String,
@@ -390,11 +393,12 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
             DedupResult::Reinforce(obs_id) => {
                 actions.push(BatchAction::Reinforce(obs_id));
             }
-            DedupResult::Unique => {
+            DedupResult::Unique(precomputed) => {
                 let density = information_density(content);
                 let importance = crate::constants::importance_prior(obs_type, density);
                 let tags = extract_tags(content);
                 actions.push(BatchAction::Insert(PendingObs {
+                    precomputed_embedding: precomputed,
                     entity_id,
                     entity_name: entity_name.to_string(),
                     entity_type,
@@ -417,7 +421,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut tx = pool.begin().await.context("failed to begin transaction")?;
     let mut added = 0u32;
     let mut reinforced = 0u32;
-    let mut inserted_for_embed: Vec<(uuid::Uuid, String, String, String)> = Vec::new();
+    let mut inserted_for_embed: Vec<PendingEmbed> = Vec::new();
     let mut inserted_for_facts: Vec<InsertedObs> = Vec::new();
 
     for action in &actions {
@@ -443,6 +447,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     pending.content.clone(),
                     pending.entity_name.clone(),
                     pending.entity_type.clone(),
+                    pending.precomputed_embedding.clone(),
                 ));
                 inserted_for_facts.push(InsertedObs {
                     entity_id: pending.entity_id,
@@ -489,15 +494,25 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
     if !inserted_for_embed.is_empty() {
         let embed_pool = pool.clone();
         crate::tasks::spawn(async move {
-            for (obs_id, content, entity_name, entity_type) in inserted_for_embed {
+            for (obs_id, content, entity_name, entity_type, precomputed) in inserted_for_embed {
+                let reused = precomputed.is_some();
+                let computed = match precomputed {
+                    Some(emb) => Ok(emb),
+                    None => {
+                        crate::embeddings::onnx::embed_passage_contextual(
+                            &content,
+                            &entity_type,
+                            &entity_name,
+                        )
+                        .await
+                    }
+                };
                 if crate::embeddings::onnx::is_model_loaded()
-                    && let Ok(emb) = crate::embeddings::onnx::embed_passage_contextual(
-                        &content,
-                        &entity_type,
-                        &entity_name,
-                    )
-                    .await
+                    && let Ok(emb) = computed
                 {
+                    if reused {
+                        tracing::debug!(obs = %obs_id, "reused the dedup embedding");
+                    }
                     let _ = sqlx::query(
                         "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                     )
@@ -621,7 +636,7 @@ async fn timeline(pool: &PgPool, entity_name: &str) -> Result<Value> {
 }
 
 enum DedupResult {
-    Unique,
+    Unique(Option<Vec<f32>>),
     Duplicate(String),
     Reinforce(uuid::Uuid),
 }
@@ -656,7 +671,7 @@ async fn check_dedup(
                  WHERE entity_id = $2 AND embedding IS NOT NULL AND observation_type != 'superseded'
                  ORDER BY embedding <=> $1::vector LIMIT 1",
             )
-            .bind(pgvector::Vector::from(emb))
+            .bind(pgvector::Vector::from(emb.clone()))
             .bind(entity_id)
             .fetch_optional(pool)
             .await?;
@@ -666,8 +681,9 @@ async fn check_dedup(
             {
                 return Ok(DedupResult::Reinforce(obs_id));
             }
+            return Ok(DedupResult::Unique(Some(emb)));
         }
-        return Ok(DedupResult::Unique);
+        return Ok(DedupResult::Unique(None));
     }
 
     let recent_sims: Vec<(f64,)> = sqlx::query_as(
@@ -700,7 +716,7 @@ async fn check_dedup(
         }
     }
 
-    Ok(DedupResult::Unique)
+    Ok(DedupResult::Unique(None))
 }
 
 async fn ensure_entity(
