@@ -267,8 +267,18 @@ pub async fn embed_passage_contextual(
     embed_with_prefix(&contextualized, &passage_prefix()).await
 }
 
+pub fn model_fingerprint() -> String {
+    std::env::var("CUBA_EMBED_MODEL").unwrap_or_else(|_| "default".to_string())
+}
+
 async fn embed_with_prefix(text: &str, prefix: &str) -> Result<Vec<f32>> {
-    let cache_key = format!("{}{}", prefix, text);
+    let cache_key = format!(
+        "{}|{}|{}{}",
+        model_fingerprint(),
+        embedding_dim(),
+        prefix,
+        text
+    );
     if let Ok(mut cache) = get_cache().lock()
         && let Some(cached) = cache.get(&cache_key)
     {
