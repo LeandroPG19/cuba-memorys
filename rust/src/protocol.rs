@@ -694,12 +694,58 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "isolated entities scanned for relations"
     );
 
+    let analyzed = rem_refresh_planner_stats(pool).await;
+    tracing::info!(tables_analyzed = analyzed, "planner statistics refreshed");
+
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
     tracing::info!("REM consolidation complete");
 
     Ok(())
+}
+
+const PLANNER_STAT_TABLES: [&str; 4] = [
+    "brain_observations",
+    "brain_entities",
+    "brain_relations",
+    "brain_observation_chunks",
+];
+
+async fn rem_refresh_planner_stats(pool: &PgPool) -> usize {
+    let mut analyzed = 0usize;
+    for table in PLANNER_STAT_TABLES {
+        let stale: Option<bool> = sqlx::query_scalar(
+            "SELECT last_analyze IS NULL AND last_autoanalyze IS NULL
+             FROM pg_stat_user_tables WHERE relname = $1",
+        )
+        .bind(table)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+        let never_analyzed = stale.unwrap_or(false);
+        let churned: bool = sqlx::query_scalar(
+            "SELECT n_mod_since_analyze > GREATEST(50, n_live_tup * 0.05)
+             FROM pg_stat_user_tables WHERE relname = $1",
+        )
+        .bind(table)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+
+        if !never_analyzed && !churned {
+            continue;
+        }
+        match sqlx::query(&format!("ANALYZE {table}")).execute(pool).await {
+            Ok(_) => analyzed += 1,
+            Err(why) => tracing::warn!(error = %why, table, "ANALYZE failed"),
+        }
+    }
+    analyzed
 }
 
 const REM_RELATION_SCAN_DEFAULT_BATCH: usize = 5;

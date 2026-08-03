@@ -109,7 +109,71 @@ fn log(msg: &str) {
 }
 
 fn build_url() -> String {
-    format!("postgresql://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{PG_PORT}/{PG_DB}")
+    format!(
+        "postgresql://{PG_USER}:{}@127.0.0.1:{PG_PORT}/{PG_DB}",
+        resolve_password()
+    )
+}
+
+pub fn listen_address() -> String {
+    std::env::var("CUBA_PG_BIND")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn password_file() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    Some(std::path::PathBuf::from(home).join(".cache/cuba-memorys/pgpass"))
+}
+
+fn generate_password() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn store_password(path: &std::path::Path, password: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, password)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn resolve_password() -> String {
+    let Some(path) = password_file() else {
+        return PG_PASSWORD.to_string();
+    };
+
+    if let Ok(stored) = std::fs::read_to_string(&path) {
+        let stored = stored.trim();
+        if !stored.is_empty() {
+            return stored.to_string();
+        }
+    }
+
+    let password = if matches!(
+        get_container_state(),
+        ContainerState::Running | ContainerState::Stopped
+    ) {
+        log("contenedor preexistente: conservo la credencial anterior para no dejarte");
+        log("fuera de tu propia base. Rotala con: cuba-memorys setup --rotate-password");
+        PG_PASSWORD.to_string()
+    } else {
+        generate_password()
+    };
+
+    if let Err(why) = store_password(&path, &password) {
+        log(&format!("no pude guardar la credencial en {path:?}: {why}"));
+    }
+    password
 }
 
 fn is_docker_available() -> bool {
@@ -197,11 +261,11 @@ fn docker_create_and_start() {
             "-e",
             &format!("POSTGRES_USER={PG_USER}"),
             "-e",
-            &format!("POSTGRES_PASSWORD={PG_PASSWORD}"),
+            &format!("POSTGRES_PASSWORD={}", resolve_password()),
             "-e",
             &format!("POSTGRES_DB={PG_DB}"),
             "-p",
-            &format!("{PG_PORT}:5432"),
+            &format!("{}:{PG_PORT}:5432", listen_address()),
             "-v",
             "cuba_memorys_data:/var/lib/postgresql",
             "--health-cmd",
