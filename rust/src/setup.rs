@@ -115,6 +115,36 @@ fn build_url() -> String {
     )
 }
 
+fn app_password_file() -> Option<std::path::PathBuf> {
+    password_file().map(|p| p.with_file_name("pgpass_app"))
+}
+
+pub fn app_role_password() -> Option<String> {
+    let path = app_password_file()?;
+    if let Ok(stored) = std::fs::read_to_string(&path) {
+        let stored = stored.trim();
+        if !stored.is_empty() {
+            return Some(stored.to_string());
+        }
+    }
+    let password = generate_password();
+    if let Err(why) = store_password(&path, &password) {
+        log(&format!("no pude guardar la credencial de la app: {why}"));
+        return None;
+    }
+    Some(password)
+}
+
+pub fn runtime_database_url(admin_url: &str) -> String {
+    let Some(password) = app_role_password() else {
+        return admin_url.to_string();
+    };
+    let Some(tail) = admin_url.split('@').nth(1) else {
+        return admin_url.to_string();
+    };
+    format!("postgresql://{}:{password}@{tail}", crate::db::APP_ROLE)
+}
+
 pub fn listen_address() -> String {
     std::env::var("CUBA_PG_BIND")
         .ok()

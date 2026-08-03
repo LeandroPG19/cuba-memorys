@@ -13,9 +13,44 @@ fn connect_options(database_url: &str) -> Result<PgConnectOptions> {
         .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_secs(1)))
 }
 
-/// Shared by both pools. `after_connect` is the part that matters: every
-/// connection must land in UTC, or exponential decay and the REM cycle
-/// silently drift.
+pub const APP_ROLE: &str = "cuba_app";
+
+async fn provision_app_role(pool: &PgPool) {
+    let Some(password) = crate::setup::app_role_password() else {
+        return;
+    };
+    let exists: Option<(bool,)> =
+        sqlx::query_as("SELECT true FROM pg_roles WHERE rolname = $1 LIMIT 1")
+            .bind(APP_ROLE)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if exists.is_none() {
+        return;
+    }
+
+    if !password.chars().all(|c| c.is_ascii_alphanumeric()) {
+        tracing::warn!("refusing to inline a non-alphanumeric password into ALTER ROLE");
+        return;
+    }
+    let statement = format!("ALTER ROLE {APP_ROLE} PASSWORD '{password}'");
+    match sqlx::query(&statement).execute(pool).await {
+        Ok(_) => tracing::info!(role = APP_ROLE, "application role provisioned"),
+        Err(why) => {
+            tracing::warn!(error = %why, "could not set the application role password")
+        }
+    }
+}
+
+pub async fn is_superuser(pool: &PgPool) -> Option<bool> {
+    sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
 const DEFAULT_RANDOM_PAGE_COST: f64 = 1.1;
 const DEFAULT_IO_CONCURRENCY: u32 = 200;
 
@@ -37,6 +72,9 @@ pub fn effective_io_concurrency() -> String {
         .to_string()
 }
 
+/// Shared by both pools. `after_connect` is the part that matters: every
+/// connection must land in UTC, or exponential decay and the REM cycle
+/// silently drift.
 fn pool_options() -> PgPoolOptions {
     let node_name = std::env::var("CUBA_NODE_NAME")
         .ok()
@@ -118,7 +156,58 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool> {
 
     init_schema(&pool).await?;
 
-    Ok(pool)
+    match downgrade_to_app_role(database_url).await {
+        Some(app_pool) => {
+            pool.close().await;
+            Ok(app_pool)
+        }
+        None => Ok(pool),
+    }
+}
+
+async fn downgrade_to_app_role(admin_url: &str) -> Option<PgPool> {
+    if matches!(
+        std::env::var("CUBA_APP_ROLE").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    ) {
+        return None;
+    }
+
+    let runtime_url = crate::setup::runtime_database_url(admin_url);
+    if runtime_url == admin_url {
+        return None;
+    }
+
+    let options = connect_options(&runtime_url).ok()?;
+    let pool = pool_options()
+        .min_connections(1)
+        .connect_with(options)
+        .await;
+
+    match pool {
+        Ok(pool) => match is_superuser(&pool).await {
+            Some(false) => {
+                tracing::info!(
+                    role = APP_ROLE,
+                    "runtime downgraded to a non-superuser role — RLS and the append-only \
+                     audit trigger now actually apply"
+                );
+                Some(pool)
+            }
+            _ => {
+                pool.close().await;
+                None
+            }
+        },
+        Err(why) => {
+            tracing::warn!(
+                error = %why,
+                role = APP_ROLE,
+                "could not connect as the application role — staying on the admin connection"
+            );
+            None
+        }
+    }
 }
 
 /// A pool that has not connected to anything yet.
@@ -181,6 +270,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
             .context("failed to run sqlx migrations")?;
 
         tracing::info!("sqlx migrations applied");
+        provision_app_role(pool).await;
     }
 
     sqlx::query("SET timezone TO 'UTC'")
