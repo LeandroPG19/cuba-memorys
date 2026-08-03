@@ -56,7 +56,13 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     let entity_id = ensure_entity(pool, entity_name, project_id).await?;
 
     let density = information_density(content);
-    let dedup = check_dedup(pool, entity_id, content).await?;
+    let dedup_entity_type: String =
+        sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE id = $1")
+            .bind(entity_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|_| "concept".to_string());
+    let dedup = check_dedup(pool, entity_id, content, &dedup_entity_type, entity_name).await?;
 
     match dedup {
         DedupResult::Duplicate(existing_preview) => {
@@ -387,7 +393,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                 .await
                 .unwrap_or_else(|_| "concept".to_string());
 
-        let dedup = check_dedup(pool, entity_id, content).await?;
+        let dedup = check_dedup(pool, entity_id, content, &entity_type, entity_name).await?;
 
         match dedup {
             DedupResult::Duplicate(_) => {
@@ -632,7 +638,13 @@ enum DedupResult {
     Reinforce(uuid::Uuid),
 }
 
-async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Result<DedupResult> {
+async fn check_dedup(
+    pool: &PgPool,
+    entity_id: uuid::Uuid,
+    content: &str,
+    entity_type: &str,
+    entity_name: &str,
+) -> Result<DedupResult> {
     let dupes: Vec<(uuid::Uuid, String, f64)> = sqlx::query_as(
         "SELECT id, content, similarity(content, $2)::float8 AS sim
          FROM brain_observations
@@ -646,7 +658,9 @@ async fn check_dedup(pool: &PgPool, entity_id: uuid::Uuid, content: &str) -> Res
 
     if dupes.is_empty() {
         if crate::embeddings::onnx::is_model_loaded()
-            && let Ok(emb) = crate::embeddings::onnx::embed_passage(content).await
+            && let Ok(emb) =
+                crate::embeddings::onnx::embed_passage_contextual(content, entity_type, entity_name)
+                    .await
         {
             let semantic_match: Option<(uuid::Uuid, f64)> = sqlx::query_as(
                 "SELECT id, (1.0 - (embedding <=> $1::vector))::float8 AS sim
