@@ -7,7 +7,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP_Registry-published-8A2BE2)](https://registry.modelcontextprotocol.io)
 [![Rust](https://img.shields.io/badge/rust-1.93+-orange?logo=rust&logoColor=white)](https://rust-lang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-green)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](https://www.apache.org/licenses/LICENSE-2.0)
 
 **Long-term memory for AI coding agents.** An MCP server that gives your agent a knowledge graph it can search, reason over, and be corrected by — so it stops forgetting your codebase between sessions.
 
@@ -437,7 +437,7 @@ Publishing is tag-driven: `v*` triggers GitHub Release binaries (5 platforms), P
 
 ## License
 
-[AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0) — free to use, modify and run, including inside a company. If you offer a modified version to others over a network, you have to publish your changes under the same license.
+[Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) — use it, modify it, ship it, sell it, embed it in a closed product. No copyleft obligation. The licence also grants patent rights explicitly, which is the part legal departments care about.
 
 ## Author
 

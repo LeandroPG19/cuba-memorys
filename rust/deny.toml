@@ -5,9 +5,9 @@
 # CI: cargo deny check licenses advisories
 
 [licenses]
-# Dependencies stay permissive on purpose. cuba-memorys is AGPL-3.0, so a copyleft
-# dependency would be legal to use, but it would also make a commercial dual-license
-# impossible later: we can relicense our own code, not someone else's.
+# Dependencies stay permissive on purpose. cuba-memorys is Apache-2.0, and a copyleft
+# dependency would force the whole binary to that dependency's terms — defeating the
+# point of a permissive licence. We can relicense our own code, not someone else's.
 version = 2
 allow = [
     "MIT",

@@ -296,4 +296,18 @@ Open a [Discussion](https://github.com/LeandroPG19/cuba-memorys/discussions) or 
 
 ---
 
-**License**: [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0). By contributing, you agree that your contributions are licensed under it.
+**License**: [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0). Contributions are
+accepted under the same terms — inbound equals outbound, no CLA, no copyright assignment.
+You keep the copyright to what you write.
+
+**Sign your commits (DCO).** Every commit needs a `Signed-off-by` line, which `git commit -s`
+adds for you:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+That line is the [Developer Certificate of Origin](https://developercertificate.org/) — you
+are stating you wrote the patch or otherwise have the right to submit it under Apache-2.0.
+It is deliberately lighter than a CLA: no paperwork, no signing portal, and it does not
+transfer anything to anyone.
