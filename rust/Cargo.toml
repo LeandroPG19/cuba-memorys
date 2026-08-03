@@ -39,6 +39,7 @@ tiktoken-rs = "0.7"
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 
 uuid = { version = "1", features = ["v4", "serde"] }

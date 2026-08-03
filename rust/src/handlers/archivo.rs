@@ -17,7 +17,30 @@ fn canonical_iso(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
 }
 
+pub fn audit_key() -> Option<Vec<u8>> {
+    if let Ok(raw) = std::env::var("CUBA_AUDIT_KEY") {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return Some(raw.as_bytes().to_vec());
+        }
+    }
+    let path = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".cache/cuba-memorys/audit_key"))?;
+    let key = std::fs::read_to_string(path).ok()?;
+    let key = key.trim();
+    (!key.is_empty()).then(|| key.as_bytes().to_vec())
+}
+
 fn compute_hash(prev_hash: &[u8], action: &str, payload: &[u8], created_at_iso: &str) -> Vec<u8> {
+    match audit_key() {
+        Some(key) => compute_hmac(&key, prev_hash, action, payload, created_at_iso),
+        None => compute_sha256(prev_hash, action, payload, created_at_iso),
+    }
+}
+
+fn compute_sha256(prev_hash: &[u8], action: &str, payload: &[u8], created_at_iso: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     h.update(prev_hash);
     h.update(b"|");
@@ -27,6 +50,41 @@ fn compute_hash(prev_hash: &[u8], action: &str, payload: &[u8], created_at_iso: 
     h.update(b"|");
     h.update(created_at_iso.as_bytes());
     h.finalize().to_vec()
+}
+
+fn compute_hmac(
+    key: &[u8],
+    prev_hash: &[u8],
+    action: &str,
+    payload: &[u8],
+    created_at_iso: &str,
+) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts a key of any length");
+    mac.update(prev_hash);
+    mac.update(b"|");
+    mac.update(action.as_bytes());
+    mac.update(b"|");
+    mac.update(payload);
+    mac.update(b"|");
+    mac.update(created_at_iso.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+pub fn hash_matches(
+    stored: &[u8],
+    prev_hash: &[u8],
+    action: &str,
+    payload: &[u8],
+    created_at_iso: &str,
+) -> bool {
+    if let Some(key) = audit_key()
+        && compute_hmac(&key, prev_hash, action, payload, created_at_iso) == stored
+    {
+        return true;
+    }
+    compute_sha256(prev_hash, action, payload, created_at_iso) == stored
 }
 
 async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
@@ -157,13 +215,13 @@ async fn verify(pool: &PgPool, args: &Value) -> Result<Value> {
             }));
         }
         let payload_bytes = serde_json::to_vec(payload)?;
-        let recomputed = compute_hash(
+        if !hash_matches(
+            stored_hash,
             &prev_for_check,
             action,
             &payload_bytes,
             &canonical_iso(*created_at),
-        );
-        if &recomputed != stored_hash {
+        ) {
             return Ok(serde_json::json!({
                 "action": "verify",
                 "ok": false,

@@ -457,6 +457,7 @@ dependencies = [
  "futures",
  "half",
  "hex",
+ "hmac",
  "html2text",
  "lru",
  "metrics",

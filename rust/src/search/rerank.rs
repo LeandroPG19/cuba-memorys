@@ -20,7 +20,17 @@ enum RerankerStatus {
 }
 
 fn semaphore() -> &'static tokio::sync::Semaphore {
-    RERANKER_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(2))
+    RERANKER_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(rerank_concurrency()))
+}
+
+const RERANK_DEFAULT_CONCURRENCY: usize = 1;
+
+pub fn rerank_concurrency() -> usize {
+    std::env::var("CUBA_RERANK_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(RERANK_DEFAULT_CONCURRENCY)
 }
 
 /// How many threads ONNX Runtime may use inside a single inference.

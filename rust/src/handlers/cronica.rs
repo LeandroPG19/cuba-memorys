@@ -53,15 +53,9 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
 
     let project_id = crate::project::current_project_id(pool).await?;
 
-    let entity_id = ensure_entity(pool, entity_name, project_id).await?;
+    let (entity_id, dedup_entity_type) = ensure_entity_typed(pool, entity_name, project_id).await?;
 
     let density = information_density(content);
-    let dedup_entity_type: String =
-        sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE id = $1")
-            .bind(entity_id)
-            .fetch_one(pool)
-            .await
-            .unwrap_or_else(|_| "concept".to_string());
     let dedup = check_dedup(pool, entity_id, content, &dedup_entity_type, entity_name).await?;
 
     match dedup {
@@ -385,13 +379,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
             continue;
         }
 
-        let entity_id = ensure_entity(pool, entity_name, project_id).await?;
-        let entity_type: String =
-            sqlx::query_scalar("SELECT entity_type FROM brain_entities WHERE id = $1")
-                .bind(entity_id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or_else(|_| "concept".to_string());
+        let (entity_id, entity_type) = ensure_entity_typed(pool, entity_name, project_id).await?;
 
         let dedup = check_dedup(pool, entity_id, content, &entity_type, entity_name).await?;
 
@@ -720,21 +708,29 @@ async fn ensure_entity(
     name: &str,
     project_id: Option<uuid::Uuid>,
 ) -> Result<uuid::Uuid> {
-    let existing: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM brain_entities WHERE name = $1")
+    Ok(ensure_entity_typed(pool, name, project_id).await?.0)
+}
+
+async fn ensure_entity_typed(
+    pool: &PgPool,
+    name: &str,
+    project_id: Option<uuid::Uuid>,
+) -> Result<(uuid::Uuid, String)> {
+    let existing: Option<(uuid::Uuid, String)> =
+        sqlx::query_as("SELECT id, entity_type FROM brain_entities WHERE name = $1")
             .bind(name)
             .fetch_optional(pool)
             .await?;
 
-    if let Some((id,)) = existing {
-        return Ok(id);
+    if let Some(found) = existing {
+        return Ok(found);
     }
 
-    let row: (uuid::Uuid,) = sqlx::query_as(
+    let row: (uuid::Uuid, String) = sqlx::query_as(
         "INSERT INTO brain_entities (name, entity_type, project_id)
          VALUES ($1, 'concept', $2)
          ON CONFLICT (name) DO UPDATE SET updated_at = NOW()
-         RETURNING id",
+         RETURNING id, entity_type",
     )
     .bind(name)
     .bind(project_id)
@@ -742,7 +738,7 @@ async fn ensure_entity(
     .await?;
 
     tracing::info!(entity = %name, "auto-created entity for observation");
-    Ok(row.0)
+    Ok(row)
 }
 
 async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
