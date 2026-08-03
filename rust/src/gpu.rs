@@ -206,6 +206,15 @@ pub fn status() -> GpuStatus {
     }
     #[cfg(all(not(feature = "cuda"), not(feature = "directml")))]
     {
+        if nvidia_driver_present() {
+            return GpuStatus {
+                degraded: true,
+                detail: "hay una GPU NVIDIA en esta máquina pero el binario se compiló sin \
+                         soporte — el embebedor corre en CPU y cada búsqueda cuesta ~9x más"
+                    .to_string(),
+                hint: Some("./scripts/build-gpu.sh".to_string()),
+            };
+        }
         GpuStatus {
             degraded: false,
             detail: "cpu (compilado sin soporte GPU)".to_string(),
@@ -249,6 +258,21 @@ fn runtime_has_gpu_provider(provider: &str) -> bool {
         ],
     };
     candidates.iter().any(|name| dir.join(name).exists())
+}
+
+#[cfg_attr(any(feature = "cuda", feature = "directml"), allow(dead_code))]
+fn nvidia_driver_present() -> bool {
+    if std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        return true;
+    }
+    let exe = if cfg!(windows) {
+        "nvidia-smi.exe"
+    } else {
+        "nvidia-smi"
+    };
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|p| p.join(exe).exists()))
+        .unwrap_or(false)
 }
 
 #[cfg(feature = "cuda")]
