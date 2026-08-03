@@ -16,6 +16,27 @@ fn connect_options(database_url: &str) -> Result<PgConnectOptions> {
 /// Shared by both pools. `after_connect` is the part that matters: every
 /// connection must land in UTC, or exponential decay and the REM cycle
 /// silently drift.
+const DEFAULT_RANDOM_PAGE_COST: f64 = 1.1;
+const DEFAULT_IO_CONCURRENCY: u32 = 200;
+
+pub fn random_page_cost() -> String {
+    std::env::var("CUBA_RANDOM_PAGE_COST")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.1..=10.0).contains(v))
+        .unwrap_or(DEFAULT_RANDOM_PAGE_COST)
+        .to_string()
+}
+
+pub fn effective_io_concurrency() -> String {
+    std::env::var("CUBA_IO_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| *v <= 1000)
+        .unwrap_or(DEFAULT_IO_CONCURRENCY)
+        .to_string()
+}
+
 fn pool_options() -> PgPoolOptions {
     let node_name = std::env::var("CUBA_NODE_NAME")
         .ok()
@@ -39,6 +60,16 @@ fn pool_options() -> PgPoolOptions {
                     .execute(&mut *conn)
                     .await?;
                 sqlx::query("SET hnsw.ef_search = 100")
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                sqlx::query("SELECT set_config('random_page_cost', $1, false)")
+                    .bind(random_page_cost())
+                    .execute(&mut *conn)
+                    .await
+                    .ok();
+                sqlx::query("SELECT set_config('effective_io_concurrency', $1, false)")
+                    .bind(effective_io_concurrency())
                     .execute(&mut *conn)
                     .await
                     .ok();

@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: memorys2026
       POSTGRES_DB: brain
     ports:
-      - "5488:5432"  # Puerto único para evitar conflictos
+      - "127.0.0.1:5488:5432"  # Puerto único para evitar conflictos
     volumes:
       - cuba_data:/var/lib/postgresql
     healthcheck:
