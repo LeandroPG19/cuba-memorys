@@ -63,6 +63,14 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit
 
+      # deny.toml has existed for releases declaring the anti-GPL/AGPL policy that
+      # keeps a future dual-license option open — and nothing ever ran it, so the
+      # policy applied to none of the 433 transitive dependencies.
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --quiet
+          cargo deny --manifest-path rust/Cargo.toml check licenses bans sources
+
       # The npm wrapper is how most people install this, and it once shipped a package
       # whose binary was never fetched. This smoke test loads bin.js/postinstall.js and
       # checks the fetch-on-first-use wiring without needing a network or a release —

@@ -97,6 +97,53 @@ fn print_help() {
     );
 }
 
+const KNOWN_DIGESTS: &[(&str, &str)] = &[
+    (
+        "reranker/model.onnx",
+        "66f799551ae4406f27f7642969cb266805f1635bef010170d98c2b9ab3f94489",
+    ),
+    (
+        "reranker/tokenizer.json",
+        "8bf8afbfd11306bd872018c53bfdf2e160a56f8edbcf49933324404791c148d3",
+    ),
+    (
+        "models-bge-m3/tokenizer.json",
+        "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
+    ),
+];
+
+pub fn sha256_file(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn expected_digest(key: &str) -> Option<&'static str> {
+    KNOWN_DIGESTS
+        .iter()
+        .find(|(name, _)| *name == key)
+        .map(|(_, digest)| *digest)
+}
+
+fn verify_checksum(dest: &std::path::Path, key: &str) -> Result<()> {
+    let Some(expected) = expected_digest(key) else {
+        println!("  (sin checksum registrado para {key} — no verificado)");
+        return Ok(());
+    };
+    let actual = sha256_file(dest)?;
+    if actual != expected {
+        std::fs::remove_file(dest).ok();
+        anyhow::bail!(
+            "checksum mismatch for {key}: expected {expected}, got {actual}. \
+             The file was deleted — the download was tampered with or corrupted."
+        );
+    }
+    println!("  ✓ checksum");
+    Ok(())
+}
+
 async fn download_model(spec: &ModelSpec) -> Result<()> {
     let dir = cache_root()?.join(spec.dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creando {}", dir.display()))?;
@@ -122,6 +169,7 @@ async fn download_model(spec: &ModelSpec) -> Result<()> {
         download_to(&url, &dest)
             .await
             .with_context(|| format!("descargando {local}"))?;
+        verify_checksum(&dest, &format!("{}/{}", spec.dir, local))?;
         let mb = std::fs::metadata(&dest)?.len() / 1_048_576;
         println!("{mb} MB");
     }
