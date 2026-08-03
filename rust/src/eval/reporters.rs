@@ -39,6 +39,12 @@ pub fn summary_line(report: &EvalReport) -> String {
         " | tokens: mean={:.0} max={}",
         report.mean_response_tokens, report.max_response_tokens
     ));
+    if report.latency_p50_ms > 0.0 {
+        s.push_str(&format!(
+            " | latencia: p50={:.0}ms p95={:.0}ms",
+            report.latency_p50_ms, report.latency_p95_ms
+        ));
+    }
 
     if report.minimum_detectable_effect.is_finite() {
         s.push_str(&format!(

@@ -56,6 +56,10 @@ pub struct EvalReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub per_query_ndcg: Vec<f64>,
     pub scored_by_id: bool,
+    #[serde(default)]
+    pub latency_p50_ms: f64,
+    #[serde(default)]
+    pub latency_p95_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +110,8 @@ pub async fn run_faro_eval(
             recall_at_k: 0.0,
             mean_exact_match: 0.0,
             mean_f1: 0.0,
+            latency_p50_ms: 0.0,
+            latency_p95_ms: 0.0,
             mean_response_tokens: 0.0,
             max_response_tokens: 0,
             per_ability: Vec::new(),
@@ -141,6 +147,7 @@ pub async fn run_faro_eval(
     let mut answerable_total = 0usize;
     let mut false_abstentions = 0usize;
 
+    let mut latencies_ms: Vec<f64> = Vec::new();
     for sample in samples {
         let args = serde_json::json!({
             "query": sample.query,
@@ -154,10 +161,12 @@ pub async fn run_faro_eval(
             "format": cfg.format,
             "track_access": false
         });
+        let started = std::time::Instant::now();
         let response = crate::handlers::faro::handle(pool, args)
             .await
             .context("faro handle failed during eval")?;
 
+        latencies_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         let cost = crate::search::budget::count_tokens(&response.to_string());
         token_sum += cost;
         token_max = token_max.max(cost);
@@ -266,6 +275,8 @@ pub async fn run_faro_eval(
         },
         ndcg_ci95: (lo, hi),
         minimum_detectable_effect: mde,
+        latency_p50_ms: percentile_ms(&latencies_ms, 0.50),
+        latency_p95_ms: percentile_ms(&latencies_ms, 0.95),
         per_query_ndcg: ndcg_scores,
         scored_by_id: all_by_id,
     })
@@ -390,4 +401,14 @@ mod tests {
             );
         }
     }
+}
+
+pub fn percentile_ms(values: &[f64], q: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
 }
