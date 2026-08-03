@@ -175,11 +175,7 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
         .with_truncation(Some(truncation))
         .map_err(|e| anyhow::anyhow!("tokenizer truncation: {e}"))?;
     let padding = tokenizers::PaddingParams {
-        strategy: if fixed_shape() {
-            tokenizers::PaddingStrategy::Fixed(RERANK_MAX_TOKENS)
-        } else {
-            tokenizers::PaddingStrategy::BatchLongest
-        },
+        strategy: tokenizers::PaddingStrategy::BatchLongest,
         ..Default::default()
     };
     tokenizer.with_padding(Some(padding));
@@ -253,6 +249,25 @@ fn rerank_chunk() -> usize {
 /// worth it when the device is actually running the model. Keyed off the real
 /// placement rather than the compile-time feature, so pointing the reranker at
 /// the CPU does not silently leave it padding everything to 512.
+pub fn bucketed_len(longest: usize) -> usize {
+    let bucket = rerank_bucket();
+    if bucket == 0 {
+        return longest.max(1);
+    }
+    let rounded = longest.div_ceil(bucket) * bucket;
+    rounded.clamp(bucket, RERANK_MAX_TOKENS)
+}
+
+const RERANK_DEFAULT_BUCKET: usize = 512;
+
+pub fn rerank_bucket() -> usize {
+    std::env::var("CUBA_RERANK_BUCKET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &usize| *v == 0 || (v.is_power_of_two() && *v <= RERANK_MAX_TOKENS))
+        .unwrap_or(RERANK_DEFAULT_BUCKET)
+}
+
 pub fn fixed_shape() -> bool {
     match std::env::var("CUBA_RERANK_FIXED_SHAPE").as_deref() {
         Ok("0") | Ok("off") | Ok("false") => false,
@@ -336,11 +351,12 @@ fn score_chunk(
         .map_err(|e| anyhow::anyhow!("encode batch: {e}"))?;
 
     let batch = encodings.len();
-    let seq = encodings
+    let longest = encodings
         .iter()
         .map(|e| e.get_ids().len())
         .max()
         .context("empty batch")?;
+    let seq = bucketed_len(longest);
 
     let mut ids = Vec::with_capacity(batch * seq);
     let mut mask = Vec::with_capacity(batch * seq);
