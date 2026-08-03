@@ -694,6 +694,11 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "isolated entities scanned for relations"
     );
 
+    let quantized = rem_backfill_halfvec(pool).await;
+    if quantized > 0 {
+        tracing::info!(rows = quantized, "embeddings quantized to halfvec");
+    }
+
     let analyzed = rem_refresh_planner_stats(pool).await;
     tracing::info!(tables_analyzed = analyzed, "planner statistics refreshed");
 
@@ -703,6 +708,39 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
     tracing::info!("REM consolidation complete");
 
     Ok(())
+}
+
+const HALFVEC_BATCH: i64 = 500;
+
+async fn rem_backfill_halfvec(pool: &PgPool) -> u64 {
+    let has_column: Option<bool> = sqlx::query_scalar(
+        "SELECT true FROM information_schema.columns
+         WHERE table_name = 'brain_observations' AND column_name = 'embedding_half'",
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if has_column.is_none() {
+        return 0;
+    }
+
+    sqlx::query(
+        "UPDATE brain_observations SET embedding_half = embedding::halfvec
+         WHERE id IN (
+             SELECT id FROM brain_observations
+             WHERE embedding IS NOT NULL AND embedding_half IS NULL
+             LIMIT $1
+         )",
+    )
+    .bind(HALFVEC_BATCH)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or_else(|why| {
+        tracing::warn!(error = %why, "halfvec backfill failed");
+        0
+    })
 }
 
 const PLANNER_STAT_TABLES: [&str; 4] = [
