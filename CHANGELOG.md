@@ -8,6 +8,128 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-08-03 (Cargo `0.21.0` · npm `0.21.0` · PyPI `1.23.0`)
+
+Licencia permisiva, dos controles de seguridad que existían pero no ejercían, y
+cuatro defectos encontrados midiendo en vez de suponer.
+
+### Apache-2.0: ahora cualquiera puede usarlo, también dentro de una empresa
+
+AGPL era casi con seguridad el techo de adopción. Para un servidor MCP que corre
+en la máquina del usuario, el gatillo de red del §13 es discutible en la práctica,
+pero sobra para que el departamento legal de cualquier empresa mediana lo bloquee
+de entrada — y el público objetivo son ingenieros dentro de manufactureras, que
+son justo quienes no pueden instalar software AGPL.
+
+Apache-2.0 y no MIT porque **concede derechos de patente de forma explícita**, que
+es la cláusula que revisión legal busca de verdad.
+
+Se hizo ahora porque era verificable: `git log` muestra un único autor en toda la
+historia, así que no hay copyright de terceros del que pedir permiso. Después del
+primer PR externo habría hecho falta localizar a cada contribuidor.
+
+- **CONTRIBUTING.md** lleva DCO (`git commit -s`): sin CLA, sin cesión de copyright.
+  No se añadió CLA a propósito — su utilidad sería reservar la opción de doble
+  licencia, y eso es exactamente lo que Apache-2.0 acaba de entregar.
+- **SECURITY.md** es nuevo, y su mitad importante es *"Not protected"*.
+
+### RLS y la auditoría append-only no ejercían ningún control
+
+Las migraciones 0016 y 0017 estaban bien escritas y no protegían nada. El runtime
+conectaba como `cuba`, y `SELECT rolsuper, rolbypassrls` sobre la base viva
+devolvía `t | t`. De ese hecho salían dos consecuencias:
+
+- PostgreSQL deja pasar a superusuarios y roles `BYPASSRLS` por encima de
+  row-level security **siempre**. `FORCE ROW LEVEL SECURITY` cubre al propietario
+  de la tabla, no al superusuario. El aislamiento entre proyectos dependía solo
+  del `WHERE` de cada handler: la segunda muralla no existía.
+- El trigger de auditoría evalúa `pg_has_role(current_user,'cuba_admin','MEMBER')`,
+  y un superusuario es miembro implícito de **todo** rol. La condición era siempre
+  cierta, el `RAISE EXCEPTION` inalcanzable, y `brain_audit_log` una tabla normal
+  con `UPDATE` y `DELETE` libres.
+
+La migración 0041 crea `cuba_app` como `NOSUPERUSER NOBYPASSRLS` y hace `REVOKE
+UPDATE, DELETE` sobre el log — un privilegio, no solo un trigger. Toda ruta de
+fallo conserva la conexión admin en vez de dejar al usuario fuera de su memoria.
+
+### La rectificación GDPR se descartaba en silencio
+
+`brain_audit_block_mutation()` terminaba en `RETURN OLD` y colgaba tanto del
+trigger `BEFORE UPDATE` como del `BEFORE DELETE`. Para `DELETE` es correcto. Para
+`UPDATE` no: **devolver OLD no cancela la operación**, la deja proceder escribiendo
+los valores viejos. PostgreSQL informa `UPDATE 1` y quien llama cree que funcionó.
+
+El caso que rompe es justo el que la migración 0016 documenta como razón de ser
+del rol `cuba_admin`: *"emergency rectification (e.g. GDPR cascade)"*. Un operador
+redactando un dato personal recibía `UPDATE 1` y ninguna redacción.
+
+### Credencial pública y puerto abierto
+
+`const PG_PASSWORD = "memorys2026"` compilada en el binario y publicada en GitHub,
+npm y PyPI, con el contenedor publicando en `0.0.0.0`. Docker escribe sus propias
+reglas en la cadena `DOCKER` de iptables, que **puentean UFW**, así que el firewall
+del sistema nunca protegió esto.
+
+Ahora: bind a `127.0.0.1` (`CUBA_PG_BIND` para quien necesite lo contrario) y
+credencial generada por instalación en `~/.cache/cuba-memorys/pgpass` con modo
+0600. Un contenedor preexistente conserva la suya en vez de dejar al usuario sin
+acceso.
+
+### Rendimiento: lo medido, incluidas dos correcciones propias
+
+- **Build con GPU: 0,356 s contra 20,669 s de mediana. 58×.** La causa es el
+  reranker, no el embebedor: éste es INT8 y el proveedor CUDA no registra kernel
+  para `MatMulInteger`, así que corre en CPU haya GPU o no. `scripts/build-gpu.sh`
+  fija la feature y el cgroup; `doctor` avisa en amarillo si hay GPU sin usar.
+- **Doble embedding eliminado.** Cada observación se embebía dos veces: una en el
+  dedup y otra en el insert. En un lote de 100, cien inferencias tiradas.
+- **El dedup comparaba vectores de distribuciones distintas** — `embed_passage()`
+  contra una columna llena con `embed_passage_contextual()`. El umbral de 0,92
+  nunca midió lo que decía medir.
+- **`random_page_cost` y `ANALYZE`.** Ningún `last_analyze` existía: el planificador
+  creía 20 filas donde hay 1740. Corregido, el índice HNSW pasa a usarse (5,6× en
+  ese paso). Se informó como 111×; el número honesto es 5,6× y son ~13 ms de una
+  consulta, así que **nunca fue el cuello de botella**.
+- **Una consulta redundante por observación** en `batch_add`: ~100 por lote.
+- **halfvec**: columna e índice nuevos, rellenados por el ciclo REM. 4,0 kB → 2,0
+  kB por fila. Nada lee todavía de ahí: conmutar la lectura es una decisión de
+  recall que exige medirla, no una de almacenamiento.
+- **El semáforo del reranker mentía**: anunciaba 2 concurrentes mientras un `Mutex`
+  los serializaba, y el segundo esperaba dentro de `spawn_blocking` reteniendo un
+  hilo. Ahora 1, que es lo que el `Mutex` permite de verdad.
+
+### Integridad y cadena de suministro
+
+- **Cadena de auditoría con clave.** Con `CUBA_AUDIT_KEY` pasa a HMAC-SHA256. Las
+  filas anteriores siguen verificando bajo SHA-256, para que activar la clave no
+  marque como manipulado todo el historial. **Sube el listón, no cierra el modelo**:
+  una clave en el mismo host cae ante el mismo root que alcanza la base.
+- **Descargas de modelos verificadas** con SHA-256; un desajuste borra el fichero y
+  aborta. Antes se ejecutaban 1,1 GB de pesos sin comprobar nada.
+- **`cargo deny` corre en CI.** El fichero de política existía desde hacía releases
+  y no lo ejecutaba ningún workflow, así que no se aplicaba a ninguna de las 433
+  dependencias. Migrado al esquema `version = 2`.
+- **La clave de caché de embeddings no incluía el modelo**: cambiar de modelo servía
+  vectores del anterior durante todo el TTL.
+
+### Evaluación
+
+El evaluador declara su propio efecto mínimo detectable, y con n=60 era 0,245 nDCG
+— mayor que cualquier mejora pendiente. Con las 221 preguntas baja a **0,110**, 2,2×
+más sensible. Además reporta ahora latencia p50/p95: antes daba tokens medios y
+máximos, así que un cambio que redujera tokens duplicando el p95 habría parecido
+una victoria limpia.
+
+### Migraciones
+
+- **0040** — el trigger de auditoría devuelve NEW en UPDATE.
+- **0041** — rol `cuba_app` con privilegios acotados.
+- **0042** — columna `halfvec` dimensionada desde el `atttypmod` vivo, más su índice.
+
+318 tests en verde, clippy sin avisos.
+
+
+
 ### Corregido
 
 - **`packaging/cuba-memorys.service` se quedó atrás en 0.20.0.** La unidad que se
