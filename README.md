@@ -1,6 +1,8 @@
 <!-- mcp-name: io.github.LeandroPG19/cuba-memorys -->
 # Cuba-Memorys
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.LeandroPG19%2Fcuba-memorys.svg)](https://mcptoplist.com/server/io.github.LeandroPG19%2Fcuba-memorys)
+
 [![CI](https://github.com/LeandroPG19/cuba-memorys/actions/workflows/ci.yml/badge.svg)](https://github.com/LeandroPG19/cuba-memorys/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/cuba-memorys?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/cuba-memorys/)
 [![npm](https://img.shields.io/npm/v/cuba-memorys?logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/cuba-memorys)
