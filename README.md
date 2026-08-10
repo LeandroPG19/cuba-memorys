@@ -163,7 +163,7 @@ Procedural memory is a separate table rather than a ninth observation type for a
 
 Hybrid RRF fusion (k=60, Cormack 2009) over three signals — full-text, BM25 (`ts_rank_cd`), and pgvector HNSW — with entropy-routed weighting that shifts from keyword-heavy to semantic as the query's Shannon entropy rises.
 
-Answers arrive in **`compact` by default**: abbreviated keys, content truncated at 1200 chars. **28% fewer tokens at identical nDCG** — identical to four decimal places, because the response format cannot change which documents rank, only how they are printed. Pass `"format": "verbose"` for the full per-branch score breakdown.
+Answers arrive in **`compact` by default**: abbreviated keys, content truncated at 1200 chars. **30% fewer tokens, and a slightly *better* nDCG** — measured on the 221 id-scored questions, +0.0090 with a paired 95% interval of [+0.0024, +0.0166]. The format genuinely cannot change which documents rank; what it changes is how many of them survive the response token budget before they are scored. Verbose at the default 5000-token budget weighs 5286 tokens and loses its tail; compact weighs 3723 and keeps it. Pass `"format": "verbose"` for the full per-branch score breakdown.
 
 ### Verification that actually verifies
 
@@ -387,7 +387,7 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 
 | | |
 |---|---|
-| **`compact` by default** | **−28% tokens at identical nDCG** (paired difference: exactly 0.0000 — format cannot change which documents rank, only how they are shown). The old "−40%" came from the broken benchmark. |
+| **`compact` by default** | **−30% tokens, nDCG +0.0090** (paired 95% CI [+0.0024, +0.0166], n=191). The earlier "exactly 0.0000" was measured with a harness that let the 5000-token response budget truncate the ranking before scoring it: verbose lost its tail, compact did not. The old "−40%" came from the broken benchmark. |
 | **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
 | **`lean` tool profile** | −67% catalogue, zero functions lost. |
 | **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |

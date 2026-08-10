@@ -2,6 +2,32 @@ use serde::Serialize;
 
 use super::harness::EvalReport;
 
+#[cfg(test)]
+fn report_with_warmup(warmup_ms: f64) -> EvalReport {
+    EvalReport {
+        sample_count: 5,
+        k: 10,
+        ndcg_at_k: 0.5,
+        mrr: 0.5,
+        precision_at_k: 0.5,
+        recall_at_k: 0.5,
+        mean_exact_match: 0.0,
+        mean_f1: 0.0,
+        mean_response_tokens: 100.0,
+        max_response_tokens: 200,
+        per_ability: Vec::new(),
+        abstention_accuracy: None,
+        false_abstention_rate: None,
+        ndcg_ci95: (0.4, 0.6),
+        minimum_detectable_effect: 0.1,
+        per_query_ndcg: Vec::new(),
+        scored_by_id: true,
+        latency_p50_ms: 1500.0,
+        latency_p95_ms: 1700.0,
+        warmup_ms,
+    }
+}
+
 #[derive(Serialize)]
 pub struct JsonReport<'a> {
     pub version: &'static str,
@@ -45,12 +71,21 @@ pub fn summary_line(report: &EvalReport) -> String {
             report.latency_p50_ms, report.latency_p95_ms
         ));
     }
+    if report.warmup_ms > 0.0 {
+        s.push_str(&format!(
+            " | warm-up (fuera de la latencia): {:.0}ms",
+            report.warmup_ms
+        ));
+    }
 
     if report.minimum_detectable_effect.is_finite() {
         s.push_str(&format!(
-            "\nefecto mínimo detectable = {:.3} nDCG (80% poder, α=.05) — una diferencia menor \
-             que esto NO es medible con n={}",
-            report.minimum_detectable_effect, report.sample_count
+            "\nefecto mínimo detectable = {:.3} nDCG (80% poder, α=.05) sobre n={} puntuadas — \
+             es la COTA DEL PEOR CASO, la de dos muestras independientes. Comparando dos corridas \
+             de este mismo dataset el test es pareado y resuelve diferencias mucho menores: \
+             usá paired_bootstrap sobre per_query_ndcg, no este número",
+            report.minimum_detectable_effect,
+            report.per_query_ndcg.len(),
         ));
     }
 
@@ -77,4 +112,36 @@ pub fn summary_line(report: &EvalReport) -> String {
         ));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_line_reports_the_model_load_separately_from_the_search_latency() {
+        let report = report_with_warmup(70180.0);
+        let line = summary_line(&report);
+
+        assert!(
+            line.contains("warm-up (fuera de la latencia): 70180ms"),
+            "the cold-start model load must be visible, not silently folded into p50/p95: {line}"
+        );
+    }
+
+    #[test]
+    fn summary_line_omits_the_warmup_note_when_the_models_were_already_warm() {
+        let report = report_with_warmup(0.0);
+        let line = summary_line(&report);
+
+        assert!(!line.contains("warm-up"), "{line}");
+    }
+
+    #[test]
+    fn json_report_exposes_warmup_ms_as_its_own_field() {
+        let report = report_with_warmup(70180.0);
+        let json = generate_json_report(&report, report.sample_count, report.k);
+
+        assert!(json.contains("\"warmup_ms\": 70180.0"), "{json}");
+    }
 }

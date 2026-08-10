@@ -18,7 +18,17 @@ pub struct EvalConfig {
     pub abstain: bool,
     pub rerank: bool,
     pub format: String,
+    pub max_tokens: i64,
 }
+
+/// `faro` recorta la lista de resultados hasta agotar un presupuesto de tokens, y
+/// su default de 5000 se alcanza de sobra con `verbose`: medido sobre el corpus
+/// real, la respuesta pesa 5251 tokens y el recorte se lleva las últimas filas.
+/// Puntuar esa lista mide cuánto ocupa una respuesta, no en qué orden rankea el
+/// motor — un cambio que sólo añadiera un campo por fila se registraría como
+/// regresión de calidad. El presupuesto es una decisión de producto para el
+/// cliente MCP; medir el ranking exige no tenerlo.
+const UNLIMITED_TOKENS: i64 = i64::MAX;
 
 impl Default for EvalConfig {
     fn default() -> Self {
@@ -28,8 +38,25 @@ impl Default for EvalConfig {
             abstain: false,
             rerank: false,
             format: "verbose".to_string(),
+            max_tokens: UNLIMITED_TOKENS,
         }
     }
+}
+
+pub fn faro_args(query: &str, cfg: &EvalConfig, k: usize) -> Value {
+    serde_json::json!({
+        "query": query,
+        "mode": "hybrid",
+        "limit": k,
+        "max_tokens": cfg.max_tokens,
+        "enable_bm25": true,
+        "rerank": cfg.rerank,
+        "diversify": false,
+        "associative": cfg.associative,
+        "abstain_ood": cfg.abstain,
+        "format": cfg.format,
+        "track_access": false
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +87,8 @@ pub struct EvalReport {
     pub latency_p50_ms: f64,
     #[serde(default)]
     pub latency_p95_ms: f64,
+    #[serde(default)]
+    pub warmup_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +141,7 @@ pub async fn run_faro_eval(
             mean_f1: 0.0,
             latency_p50_ms: 0.0,
             latency_p95_ms: 0.0,
+            warmup_ms: 0.0,
             mean_response_tokens: 0.0,
             max_response_tokens: 0,
             per_ability: Vec::new(),
@@ -147,20 +177,18 @@ pub async fn run_faro_eval(
     let mut answerable_total = 0usize;
     let mut false_abstentions = 0usize;
 
+    let warmup_started = std::time::Instant::now();
+    crate::embeddings::onnx::embed("warm up")
+        .await
+        .context("embedder warm-up failed during eval")?;
+    if cfg.rerank {
+        crate::search::rerank::warm_up().await;
+    }
+    let warmup_ms = warmup_started.elapsed().as_secs_f64() * 1000.0;
+
     let mut latencies_ms: Vec<f64> = Vec::new();
     for sample in samples {
-        let args = serde_json::json!({
-            "query": sample.query,
-            "mode": "hybrid",
-            "limit": k,
-            "enable_bm25": true,
-            "rerank": cfg.rerank,
-            "diversify": false,
-            "associative": cfg.associative,
-            "abstain_ood": cfg.abstain,
-            "format": cfg.format,
-            "track_access": false
-        });
+        let args = faro_args(&sample.query, cfg, k);
         let started = std::time::Instant::now();
         let response = crate::handlers::faro::handle(pool, args)
             .await
@@ -277,6 +305,7 @@ pub async fn run_faro_eval(
         minimum_detectable_effect: mde,
         latency_p50_ms: percentile_ms(&latencies_ms, 0.50),
         latency_p95_ms: percentile_ms(&latencies_ms, 0.95),
+        warmup_ms,
         per_query_ndcg: ndcg_scores,
         scored_by_id: all_by_id,
     })
@@ -341,6 +370,37 @@ pub fn percentile_ms(values: &[f64], q: f64) -> f64 {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn the_eval_scores_the_whole_ranking_not_what_fits_in_a_token_budget() {
+        let args = faro_args("cualquier consulta", &EvalConfig::default(), 10);
+
+        let budget = args
+            .get("max_tokens")
+            .and_then(|v| v.as_i64())
+            .expect("faro lee max_tokens con as_i64: un float o un ausente cae al default de 5000");
+
+        assert!(
+            budget > 5000,
+            "con el default de faro (5000) las filas que no caben se puntúan como fallos \
+             de ranking cuando sólo son fallos de longitud; medido: verbose pesa 5251"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_dataset_short_circuits_before_any_warmup() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://eval-test:unused@localhost/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network");
+        let cfg = EvalConfig::default();
+
+        let report = run_faro_eval(&pool, &[], &cfg)
+            .await
+            .expect("an empty dataset must not touch the pool or the models");
+
+        assert_eq!(report.sample_count, 0);
+        assert_eq!(report.warmup_ms, 0.0);
+    }
 
     fn sample_by_id(ids: &[&str]) -> EvaluationSample {
         EvaluationSample {

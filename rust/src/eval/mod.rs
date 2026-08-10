@@ -5,6 +5,61 @@ pub mod reporters;
 
 use anyhow::{Context, Result};
 
+/// Reads `metrics.per_query_ndcg` out of a `--json` report.
+///
+/// Parsed as a bare `Value` on purpose: `EvalReport` does not derive
+/// `Deserialize`, and it could not round-trip anyway — `minimum_detectable_effect`
+/// is `INFINITY` for a one-sample run and serde writes that as `null`. Only the
+/// per-question scores are needed here, and they are the one field a paired test
+/// cannot do without.
+fn per_query_ndcg(path: &str) -> Result<Vec<f64>> {
+    let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&raw).with_context(|| format!("{path} is not valid JSON"))?;
+    let scores = doc
+        .pointer("/metrics/per_query_ndcg")
+        .and_then(|v| v.as_array())
+        .with_context(|| {
+            format!("{path} has no metrics.per_query_ndcg — rerun that arm with --json")
+        })?;
+    Ok(scores.iter().filter_map(|v| v.as_f64()).collect())
+}
+
+/// Compares two `--json` runs with the test this project actually needs.
+///
+/// A single run reports an interval around its own mean, and two overlapping
+/// intervals say nothing about whether the arms differ — that is the overlap
+/// fallacy, and it is what made every sub-0.11 change look like noise.
+fn compare_runs(before: &str, after: &str) -> Result<()> {
+    let a = per_query_ndcg(before)?;
+    let b = per_query_ndcg(after)?;
+
+    let Some((mean, lo, hi)) = metrics::paired_bootstrap(&a, &b, 2000, 0.95) else {
+        anyhow::bail!(
+            "cannot pair {} questions against {} — the two runs did not score the same dataset",
+            a.len(),
+            b.len()
+        );
+    };
+    let mde = metrics::minimum_detectable_effect_paired(&a, &b);
+    let moved = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| (*y - *x).abs() > 1e-12)
+        .count();
+
+    println!("pareado sobre n={} preguntas ({before} → {after})", a.len());
+    println!("Δ nDCG@10 = {mean:+.4}  IC95 = [{lo:+.4}, {hi:+.4}]");
+    println!("efecto mínimo detectable (pareado) = {mde:.4}");
+    println!("preguntas cuyo nDCG cambia: {moved} de {}", a.len());
+    if lo > 0.0 || hi < 0.0 {
+        println!("el intervalo NO toca cero: la diferencia es real");
+    } else {
+        println!("el intervalo cruza cero: no se puede distinguir de ruido");
+    }
+    Ok(())
+}
+
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut dataset_path: Option<String> = None;
     let mut json = false;
@@ -13,6 +68,11 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--compare" => {
+                let before = it.next().context("--compare needs two JSON reports")?;
+                let after = it.next().context("--compare needs two JSON reports")?;
+                return compare_runs(before, after);
+            }
             "--dataset" | "-d" => dataset_path = it.next().cloned(),
             "--k" => {
                 cfg.k = it
@@ -30,15 +90,26 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     .cloned()
                     .context("--format needs verbose|compact")?
             }
+            "--max-tokens" => {
+                cfg.max_tokens = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .context("--max-tokens needs an integer")?
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "usage: cuba-memorys eval [--dataset PATH.jsonl] [--k N]\n\
                      \x20                        [--associative] [--abstain] [--rerank]\n\
-                     \x20                        [--format verbose|compact] [--json]\n\n\
+                     \x20                        [--format verbose|compact] [--max-tokens N] [--json]\n\n\
                      --associative  multi-hop expansion (v0.11)\n\
                      --abstain      let the OOD gate fire, so abstention is actually exercised\n\
                      --rerank       run the cross-encoder reranker\n\
-                     --format       response shape whose token cost is measured (default verbose)\n\n\
+                     --format       response shape whose token cost is measured (default verbose)\n\
+                     --max-tokens   response budget. Defaults to unlimited so the score measures\n\
+                     \x20              the ranking; pass 5000 to reproduce what an MCP client sees\n\
+                     --compare A.json B.json   paired bootstrap between two --json runs of the\n\
+                     \x20              same dataset. This is the test to accept or reject a change\n\
+                     \x20              with; the per-run interval printed below is not.\n\n\
                      Every run reports mean/max response tokens: quality that costs twice the\n\
                      context is not free, and you cannot see that without printing both.\n\n\
                      JSONL row: {{\"query\": \"...\", \"relevant_markers\": [\"...\"], \"expected_answer\": \"...\"?}}"
@@ -72,8 +143,13 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             reporters::generate_json_report(&report, samples.len(), cfg.k)
         );
     } else {
+        let budget = if cfg.max_tokens == i64::MAX {
+            "unlimited".to_string()
+        } else {
+            cfg.max_tokens.to_string()
+        };
         eprintln!(
-            "eval dataset={} samples={} k={} associative={} abstain={} rerank={} format={}",
+            "eval dataset={} samples={} k={} associative={} abstain={} rerank={} format={} max_tokens={}",
             dataset_path.as_deref().unwrap_or("<builtin>"),
             samples.len(),
             cfg.k,
@@ -81,6 +157,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
             cfg.abstain,
             cfg.rerank,
             cfg.format,
+            budget,
         );
         println!("{}", reporters::summary_line(&report));
     }
