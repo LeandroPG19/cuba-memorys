@@ -69,7 +69,7 @@ jobs:
       - name: cargo deny
         run: |
           cargo install cargo-deny --quiet
-          cargo deny --manifest-path rust/Cargo.toml check licenses bans sources
+          cargo deny check licenses bans sources
 
       # The npm wrapper is how most people install this, and it once shipped a package
       # whose binary was never fetched. This smoke test loads bin.js/postinstall.js and
@@ -130,7 +130,8 @@ jobs:
         env:
           DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
         run: |
-          cargo test --test integration --test v08_project_scoping --test v09_integration -- --ignored --nocapture
+          cargo test --test integration --test v08_project_scoping --test v09_integration \
+                     --test v021_audit_append_under_app_role -- --ignored --nocapture
 
       - name: Run E2E tests (25 MCP tools)
         env:

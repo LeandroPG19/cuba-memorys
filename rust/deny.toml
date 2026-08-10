@@ -8,6 +8,12 @@
 # Dependencies stay permissive on purpose. cuba-memorys is Apache-2.0, and a copyleft
 # dependency would force the whole binary to that dependency's terms — defeating the
 # point of a permissive licence. We can relicense our own code, not someone else's.
+#
+# Under `version = 2` this allow-list is exhaustive: anything not named here is
+# rejected. That is why there is no `deny` list — cargo-deny removed the key
+# (PR #611) precisely because it was redundant, and keeping it made the whole file
+# fail to validate. GPL, AGPL, LGPL and SSPL are still refused; they are refused by
+# not appearing above, which is stricter than enumerating them.
 version = 2
 allow = [
     "MIT",
@@ -21,22 +27,21 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "OpenSSL",
-]
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
-    "SSPL-1.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
+    # webpki-roots / webpki-root-certs: Mozilla's CA bundle, redistributed under the
+    # Community Data License Agreement. Permissive, no copyleft, no reciprocity on
+    # the binary — it grants rights over the *data*, which is what a CA bundle is.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Treat unmaintained crates as warnings (not errors)
-unmaintained = "warn"
+# Scope, not severity: cargo-deny 0.20 replaced the old "warn"/"deny" values here
+# with a selector, and the stale "warn" made the whole file fail to deserialize —
+# which took down `check licenses bans sources` too, not just the advisories run.
+# "workspace" keeps the check on the dependencies this project actually chooses.
+unmaintained = "workspace"
 # Treat yanked versions as deny
 yanked = "deny"
 # Ignore specific advisories if needed (add IDs here)
