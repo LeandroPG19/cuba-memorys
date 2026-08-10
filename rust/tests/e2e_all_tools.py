@@ -23,7 +23,22 @@ DATABASE_URL = os.environ.get(
 ENV = {
     "DATABASE_URL": DATABASE_URL,
     "PATH": "/usr/bin:/bin",
+    # This suite asserts that the 25 tools answer, never that the cross-encoder
+    # ranks well — that is the evaluator's job. But the gate does not export the
+    # daemon's model configuration, so without this the reranker falls back to the
+    # unfused 1.1 GB artifact at chunk 16 inside a 2048 MB CUDA arena, and one call
+    # measured >120s against 0.73s with it off. Times 40 subprocesses, each loading
+    # it again. Pointing at a directory with no model.onnx resolves the status to
+    # the identity fallback without reading a byte.
+    "CUBA_RERANKER_PATH": str(Path(__file__).resolve().parent),
 }
+
+# One subprocess per call, and each one loads the models from scratch. Measured on
+# a real machine, the reranker's cold load alone ranges from 2.7s (warm page cache)
+# to 38.4s (cold, machine under load) — so the old hardcoded 15s could not pass
+# here, and every one of the 40 calls timed out at once. Configurable because the
+# right value depends on the disk and on whether the binary carries a GPU provider.
+CALL_TIMEOUT_SECS = int(os.environ.get("CUBA_E2E_TIMEOUT_SECS", "60"))
 
 # Test tracking
 tests_run = 0
@@ -48,7 +63,7 @@ def invoke_mcp(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             input=payload,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=CALL_TIMEOUT_SECS,
             env=env,
         )
         if result.returncode != 0:
@@ -59,7 +74,7 @@ def invoke_mcp(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
 
         if not result.stdout:
-            print(f"  [ERROR] Empty stdout from MCP server")
+            print("  [ERROR] Empty stdout from MCP server")
             return None
 
         response = json.loads(result.stdout)
@@ -68,7 +83,7 @@ def invoke_mcp(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         print(f"  [ERROR] Invalid JSON response: {e}")
         return None
     except subprocess.TimeoutExpired:
-        print(f"  [ERROR] MCP invocation timed out")
+        print("  [ERROR] MCP invocation timed out")
         return None
     except Exception as e:
         print(f"  [ERROR] MCP invocation error: {e}")
@@ -141,21 +156,21 @@ def test(
 
     response = invoke_mcp(full_request)
     if response is None:
-        print(f"  FAIL: MCP invocation failed")
+        print("  FAIL: MCP invocation failed")
         tests_failed += 1
         failed_tests.append(test_id)
         return None
 
     content = extract_tool_result(response)
     if content is None:
-        print(f"  FAIL: Could not extract result")
+        print("  FAIL: Could not extract result")
         tests_failed += 1
         failed_tests.append(test_id)
         return None
 
     result = parse_tool_result(content)
     if result is None:
-        print(f"  FAIL: Could not parse tool result")
+        print("  FAIL: Could not parse tool result")
         tests_failed += 1
         failed_tests.append(test_id)
         return None
@@ -536,7 +551,7 @@ def test_cuba_eco():
             obs_id = observations[0].get("id")
 
     if not obs_id:
-        print(f"  SKIP: Could not get observation_id for feedback tests")
+        print("  SKIP: Could not get observation_id for feedback tests")
         return True
 
     # Positive feedback
@@ -639,7 +654,7 @@ def test_cuba_remedio():
             error_id = results_list[0].get("id")
 
     if not error_id:
-        print(f"  SKIP: Could not get error_id from expediente")
+        print("  SKIP: Could not get error_id from expediente")
         return True
 
     # Resolve it
@@ -1060,6 +1075,8 @@ def main():
     print("\n")
     print("=" * 60)
     print("CUBA-MEMORYS E2E TEST SUITE - ALL 25 TOOLS")
+    print(f"binary:  {BINARY_PATH}")
+    print(f"timeout: {CALL_TIMEOUT_SECS}s per call (CUBA_E2E_TIMEOUT_SECS)")
     print("=" * 60)
 
     # Run all tool tests
@@ -1090,7 +1107,7 @@ def main():
     print(f"Failed:              {tests_failed}")
 
     if failed_tests:
-        print(f"\nFailed Tests:")
+        print("\nFailed Tests:")
         for test_id in failed_tests:
             print(f"  - {test_id}")
 

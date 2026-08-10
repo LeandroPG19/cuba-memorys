@@ -174,10 +174,15 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("start global session");
 
+    // Search for this run's own entity name, not the generic word "Project". The
+    // gate runs against the developer's live database, so a common term competes
+    // with the whole corpus for the top-20 and the assertion starts failing the day
+    // someone saves enough memories — which is what happened: it passed at 1804
+    // observations and failed at 1826, with nothing in the code having changed.
     let faro_global = cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_faro",
-        json!({"query": "Project", "limit": 20}),
+        json!({"query": ent_a.clone(), "limit": 20}),
     )
     .await
     .expect("faro under global session");
