@@ -1,6 +1,6 @@
 use crate::cognitive::dual_strength;
 use crate::search::confidence as grounding;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -83,12 +83,21 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let enable_rerank = args
-        .get("rerank")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(|| {
-            crate::mode::active().rerank_default() && crate::search::rerank::enabled()
-        });
+    // `enabled()` resolves the OnceLock, which on a cold process reads a 1.1 GB model
+    // — its own doc-comment forbids calling it from an async task, because it parks a
+    // tokio worker (there are 4) for the whole load and under the shared daemon that
+    // stalls every other client. This is the common path: it runs on every cuba_faro
+    // that does not pass `rerank` explicitly. The `&&` still short-circuits, so a mode
+    // that does not want the reranker never pays the load.
+    let enable_rerank = match args.get("rerank").and_then(|v| v.as_bool()) {
+        Some(explicit) => explicit,
+        None => {
+            crate::mode::active().rerank_default()
+                && tokio::task::spawn_blocking(crate::search::rerank::enabled)
+                    .await
+                    .context("reranker status task panicked")?
+        }
+    };
 
     let project_id = crate::project::current_project_id(pool).await?;
 
@@ -374,7 +383,13 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .unwrap_or("")
             })
             .collect();
-        let have_model = crate::search::rerank::enabled();
+        // Same contract as above. Kept *before* the timeout on purpose: the model
+        // arrives warm at `rerank()`, so the 20 s budget measures inference and not
+        // the load. Moving the load inside that budget is what made the August
+        // attempt look like a regression and got it reverted.
+        let have_model = tokio::task::spawn_blocking(crate::search::rerank::enabled)
+            .await
+            .context("reranker status task panicked")?;
 
         let rerank_budget = std::time::Duration::from_secs(
             std::env::var("CUBA_RERANK_TIMEOUT_SECS")
