@@ -102,16 +102,39 @@ async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
     let mut attempt = 0;
     loop {
         let mut tx = pool.begin().await?;
+        // Hard error, not `.ok()`. Swallowing this would drop the transaction to
+        // READ COMMITTED, and the chain would fork in silence.
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *tx)
             .await
-            .ok();
+            .context("audit append requires SERIALIZABLE to keep the hash chain linear")?;
 
-        let prev: Option<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT current_hash FROM brain_audit_log ORDER BY id DESC LIMIT 1 FOR UPDATE",
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
+        // Appenders queue here instead of racing. Two mechanisms were tried first
+        // and neither survives:
+        //
+        //   `SELECT ... FOR UPDATE` needs the UPDATE privilege even though it
+        //   updates nothing, and 0041 revokes exactly that from cuba_app to make
+        //   the log append-only — every append returned "permission denied".
+        //
+        //   SERIALIZABLE alone is correct but not enough: SSI aborts the losers
+        //   with 40001 rather than making them wait, and 6 concurrent appends
+        //   exhausted the retry loop below — measured, 5 of 6 failed.
+        //
+        // An advisory lock needs no table privilege, and callers wait instead of
+        // being rejected. Transaction-scoped, so it is released on commit or on
+        // rollback, including a panic. The key is arbitrary but must stay fixed:
+        // changing it silently stops serialising against older callers.
+        const AUDIT_CHAIN_LOCK: i64 = 0x0CBA_A0D1_7106_0001;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(AUDIT_CHAIN_LOCK)
+            .execute(&mut *tx)
+            .await
+            .context("taking the audit chain lock")?;
+
+        let prev: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT current_hash FROM brain_audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await?;
         let prev_hash: Vec<u8> = prev.map(|(h,)| h).unwrap_or_default();
 
         let now = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
