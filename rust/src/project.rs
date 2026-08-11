@@ -11,27 +11,20 @@ pub fn filter_disabled() -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("off"))
 }
 
-pub fn project_scope_clause(project_param: &str) -> String {
-    format!("({project_param}::uuid IS NULL OR project_id = {project_param} OR project_id IS NULL)")
-}
-
-async fn propagate_rls_guc(pool: &PgPool, value: &str) -> Result<()> {
-    sqlx::query("SELECT set_config('app.current_project', $1, false)")
-        .bind(value)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn current_project_id(pool: &PgPool) -> Result<Option<Uuid>> {
+pub fn rls_scope() -> String {
     if filter_disabled() {
-        propagate_rls_guc(pool, "*").await.ok();
+        return "*".to_string();
+    }
+    crate::session::project_id()
+        .map(|u| u.to_string())
+        .unwrap_or_default()
+}
+
+pub async fn current_project_id(_pool: &PgPool) -> Result<Option<Uuid>> {
+    if filter_disabled() {
         return Ok(None);
     }
-    let pid = crate::session::project_id();
-    let value = pid.as_ref().map(|u| u.to_string()).unwrap_or_default();
-    propagate_rls_guc(pool, &value).await.ok();
-    Ok(pid)
+    Ok(crate::session::project_id())
 }
 
 pub async fn resolve_project_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>> {
@@ -75,4 +68,52 @@ pub async fn observation_in_scope(
     .fetch_optional(pool)
     .await?;
     Ok(row.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn the_scope_the_pool_stamps_is_the_active_project() {
+        let _one_at_a_time = SERIAL.lock().await;
+        crate::session::clear();
+        assert_eq!(
+            rls_scope(),
+            "",
+            "with no session the scope is empty, which the tenant_isolation policy reads \
+             as unfiltered — the WHERE clause in each handler is what narrows it there"
+        );
+
+        let project = Uuid::new_v4();
+        crate::session::set(Uuid::new_v4(), Some(project));
+        assert_eq!(
+            rls_scope(),
+            project.to_string(),
+            "before_acquire stamps this onto every connection the pool hands out; if it \
+             disagreed with what the handler binds, RLS would clamp to a different project"
+        );
+
+        crate::session::clear();
+    }
+
+    #[tokio::test]
+    async fn the_kill_switch_widens_the_scope_instead_of_emptying_it() {
+        let _one_at_a_time = SERIAL.lock().await;
+        crate::session::set(Uuid::new_v4(), Some(Uuid::new_v4()));
+        unsafe { std::env::set_var(KILL_SWITCH_ENV, "off") };
+
+        assert_eq!(
+            rls_scope(),
+            "*",
+            "the kill switch has to say `*` explicitly: an empty string means the same \
+             thing to the policy today, but only `*` survives a policy that stops \
+             treating empty as unfiltered"
+        );
+
+        unsafe { std::env::remove_var(KILL_SWITCH_ENV) };
+        crate::session::clear();
+    }
 }

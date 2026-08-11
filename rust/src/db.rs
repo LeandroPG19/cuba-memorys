@@ -117,6 +117,15 @@ fn pool_options() -> PgPoolOptions {
                 Ok(())
             })
         })
+        .before_acquire(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('app.current_project', $1, false)")
+                    .bind(crate::project::rls_scope())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(true)
+            })
+        })
         .after_release(|conn, _meta| {
             Box::pin(async move {
                 sqlx::query("SELECT set_config('app.current_project', '', false)")
@@ -352,23 +361,45 @@ mod tests {
             .await
             .expect("connect to test database");
 
-        sqlx::query(
-            "SELECT set_config('app.current_project', 'deadbeef-0000-0000-0000-000000000000', false)",
-        )
-        .execute(&pool)
-        .await
-        .expect("set_config on connection #1");
-
-        let (leaked,): (String,) =
+        crate::session::clear();
+        let (empty,): (String,) =
             sqlx::query_as("SELECT current_setting('app.current_project', true)")
                 .fetch_one(&pool)
                 .await
-                .expect("read back app.current_project on the reused connection");
-
+                .expect("read app.current_project with no session");
         assert_eq!(
-            leaked, "",
-            "after_release must reset app.current_project so a reused connection \
-             does not carry a stale project id into the next request"
+            empty, "",
+            "with no active session the pool must hand out an unscoped connection"
+        );
+
+        let project = uuid::Uuid::new_v4();
+        crate::session::set(uuid::Uuid::new_v4(), Some(project));
+
+        let (scoped,): (String,) =
+            sqlx::query_as("SELECT current_setting('app.current_project', true)")
+                .fetch_one(&pool)
+                .await
+                .expect("read app.current_project with a session");
+        assert_eq!(
+            scoped,
+            project.to_string(),
+            "the query has to SEE the project. Setting the GUC through .execute(pool) \
+             put it on a connection that was returned to the pool and wiped by \
+             after_release before any handler query ran, so tenant_isolation always \
+             matched the empty case and returned every row in the table. before_acquire \
+             is what makes the second wall exist"
+        );
+
+        crate::session::clear();
+        let (cleared,): (String,) =
+            sqlx::query_as("SELECT current_setting('app.current_project', true)")
+                .fetch_one(&pool)
+                .await
+                .expect("read app.current_project after clearing the session");
+        assert_eq!(
+            cleared, "",
+            "the same physical connection must not carry one request's project into \
+             the next — this pool holds exactly one"
         );
     }
 }
