@@ -15,12 +15,12 @@ async fn pool() -> sqlx::PgPool {
 #[tokio::test]
 #[ignore]
 async fn a_long_observation_becomes_reachable_past_the_truncation_limit() {
-    if !cuba_memorys::embeddings::onnx::is_model_loaded() {
-        eprintln!(
-            "skipping: no ONNX model loaded (hash fallback would make similarity meaningless)"
-        );
-        return;
-    }
+    assert!(
+        cuba_memorys::embeddings::onnx::is_model_loaded(),
+        "no ONNX model loaded. Chunking exists so a long observation stays reachable past the \
+         truncation limit, and that is a claim about SIMILARITY — under the hash fallback it \
+         means nothing, so reporting ok would be reporting on a measurement never taken"
+    );
 
     let pool = pool().await;
     let entity = unique_name("chunk_entity");

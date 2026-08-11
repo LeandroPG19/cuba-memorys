@@ -134,8 +134,13 @@ jobs:
           DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
         run: |
           cargo test --test integration --test v08_project_scoping --test v09_integration \
-                     --test v021_audit_append_under_app_role -- --ignored --nocapture
+                     --test v021_audit_append_under_app_role \
+                     --test v016_quarantine --test v016_relation_extraction \
+                     --test v017_codegraph_hardening \
+                     -- --ignored --nocapture
           cargo test --lib -- --ignored --nocapture
+          CUBA_APP_ROLE=0 cargo test --test v020_audit_update_applies \
+                     --test v020_role_separation -- --ignored --nocapture
 
       - name: Run E2E tests (25 MCP tools)
         env:

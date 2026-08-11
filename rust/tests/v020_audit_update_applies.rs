@@ -20,10 +20,10 @@ async fn an_admin_update_on_the_audit_log_actually_changes_the_row() {
     .await
     .expect("inserting an audit row");
 
-    let Some((id,)) = row else {
-        eprintln!("skipping: brain_audit_log has a different shape here");
-        return;
-    };
+    let (id,) = row.expect(
+        "the INSERT ... RETURNING id produced no row. That is a broken audit table, not a \
+         different shape, and reporting ok would hide it",
+    );
 
     let affected = sqlx::query(
         "UPDATE brain_audit_log SET payload = jsonb_build_object('subject', 'redacted')

@@ -20,10 +20,12 @@ async fn auto_extract_falls_back_to_the_local_cli_when_the_client_has_no_samplin
         !cuba_memorys::protocol::client_supports_sampling(),
         "this test must run outside an MCP session so the fallback is what gets exercised"
     );
-    if cuba_memorys::cognitive::judge::resolve_offline_llm().is_none() {
-        eprintln!("skipping: no local LLM CLI on PATH");
-        return;
-    }
+    assert!(
+        cuba_memorys::cognitive::judge::resolve_offline_llm().is_some(),
+        "no local LLM CLI on PATH. This test exists because auto_extract was dead for \
+         months while its suite reported green — a silent skip here recreates exactly that. \
+         Install one, or run this suite where one exists"
+    );
 
     let pool = pool().await;
     let subject = unique_name("Proyecto");
@@ -91,8 +93,12 @@ async fn auto_extract_falls_back_to_the_local_cli_when_the_client_has_no_samplin
 #[tokio::test]
 #[ignore]
 async fn the_judge_still_reaches_a_verdict_with_mcp_servers_disabled() {
-    if !cuba_memorys::cognitive::judge::which_in_path("claude") {
-        eprintln!("skipping: no claude CLI on PATH");
+    assert!(
+        cuba_memorys::cognitive::judge::which_in_path("claude"),
+        "no claude CLI on PATH: the fallback this asserts cannot be exercised, and \
+         reporting ok would claim it was"
+    );
+    if false {
         return;
     }
 

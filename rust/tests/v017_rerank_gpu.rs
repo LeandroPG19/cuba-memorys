@@ -32,10 +32,10 @@ fn is_configured_reports_whether_a_model_is_on_disk_without_loading_it() {
 #[tokio::test]
 #[ignore]
 async fn warming_up_leaves_the_reranker_ready() {
-    if !cuba_memorys::search::rerank::is_configured() {
-        eprintln!("skipping: no reranker model on disk");
-        return;
-    }
+    assert!(
+        cuba_memorys::search::rerank::is_configured(),
+        "no reranker model on disk: this suite measures the model path and cannot report on it"
+    );
     let started = std::time::Instant::now();
     let warm = cuba_memorys::search::rerank::warm_up().await;
     assert!(warm, "a configured reranker must warm up successfully");
@@ -49,15 +49,17 @@ async fn warming_up_leaves_the_reranker_ready() {
 #[tokio::test]
 #[ignore]
 async fn reranking_reorders_candidates_by_relevance() {
-    if !cuba_memorys::search::rerank::is_configured() {
-        eprintln!("skipping: no reranker model on disk");
-        return;
-    }
+    assert!(
+        cuba_memorys::search::rerank::is_configured(),
+        "no reranker model on disk: this suite measures the model path and cannot report on it"
+    );
     cuba_memorys::search::rerank::warm_up().await;
-    if !cuba_memorys::search::rerank::enabled() {
-        eprintln!("skipping: reranker did not load");
-        return;
-    }
+    assert!(
+        cuba_memorys::search::rerank::enabled(),
+        "the reranker is configured but did not load. That is the failure this test exists to \
+         catch — the identity fallback returns the RRF order unchanged and every search looks \
+         like it worked"
+    );
 
     let query = "how does the REM consolidation cycle decay old memories";
     let candidates = vec![

@@ -59,10 +59,11 @@ async fn the_audit_log_rejects_mutation_from_the_application_role() {
     .await
     .expect("inserting an audit row as admin");
 
-    let Some(url) = app_url() else {
-        eprintln!("skipping: no app password available");
-        return;
-    };
+    let url = app_url().expect(
+        "no app password available. This test is the one that proves cuba_app cannot rewrite \
+         the audit log, and that role is now what the daemon actually connects as — skipping \
+         it silently is skipping the check on a live security control",
+    );
     let app = sqlx::PgPool::connect(&url)
         .await
         .expect("connect as cuba_app");

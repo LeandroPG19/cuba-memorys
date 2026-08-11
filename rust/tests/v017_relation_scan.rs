@@ -38,10 +38,11 @@ async fn isolated_entity_with_notes(pool: &sqlx::PgPool, name: &str, notes: &[&s
 #[tokio::test]
 #[ignore]
 async fn an_isolated_entity_gets_wired_into_the_graph_from_its_own_notes() {
-    if cuba_memorys::cognitive::judge::resolve_offline_llm().is_none() {
-        eprintln!("skipping: no local LLM CLI on PATH");
-        return;
-    }
+    assert!(
+        cuba_memorys::cognitive::judge::resolve_offline_llm().is_some(),
+        "no local LLM CLI on PATH. The relation scan is the engine behind the self-growing \
+         graph; a skip that counts as success is how it would rot unnoticed"
+    );
     let pool = pool().await;
     let name = unique_name("Orquestador");
     let id = isolated_entity_with_notes(
