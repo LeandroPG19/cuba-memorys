@@ -533,6 +533,16 @@ mod tests {
         row.is_some()
     }
 
+    async fn observation_exists_unscoped(pool: &PgPool, obs_id: Uuid) -> bool {
+        let saved = crate::session::get();
+        crate::session::clear();
+        let found = observation_exists(pool, obs_id).await;
+        if let Some(s) = saved {
+            crate::session::set(s.session_id, s.project_id);
+        }
+        found
+    }
+
     async fn drop_entity(pool: &PgPool, entity_name: &str) {
         sqlx::query("DELETE FROM brain_entities WHERE name = $1")
             .bind(entity_name)
@@ -703,8 +713,11 @@ mod tests {
             "a dry run must leave the active project's observation alive"
         );
         assert!(
-            observation_exists(&pool, other_obs).await,
-            "a dry run must leave every other project's observation alive"
+            observation_exists_unscoped(&pool, other_obs).await,
+            "a dry run must leave every other project's observation alive. This has to look \
+             with the session cleared: once the runtime downgrades to cuba_app, before_acquire \
+             stamps the active project onto the connection and tenant_isolation genuinely hides \
+             the other project's rows — a scoped read cannot tell `hidden` from `deleted`"
         );
         let after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM brain_observations")
             .fetch_one(&pool)
@@ -732,7 +745,7 @@ mod tests {
         );
 
         let mine_survived = observation_exists(&pool, mine_obs).await;
-        let other_survived = observation_exists(&pool, other_obs).await;
+        let other_survived = observation_exists_unscoped(&pool, other_obs).await;
 
         crate::session::clear();
         drop_entity(&pool, &mine_entity).await;
@@ -750,7 +763,8 @@ mod tests {
         assert!(
             other_survived,
             "prune must not reach into another project: the session picks one project, and a \
-             maintenance action that ignores it deletes memory nobody asked about"
+             maintenance action that ignores it deletes memory nobody asked about. Read \
+             unscoped, because tenant_isolation now hides it from the active session either way"
         );
     }
 }
