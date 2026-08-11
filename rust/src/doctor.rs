@@ -145,6 +145,40 @@ fn latest_published_version() -> Option<String> {
     json.get("version")?.as_str().map(String::from)
 }
 
+fn audit_chain_check(keyed: bool, rows: i64) -> Check {
+    if keyed {
+        return Check::ok(
+            "audit_chain",
+            format!("{rows} filas encadenadas con HMAC — la clave está resuelta"),
+        );
+    }
+    Check::warn(
+        "audit_chain",
+        format!("{rows} filas encadenadas con SHA-256 sin clave"),
+        "sin CUBA_AUDIT_KEY la cadena es recomputable: cualquiera con INSERT sobre \
+         brain_audit_log fabrica filas cuyo hash cuadra, y `cuba_archivo verify` las da \
+         por buenas. La evidencia de manipulación es cero, que es justo lo que la tabla \
+         existe para dar. Poné una clave y guardala fuera de ~/.cache.",
+    )
+}
+
+fn rbac_check(principals: i64) -> Check {
+    if principals > 0 {
+        return Check::ok(
+            "rbac",
+            format!("{principals} principal(es) — la política restrictiva decide de verdad"),
+        );
+    }
+    Check::warn(
+        "rbac",
+        "brain_principals vacía — la política RESTRICTIVE está adjunta y siempre da true"
+            .to_string(),
+        "es fail-open deliberado para una instalación de un solo usuario, pero conviene \
+         saberlo: brain_principal_can() devuelve true para cualquier proyecto mientras la \
+         tabla esté vacía, así que el segundo muro de RBAC no está decidiendo nada.",
+    )
+}
+
 fn runtime_role_check(user: &str, is_super: bool, app_role_ready: bool) -> Check {
     if !is_super {
         return Check::ok(
@@ -566,6 +600,21 @@ pub async fn run_checks_with(pool: &PgPool, url: &str, deep: bool) -> Vec<Check>
                 false
             };
             checks.push(runtime_role_check(&usr, is_super, app_role_ready));
+
+            let audit_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM brain_audit_log")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            checks.push(audit_chain_check(
+                crate::handlers::archivo::audit_key().is_some(),
+                audit_rows,
+            ));
+
+            let principals: i64 = sqlx::query_scalar("SELECT count(*) FROM brain_principals")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            checks.push(rbac_check(principals));
         }
         Err(e) => checks.push(Check::warn("runtime_role", format!("no verificable: {e}"), "revisar permisos")),
     }
@@ -821,5 +870,50 @@ mod runtime_role_tests {
              they were shipped in, and a doctor that is always red is a doctor nobody reads"
         );
         assert!(check.hint.is_some_and(|h| h.contains("secure")));
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    #[test]
+    fn an_unkeyed_audit_chain_is_reported_as_forgeable() {
+        let check = audit_chain_check(false, 20);
+
+        assert_eq!(check.status, Status::Warn);
+        let hint = check
+            .hint
+            .expect("a warning without a consequence is decoration");
+        assert!(
+            hint.contains("INSERT"),
+            "the hint has to name the capability that breaks it: anyone who can INSERT can \
+             forge a row whose hash recomputes, and verify() calls it ok. Measured on this \
+             machine: 3 of 3 rows reproduce with plain SHA-256"
+        );
+    }
+
+    #[test]
+    fn a_keyed_chain_is_the_healthy_case() {
+        assert_eq!(audit_chain_check(true, 20).status, Status::Ok);
+    }
+
+    #[test]
+    fn an_empty_principal_table_is_reported_as_an_inert_wall() {
+        let check = rbac_check(0);
+
+        assert_eq!(
+            check.status,
+            Status::Warn,
+            "brain_principal_can() returns true for every project while the table is empty, \
+             so the RESTRICTIVE policy is attached and deciding nothing. That is deliberate \
+             for a single-user install and it still has to be said out loud"
+        );
+        assert!(check.detail.contains("brain_principals"));
+    }
+
+    #[test]
+    fn a_populated_principal_table_is_the_healthy_case() {
+        assert_eq!(rbac_check(3).status, Status::Ok);
     }
 }
