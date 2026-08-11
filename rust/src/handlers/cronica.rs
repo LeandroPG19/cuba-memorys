@@ -204,11 +204,14 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
     .await
     .unwrap_or((0,));
 
-    let overload_warning = if obs_count.0 > 50 {
+    let (overload_warning, superseded) = if obs_count.0 > 50 {
+        let retired = retire_low_value_observations(pool, entity_id, entity_name).await;
+
         let pool_clone = pool.clone();
         let eid = entity_id;
+        let entity_for_log = entity_name.to_string();
         crate::tasks::spawn(async move {
-            let _ = sqlx::query(
+            let merged = sqlx::query(
                 "WITH dupes AS (
                     SELECT a.id AS keep_id, b.id AS remove_id
                     FROM brain_observations a JOIN brain_observations b
@@ -225,20 +228,26 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
             .execute(&pool_clone)
             .await;
 
-            let _ = sqlx::query(
-                "DELETE FROM brain_observations WHERE entity_id = $1 AND importance < 0.05 AND observation_type NOT IN ('decision', 'lesson')",
-            )
-            .bind(eid)
-            .execute(&pool_clone)
-            .await;
+            match merged {
+                Ok(done) if done.rows_affected() > 0 => {
+                    tracing::info!(entity = %entity_for_log, merged = done.rows_affected(), "near-duplicates marked superseded")
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(entity = %entity_for_log, error = %e, "near-duplicate consolidation failed")
+                }
+            }
         });
 
-        Some(format!(
-            "Entity '{}' has {} observations. Auto-consolidation triggered. Consider cuba_zafra(action='summarize') for further compression.",
-            entity_name, obs_count.0
-        ))
+        (
+            Some(format!(
+                "Entity '{}' has {} observations. Auto-consolidation marked {} low-value observation(s) as 'superseded' — hidden from search, not deleted, reversible. Consider cuba_zafra(action='summarize') for further compression.",
+                entity_name, obs_count.0, retired
+            )),
+            retired,
+        )
     } else {
-        None
+        (None, 0)
     };
 
     Ok(serde_json::json!({
@@ -249,8 +258,37 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         "information_density": density,
         "importance": importance,
         "tags": tags,
-        "overload_warning": overload_warning
+        "overload_warning": overload_warning,
+        "superseded": superseded
     }))
+}
+
+const RETIRE_LOW_VALUE_SQL: &str = "UPDATE brain_observations SET observation_type = 'superseded'
+     WHERE entity_id = $1 AND importance < 0.05
+       AND observation_type NOT IN ('decision', 'lesson', 'superseded')";
+
+async fn retire_low_value_observations(
+    pool: &PgPool,
+    entity_id: uuid::Uuid,
+    entity_name: &str,
+) -> u64 {
+    match sqlx::query(RETIRE_LOW_VALUE_SQL)
+        .bind(entity_id)
+        .execute(pool)
+        .await
+    {
+        Ok(done) => {
+            let retired = done.rows_affected();
+            if retired > 0 {
+                tracing::info!(entity = %entity_name, retired, "low-value observations marked superseded");
+            }
+            retired
+        }
+        Err(e) => {
+            tracing::warn!(entity = %entity_name, error = %e, "failed to retire low-value observations");
+            0
+        }
+    }
 }
 
 async fn delete_obs(pool: &PgPool, args: &Value) -> Result<Value> {
@@ -513,7 +551,7 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     if reused {
                         tracing::debug!(obs = %obs_id, "reused the dedup embedding");
                     }
-                    let _ = sqlx::query(
+                    let stored = sqlx::query(
                         "UPDATE brain_observations SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
                     )
                     .bind(pgvector::Vector::from(emb))
@@ -521,6 +559,9 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
                     .bind(obs_id)
                     .execute(&embed_pool)
                     .await;
+                    if let Err(e) = stored {
+                        tracing::warn!(obs_id = %obs_id, error = %e, "failed to store embedding — observation stays invisible to vector search");
+                    }
                 }
             }
         });
@@ -843,7 +884,7 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
             .await
         {
             let model = crate::embeddings::onnx::current_model();
-            let _ = sqlx::query(
+            let stored = sqlx::query(
                 "UPDATE brain_episodes SET embedding = $1::vector, embedding_model = $2 WHERE id = $3",
             )
             .bind(pgvector::Vector::from(emb))
@@ -851,6 +892,9 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
             .bind(ep_id)
             .execute(&embed_pool)
             .await;
+            if let Err(e) = stored {
+                tracing::warn!(episode_id = %ep_id, error = %e, "failed to store embedding — episode stays invisible to vector search");
+            }
         }
     });
 
@@ -979,5 +1023,114 @@ mod tests {
     #[test]
     fn test_information_density_empty() {
         assert_eq!(information_density(""), 0.0);
+    }
+
+    #[test]
+    fn auto_consolidation_can_never_destroy_an_observation() {
+        assert!(
+            !RETIRE_LOW_VALUE_SQL.to_uppercase().contains("DELETE"),
+            "this runs unasked on every add to an entity over 50 observations, in the background \
+             and over rows the user never selected: it must not be able to destroy one. SQL: \
+             {RETIRE_LOW_VALUE_SQL}"
+        );
+        assert!(
+            RETIRE_LOW_VALUE_SQL.contains("observation_type = 'superseded'"),
+            "retirement must use the same reversible marker the rest of the project already uses \
+             (zafra merge/summarize write it, every search excludes it). SQL: \
+             {RETIRE_LOW_VALUE_SQL}"
+        );
+        assert!(
+            RETIRE_LOW_VALUE_SQL.contains("NOT IN ('decision', 'lesson', 'superseded')"),
+            "skipping the already-superseded rows is what keeps the count reported back to the \
+             user honest: without it, every later add re-marks and re-reports the same rows as \
+             newly retired. SQL: {RETIRE_LOW_VALUE_SQL}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn adding_to_an_overloaded_entity_supersedes_low_value_observations_and_says_so() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL env var required for integration tests");
+        let pool = crate::db::create_pool(&url)
+            .await
+            .expect("connect to test database");
+
+        let entity_name = format!("cronica-overload-{}", uuid::Uuid::new_v4());
+        let entity_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO brain_entities (name, entity_type) VALUES ($1, 'concept') RETURNING id",
+        )
+        .bind(&entity_name)
+        .fetch_one(&pool)
+        .await
+        .expect("seed the test entity");
+
+        for i in 0..50 {
+            sqlx::query(
+                "INSERT INTO brain_observations (entity_id, content, observation_type, importance)
+                 VALUES ($1, $2, 'fact', 0.5)",
+            )
+            .bind(entity_id)
+            .bind(format!("qwrtzp{i} lkjhgf{i} mnbvcx{i}"))
+            .execute(&pool)
+            .await
+            .expect("seed filler observations to push the entity over the overload threshold");
+        }
+
+        let low_value: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO brain_observations (entity_id, content, observation_type, importance)
+             VALUES ($1, $2, 'fact', 0.01) RETURNING id",
+        )
+        .bind(entity_id)
+        .bind("anotacion decaida que su duenio todavia podria querer recuperar")
+        .fetch_one(&pool)
+        .await
+        .expect("seed the observation sitting in the deletion zone");
+
+        let result = add(
+            &pool,
+            &entity_name,
+            &serde_json::json!({
+                "content": "the nine o'clock train pulls into central station every tuesday"
+            }),
+        )
+        .await
+        .expect("add must succeed on an overloaded entity");
+
+        let survivor: Option<String> =
+            sqlx::query_scalar("SELECT observation_type FROM brain_observations WHERE id = $1")
+                .bind(low_value)
+                .fetch_optional(&pool)
+                .await
+                .expect("read the low-importance observation back");
+        let reported = result.get("superseded").and_then(|v| v.as_u64());
+        let warning = result
+            .get("overload_warning")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        sqlx::query("DELETE FROM brain_entities WHERE id = $1")
+            .bind(entity_id)
+            .execute(&pool)
+            .await
+            .expect("clean up the test entity and its cascaded rows");
+
+        assert_eq!(
+            survivor.as_deref(),
+            Some("superseded"),
+            "the row must still be there, only marked: an unrequested background DELETE was wiping \
+             observations for good on every add to a big entity"
+        );
+        assert_eq!(
+            reported,
+            Some(1),
+            "the caller has to be told what was done to its data — before, the response only said \
+             'auto-consolidation triggered' and never mentioned the rows it had removed"
+        );
+        assert!(
+            warning.contains("not deleted"),
+            "the warning must say the rows survive, or the count reads as a deletion count: {warning}"
+        );
     }
 }
