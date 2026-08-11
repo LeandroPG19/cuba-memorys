@@ -161,7 +161,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "entity_name": {"type": "string", "description": "Target entity"},
                     "observation_id": {"type": "string", "description": "Target observation UUID"},
                     "correction": {"type": "string", "description": "New content (for correct action)"},
-                    "limit": {"type": "integer", "description": "Max rows for the 'pending' listing (default 20, max 200)"}
+                    "limit": {"type": "integer", "description": "Max rows for the 'pending' listing (default 20, max 200)"},
+                    "allow_secret": {"type": "boolean", "description": "A correction is refused when it carries what looks like a live credential (token, password field, credentials in a URL) — it overwrites stored content, so without this gate it is a way past the one cuba_cronica applies on the way in. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -188,7 +189,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                 "type": "object",
                 "properties": {
                     "error_id": {"type": "string", "description": "UUID of the error to solve"},
-                    "solution": {"type": "string", "description": "Solution that fixed the error"}
+                    "solution": {"type": "string", "description": "Solution that fixed the error"},
+                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the solution carries what looks like a live credential (token, password field, credentials in a URL) — 'it was fixed by exporting this key' is the usual case. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["error_id", "solution"]
             }),
@@ -218,7 +220,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "goals": {"type": "array", "items": {"type": "string"}, "description": "Session goals (for start)"},
                     "project": {"type": "string", "description": "v0.8: project name to bind this session to (created on first use). Omit to keep session global."},
                     "outcome": {"type": "string", "enum": ["success", "partial", "failed", "abandoned"], "description": "Session outcome (for end)"},
-                    "summary": {"type": "string", "description": "What was accomplished (for end)"}
+                    "summary": {"type": "string", "description": "What was accomplished (for end)"},
+                    "allow_secret": {"type": "boolean", "description": "Ending a session is refused when the summary carries what looks like a live credential (token, password field, credentials in a URL); the summary is replayed to the next session as previous_session.summary. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -267,7 +270,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "batch_size": {"type": "integer", "description": "Max observations to re-encode in reembed (default 500)"},
                     "halflife_days": {"type": "number", "description": "Global halflife override for decay (overrides per-type stratification)"},
                     "c": {"type": "number", "description": "Power-law c parameter for decay_episodes (default 0.1)"},
-                    "beta": {"type": "number", "description": "Power-law β exponent for decay_episodes (default 0.5)"}
+                    "beta": {"type": "number", "description": "Power-law β exponent for decay_episodes (default 0.5)"},
+                    "allow_secret": {"type": "boolean", "description": "summarize is refused when compressed_summary carries what looks like a live credential (token, password field, credentials in a URL); it supersedes every observation of the entity, so this text is the only survivor. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -331,6 +335,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "entity_pattern": {"type": "string", "description": "Entity name or pattern to match"},
                     "condition_type": {"type": "string", "enum": ["on_access", "on_session_start", "on_error_match"], "description": "When to fire"},
                     "message": {"type": "string", "description": "Reminder message to surface when triggered"},
+                    "allow_secret": {"type": "boolean", "description": "Creating a trigger is refused when the message carries what looks like a live credential (token, password field, credentials in a URL); the message is pushed unprompted into the response of whatever matches the pattern. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."},
                     "max_fires": {"type": "integer", "description": "Max times to fire (default 1, -1 for unlimited)"},
                     "expires_at": {"type": "string", "description": "ISO8601 expiration datetime"},
                     "trigger_id": {"type": "string", "description": "Trigger UUID (for delete)"}
@@ -364,7 +369,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "text": {"type": "string", "description": "Raw text: paragraphs to split (parse) or a turn/conversation to extract facts from (auto_extract)"},
                     "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"},
                     "supersede_conflicts": {"type": "boolean", "description": "v0.11 (auto_extract): when a new fact replaces/contradicts an existing related one, ask the judge and mark the old observation superseded (knowledge-update; never deletes). Default false."},
-                    "untrusted": {"type": "boolean", "description": "Set when the text came from somewhere you do not control (a fetched page, a pasted document, a third party). Everything extracted lands quarantined — stored and inspectable via cuba_eco action=pending, but withheld from cuba_faro until promoted. Default false."}
+                    "untrusted": {"type": "boolean", "description": "Set when the text came from somewhere you do not control (a fetched page, a pasted document, a third party). Everything extracted lands quarantined — stored and inspectable via cuba_eco action=pending, but withheld from cuba_faro until promoted. Default false."},
+                    "allow_secret": {"type": "boolean", "description": "Ingestion is refused when an item's content, or the raw text handed to parse/auto_extract, carries what looks like a live credential (token, password field, credentials in a URL) — pasting a whole work log is the likeliest way one arrives. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -431,7 +437,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "action": {"type": "string", "enum": ["write", "read", "clear"], "description": "Working-memory operation"},
                     "content": {"type": "string", "description": "Content to store (for write)"},
                     "tag": {"type": "string", "description": "Optional tag for filtering on read/clear"},
-                    "ttl_seconds": {"type": "integer", "description": "Time-to-live in seconds (default 3600)"}
+                    "ttl_seconds": {"type": "integer", "description": "Time-to-live in seconds (default 3600)"},
+                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the content carries what looks like a live credential (token, password field, credentials in a URL); a TTL is not protection — the row is readable, dumped and backed up for as long as it lives. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -481,7 +488,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "verification": {"type": "string", "description": "How you know it actually worked"},
                     "success": {"type": "boolean", "description": "For action=outcome: did it work?"},
                     "query": {"type": "string", "description": "For action=search"},
-                    "limit": {"type": "integer", "description": "Max results"}
+                    "limit": {"type": "integer", "description": "Max results"},
+                    "allow_secret": {"type": "boolean", "description": "Adding a procedure is refused when any part of it — name, trigger, a step's `run` command, preconditions or verification — carries what looks like a live credential (token, password field, credentials in a URL). A recipe is a list of commands to paste, so `run` is where one usually lands. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -725,7 +733,19 @@ mod profile_tests {
 
     #[test]
     fn a_tool_that_stores_free_text_declares_its_secret_override() {
-        const GATED: [&str; 3] = ["cuba_cronica", "cuba_decreto", "cuba_alarma"];
+        const GATED: [&str; 11] = [
+            "cuba_cronica",
+            "cuba_decreto",
+            "cuba_alarma",
+            "cuba_remedio",
+            "cuba_ingesta",
+            "cuba_eco",
+            "cuba_zafra",
+            "cuba_receta",
+            "cuba_pizarra",
+            "cuba_jornada",
+            "cuba_centinela",
+        ];
 
         for name in GATED {
             let tool = tool_definitions()

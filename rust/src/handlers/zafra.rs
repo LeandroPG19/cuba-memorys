@@ -312,6 +312,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             if entity_name.is_empty() || summary.is_empty() {
                 anyhow::bail!("entity_name and compressed_summary are required");
             }
+            crate::redact::refuse_secrets(&args, "compressed_summary", summary)?;
             let entity_id: (uuid::Uuid,) = sqlx::query_as(
                 "SELECT id FROM brain_entities
                  WHERE name = $1 AND ($2::uuid IS NULL OR project_id = $2 OR project_id IS NULL)",
@@ -478,6 +479,44 @@ mod tests {
 
     fn unique_name(prefix: &str) -> String {
         format!("{}_{}", prefix, &Uuid::new_v4().to_string()[..8])
+    }
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://zafra-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn the_summary_that_replaces_a_whole_entity_is_refused_when_it_carries_a_credential() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "summarize",
+            "entity_name": "deploy",
+            "compressed_summary": "todo el despliegue se hacía con ghp_abcdefghijklmnop"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "summarize answered Ok on a pool that cannot connect: nothing but the secret \
+                 gate could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("compressed_summary"),
+            "summarize supersedes every observation of the entity and leaves this text as the \
+             only survivor: a credential written here is both stored and impossible to find by \
+             rereading what it replaced. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
     }
 
     async fn test_pool() -> PgPool {

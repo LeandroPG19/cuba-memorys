@@ -13,6 +13,10 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
+fn allow_secret(args: &Value) -> bool {
+    args.get("allow_secret").and_then(Value::as_bool) == Some(true)
+}
+
 async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     let text = args
         .get("text")
@@ -22,6 +26,8 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
     if text.is_empty() {
         anyhow::bail!("text is required for auto_extract action");
     }
+
+    crate::redact::refuse_secrets(args, "text", text)?;
 
     let hint = args
         .get("entity_hint")
@@ -93,7 +99,11 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         items
     };
 
-    let ingest_args = serde_json::json!({ "action": "ingest", "items": items });
+    let ingest_args = serde_json::json!({
+        "action": "ingest",
+        "items": items,
+        "allow_secret": allow_secret(args)
+    });
     let result = ingest(pool, &ingest_args).await?;
 
     let mut response = result;
@@ -598,6 +608,12 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("ingest limit is 200 items per call (got {})", items.len());
     }
 
+    for (index, item) in items.iter().enumerate() {
+        if let Some(content) = item.get("content").and_then(|v| v.as_str()) {
+            crate::redact::refuse_secrets(args, &format!("items[{index}].content"), content)?;
+        }
+    }
+
     let observations: Vec<Value> = items
         .iter()
         .filter_map(|item| {
@@ -631,7 +647,8 @@ async fn ingest(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let batch_args = serde_json::json!({
         "action": "batch_add",
-        "observations": observations
+        "observations": observations,
+        "allow_secret": allow_secret(args)
     });
 
     let result = super::cronica::handle(pool, batch_args).await?;
@@ -659,6 +676,8 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
     if text.is_empty() {
         anyhow::bail!("text is required for parse action");
     }
+
+    crate::redact::refuse_secrets(args, "text", text)?;
 
     let paragraphs: Vec<&str> = text
         .split("\n\n")
@@ -692,7 +711,8 @@ async fn parse(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let ingest_args = serde_json::json!({
         "action": "ingest",
-        "items": items
+        "items": items,
+        "allow_secret": allow_secret(args)
     });
 
     let result = ingest(pool, &ingest_args).await?;
@@ -728,6 +748,132 @@ fn classify_paragraph(text: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://ingesta-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn bulk_ingestion_refuses_the_one_item_that_carries_a_credential() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "ingest",
+            "items": [
+                {"entity_name": "deploy", "content": "el pipeline corre en GitHub Actions"},
+                {"entity_name": "deploy", "content": "el runner usa ghp_abcdefghijklmnop"}
+            ]
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "ingest answered Ok on a pool that cannot connect: nothing but the secret gate \
+                 could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("items[1].content"),
+            "a bulk write is the highest-volume door into the graph and nobody rereads 200 \
+             items one by one: the refusal has to name which item carries the credential. Got: \
+             {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn splitting_a_raw_dump_into_paragraphs_does_not_launder_a_credential() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "parse",
+            "entity_name": "deploy",
+            "text": "El despliegue quedó documentado.\n\nLa cabecera era ghp_abcdefghijklmnop y \
+                     por eso fallaba."
+        });
+
+        let chain = format!(
+            "{:#}",
+            handle(&pool, args)
+                .await
+                .expect_err("a github token pasted into a raw dump must not be storable")
+        );
+        assert!(
+            chain.contains("github token") && chain.contains("text"),
+            "parse chops the dump into observations and writes every piece: refusing per \
+             paragraph would name a field the caller never wrote, so the gate has to sit on the \
+             text it was handed. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_work_log_with_a_credential_in_it_never_reaches_the_extracting_model() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "auto_extract",
+            "text": "Estuvimos toda la tarde con el deploy; al final entró con ghp_abcdefghijklmnop."
+        });
+
+        let chain = format!(
+            "{:#}",
+            handle(&pool, args)
+                .await
+                .expect_err("a work log with a live token in it must not be extractable")
+        );
+        assert!(
+            chain.contains("github token") && chain.contains("text"),
+            "auto_extract hands this text to an LLM — an MCP sampling round trip or a CLI \
+             subprocess — before anything is stored. Gating only what comes back would leak the \
+             credential out of the process first, which no later refusal can undo. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_override_survives_the_hop_into_the_observation_writer() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "ingest",
+            "allow_secret": true,
+            "items": [{"entity_name": "aws", "content": "AKIAIOSFODNN7EXAMPLE es el de la doc"}]
+        });
+
+        let chain = format!(
+            "{:#}",
+            handle(&pool, args)
+                .await
+                .expect_err("the pool cannot connect, so this call always ends in an error")
+        );
+        assert!(
+            !chain.contains("Remove it and store a pointer"),
+            "ingest hands its rows to cronica batch_add, which runs the same gate on arguments \
+             ingest builds itself: dropping allow_secret on that hop leaves the escape hatch \
+             visible in the schema and unreachable in practice. Got: {chain}"
+        );
+    }
+
     use super::parse_extracted_items;
 
     #[test]

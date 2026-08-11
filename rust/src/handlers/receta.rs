@@ -96,6 +96,11 @@ async fn add(pool: &PgPool, args: &Value) -> Result<Value> {
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    let steps_text = serde_json::to_string_pretty(&steps)
+        .context("serialising the steps for the secret scan")?;
+    let stored_text = format!("{name}\n{trigger}\n{steps_text}\n{preconditions}\n{verification}");
+    crate::redact::refuse_secrets(args, "the procedure", &stored_text)?;
+
     let project_id = crate::project::current_project_id(pool).await?;
 
     let embed_text = format!("{name}. {trigger}");
@@ -385,5 +390,77 @@ mod tests {
         assert!(md.contains("→ esperado: healthy"));
         assert!(md.contains("2. Correr las migraciones"));
         assert_eq!(md.matches("```").count(), 2);
+    }
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://receta-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn a_step_whose_command_carries_a_credential_is_refused() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "add",
+            "name": "publicar la imagen",
+            "trigger": "cuando hay que subir el contenedor al registry",
+            "steps": [{"do": "autenticarse", "run": "docker login -u cuba -p ghp_abcdefghijklmnop"}]
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "receta add answered Ok on a pool that cannot connect: nothing but the secret \
+                 gate could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token"),
+            "a procedure is a list of commands to paste, so the credential lands inside `run` \
+             far more often than in the prose around it. Scanning only the top-level strings \
+             would leave the likeliest field open. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_recipe_full_of_shell_is_not_mistaken_for_a_credential() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = json!({
+            "action": "add",
+            "name": "levantar el entorno de desarrollo",
+            "trigger": "cuando hay que correr los tests de integración",
+            "preconditions": "el secret del webhook ya está cargado en el entorno",
+            "verification": "el healthcheck responde 200 y no pide password",
+            "steps": [
+                {"do": "levantar Postgres", "run": "docker compose up -d db", "expect": "healthy"},
+                {"do": "exportar la contraseña desde el entorno", "run": "export PGPASSWORD=$PGPASS"},
+                {"do": "migrar", "run": "cargo sqlx migrate run", "expect": "0 errores"}
+            ]
+        });
+
+        let chain = format!(
+            "{:#}",
+            handle(&pool, args)
+                .await
+                .expect_err("the pool cannot connect, so this call always ends in an error")
+        );
+        assert!(
+            !chain.contains("Remove it and store a pointer"),
+            "recipes are made of shell: docker commands, a password read from the environment, \
+             prose that names a secret. Refusing this one would make the tool unusable for what \
+             it exists to store, and the agent would go back to rediscovering the procedure \
+             every session. Got: {chain}"
+        );
     }
 }

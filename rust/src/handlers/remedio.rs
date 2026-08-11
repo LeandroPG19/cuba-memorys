@@ -12,6 +12,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("error_id and solution are required");
     }
 
+    crate::redact::refuse_secrets(&args, "solution", solution)?;
+
     let error_id: uuid::Uuid = error_id_str.parse().context("invalid error_id UUID")?;
     let project_id = crate::project::current_project_id(pool).await?;
 
@@ -50,4 +52,71 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         "similar_unresolved": cross_refs,
         "similar_count": cross_refs.len()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://remedio-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn a_solution_that_pastes_the_credential_it_used_is_refused() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "error_id": uuid::Uuid::nil().to_string(),
+            "solution": "se arregló exportando GITHUB_TOKEN=ghp_abcdefghijklmnop antes del deploy"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "remedio answered Ok on a pool that cannot connect: nothing but the secret gate \
+                 could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("token field") && chain.contains("solution"),
+            "the credential in the solution reached the database. cuba_alarma already refuses \
+             the error half of the pair, so leaving the fix half open means the credential lands \
+             in the row the agent reads back first — the fix is what gets copied. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fix_that_merely_talks_about_a_password_is_not_a_credential() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "error_id": uuid::Uuid::nil().to_string(),
+            "solution": "el arreglo fue validar la password antes de guardarla, y rotar el token \
+                         de sesión cuando el login falla cinco veces"
+        });
+
+        let chain = format!(
+            "{:#}",
+            handle(&pool, args)
+                .await
+                .expect_err("the pool cannot connect, so this call always ends in an error")
+        );
+        assert!(
+            !chain.contains("Remove it and store a pointer"),
+            "prose about credentials is what a solution is normally made of: refusing it would \
+             lose the very fix the agent tried to record, and it would learn to stop writing \
+             solutions. The call must have died at the database instead. Got: {chain}"
+        );
+    }
 }

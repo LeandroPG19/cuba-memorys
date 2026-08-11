@@ -21,6 +21,9 @@ async fn write(pool: &PgPool, args: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("content is required"))?;
+
+    crate::redact::refuse_secrets(args, "content", content)?;
+
     let tag = args.get("tag").and_then(|v| v.as_str());
     let ttl_seconds = args
         .get("ttl_seconds")
@@ -132,4 +135,46 @@ pub async fn purge_expired(pool: &PgPool) -> Result<u64> {
         .execute(pool)
         .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://pizarra-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn a_scratchpad_note_that_carries_a_credential_is_refused_despite_its_ttl() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "write",
+            "content": "pendiente: probar el deploy con ghp_abcdefghijklmnop"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "write answered Ok on a pool that cannot connect: nothing but the secret gate \
+                 could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("content"),
+            "the scratchpad is where an agent parks whatever it is holding mid-task, which is \
+             exactly when a credential is in hand. A TTL is not a reason to skip the gate: the \
+             row is readable, dumped and backed up for as long as it lives. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
 }

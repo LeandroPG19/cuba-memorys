@@ -225,14 +225,17 @@ async fn negative(
 async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> Result<Value> {
     let obs_id_str = observation_id.context("observation_id required for correct")?;
     let obs_id: uuid::Uuid = obs_id_str.parse().context("invalid observation_id")?;
-    let project_id = crate::project::current_project_id(pool).await?;
-    if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
-        anyhow::bail!("observation not in current project scope");
-    }
     let correction = args
         .get("correction")
         .and_then(|v| v.as_str())
         .context("correction text is required")?;
+
+    crate::redact::refuse_secrets(args, "correction", correction)?;
+
+    let project_id = crate::project::current_project_id(pool).await?;
+    if !crate::project::observation_in_scope(pool, obs_id, project_id).await? {
+        anyhow::bail!("observation not in current project scope");
+    }
 
     let result = sqlx::query(
         "UPDATE brain_observations SET
@@ -305,4 +308,47 @@ pub async fn reflect(pool: &PgPool, session_id: uuid::Uuid) -> Result<String> {
         }
     }
     Ok(md)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://eco-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn correcting_an_observation_cannot_smuggle_in_what_writing_it_would_have_refused() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "correct",
+            "observation_id": uuid::Uuid::nil().to_string(),
+            "correction": "en realidad la cabecera era ghp_abcdefghijklmnop"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "correct answered Ok on a pool that cannot connect: nothing but the secret gate \
+                 could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("correction"),
+            "correct overwrites the content of an already-stored observation, so an ungated \
+             correction is a way to put into the graph exactly what cuba_cronica add refuses to \
+             accept — a hole underneath an existing guard. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
 }

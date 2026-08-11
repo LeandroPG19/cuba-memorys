@@ -47,6 +47,8 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         anyhow::bail!("message is required");
     }
 
+    crate::redact::refuse_secrets(args, "message", message)?;
+
     let valid_conditions = ["on_access", "on_session_start", "on_error_match"];
     if !valid_conditions.contains(&condition_type) {
         anyhow::bail!(
@@ -219,4 +221,48 @@ pub async fn check_triggers(
     }
 
     Ok(fired)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://centinela-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn a_reminder_that_carries_a_credential_is_refused_before_it_can_fire() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "create",
+            "entity_pattern": "deploy",
+            "condition_type": "on_access",
+            "message": "acordate de rotar ghp_abcdefghijklmnop"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "create answered Ok on a pool that cannot connect: nothing but the secret gate \
+                 could have answered, and the gate must refuse"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("message"),
+            "a trigger message is not stored and forgotten: it is pushed unprompted into the \
+             response of whatever touches the matching entity, so a credential here reaches \
+             clients that never searched for it. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
 }

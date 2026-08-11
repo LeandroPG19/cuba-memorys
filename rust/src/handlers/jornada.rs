@@ -13,6 +13,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or("unnamed");
             let goals = args.get("goals").cloned().unwrap_or(Value::Array(vec![]));
 
+            crate::redact::refuse_secrets(&args, "name", name)?;
+            crate::redact::refuse_secrets(
+                &args,
+                "goals",
+                &serde_json::to_string_pretty(&goals).unwrap_or_default(),
+            )?;
+
             let project_arg = args.get("project").and_then(|v| v.as_str());
             let project_id = match project_arg {
                 Some(p) if !p.is_empty() => Some(crate::project::upsert_project(pool, p).await?),
@@ -77,6 +84,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("success");
             let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+
+            crate::redact::refuse_secrets(&args, "summary", summary)?;
 
             let Some(own_session) = crate::session::session_id() else {
                 return Ok(serde_json::json!({
@@ -217,5 +226,105 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(serde_json::json!({"action": "list", "sessions": list, "count": list.len()}))
         }
         _ => anyhow::bail!("Invalid action: {action}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://jornada-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_with_a_credential_in_the_summary_is_refused() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "end",
+            "outcome": "success",
+            "summary": "quedó desplegado usando ghp_abcdefghijklmnop"
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "end answered Ok without a live session, which is the path that returns before \
+                 touching the database: the gate has to run before that shortcut, or a summary \
+                 written by a process with no session of its own escapes it"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("github token") && chain.contains("summary"),
+            "the end-of-session summary is read back verbatim at the start of the next session \
+             as previous_session.summary, so a credential stored here is re-served to the next \
+             agent without anyone asking for it. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret, and refusals get logged: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_goal_that_carries_a_credential_is_refused_at_the_start_of_the_session() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "start",
+            "name": "deploy",
+            "goals": ["rotar la clave del bucket", "ghp_abcdefghijklmnop"]
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!(
+                "start persists goals into brain_sessions and they are read back by every later \
+                 session, so the gate belongs here too. It also has to run before upsert_project, \
+                 or a write that is going to be refused creates a project row on its way out"
+            );
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains("goals"),
+            "goals is a JSON array, so it only reaches the scanner if it is serialised first — \
+             and pretty-printed, because a compact array hides its strings from a scanner that \
+             works on text. Got: {chain}"
+        );
+        assert!(
+            !chain.contains("ghp_abcdefghijklmnop"),
+            "the refusal repeated the secret: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_named_after_the_work_is_not_refused() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "start",
+            "name": "rotación de credenciales y endurecimiento del login",
+            "goals": ["revisar que ninguna password quede en los logs", "subir el rate limit"]
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!("this pool cannot connect, so reaching the database is the pass condition")
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            !chain.contains("refusing to write"),
+            "naming a credential is not carrying one. A gate that refuses the words operators \
+             actually use to describe security work gets switched off, and then it protects \
+             nothing. Got: {chain}"
+        );
     }
 }
