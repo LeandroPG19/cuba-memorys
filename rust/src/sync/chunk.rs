@@ -4,6 +4,8 @@ use uuid::Uuid;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+pub const MAX_EMBEDDING_DIM: usize = 16_000;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Manifest {
     pub schema_version: u32,
@@ -103,11 +105,15 @@ fn default_provenance() -> String {
     "extracted".to_string()
 }
 
-pub fn payload_hash(s: &str) -> String {
+pub fn payload_hash_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(s.as_bytes());
+    h.update(bytes);
     format!("{:x}", h.finalize())
+}
+
+pub fn payload_hash(s: &str) -> String {
+    payload_hash_bytes(s.as_bytes())
 }
 
 #[cfg(test)]

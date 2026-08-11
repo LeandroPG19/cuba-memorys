@@ -3,12 +3,12 @@ use chrono::Utc;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::sync::chunk::{
-    Counts, EntityFile, EpisodeFile, ErrorFile, Manifest, ObservationRow, ProjectRow, RelationRow,
-    SCHEMA_VERSION, payload_hash,
+    Counts, EntityFile, EpisodeFile, ErrorFile, MAX_EMBEDDING_DIM, Manifest, ObservationRow,
+    ProjectRow, RelationRow, SCHEMA_VERSION, payload_hash, payload_hash_bytes,
 };
 use crate::sync::paths::{ensure_within, resolve_dir, slug};
 
@@ -37,7 +37,31 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
-fn prune_stale_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> Result<()> {
+#[derive(Clone, Copy)]
+enum PruneScope {
+    Everything,
+    Project(Uuid),
+}
+
+impl PruneScope {
+    fn may_delete(self, path: &Path) -> bool {
+        match self {
+            PruneScope::Everything => true,
+            PruneScope::Project(exported) => declared_project_id(path) == Some(exported),
+        }
+    }
+}
+
+fn declared_project_id(path: &Path) -> Option<Uuid> {
+    let bytes = std::fs::read(path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("project_id")?
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+fn prune_stale_files(dir: &Path, keep: &HashSet<PathBuf>, scope: PruneScope) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -46,14 +70,14 @@ fn prune_stale_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> Result<(
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        if !keep.contains(&path) {
+        if !keep.contains(&path) && scope.may_delete(&path) {
             std::fs::remove_file(&path).with_context(|| format!("prune stale file {path:?}"))?;
         }
     }
     Ok(())
 }
 
-fn prune_stale_episode_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> Result<()> {
+fn prune_stale_episode_files(dir: &Path, keep: &HashSet<PathBuf>, scope: PruneScope) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -67,13 +91,70 @@ fn prune_stale_episode_files(dir: &std::path::Path, keep: &HashSet<PathBuf>) -> 
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            if !keep.contains(&path) {
+            if !keep.contains(&path) && scope.may_delete(&path) {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("prune stale episode file {path:?}"))?;
             }
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct BundleDigest {
+    entries: Vec<(String, String)>,
+}
+
+impl BundleDigest {
+    fn record(&mut self, root: &Path, path: &Path, bytes: &[u8]) {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        self.entries.push((relative, payload_hash_bytes(bytes)));
+    }
+
+    fn finish(mut self, project_id: Option<Uuid>) -> String {
+        self.entries.sort();
+        let mut acc = format!(
+            "{SCHEMA_VERSION}\n{}\n",
+            project_id.map(|p| p.to_string()).unwrap_or_default()
+        );
+        for (relative, hash) in &self.entries {
+            acc.push_str(relative);
+            acc.push(' ');
+            acc.push_str(hash);
+            acc.push('\n');
+        }
+        payload_hash(&acc)
+    }
+}
+
+fn write_bundle_file(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    digest: &mut BundleDigest,
+) -> Result<()> {
+    ensure_within(root, path)?;
+    std::fs::write(path, bytes).with_context(|| format!("write bundle file {path:?}"))?;
+    digest.record(root, path, bytes);
+    Ok(())
+}
+
+fn embedding_record_size(dim: usize) -> Option<usize> {
+    if dim == 0 || dim > MAX_EMBEDDING_DIM {
+        return None;
+    }
+    dim.checked_mul(4)?.checked_add(16)
+}
+
+fn trust_for_imported(content: &str) -> (&'static str, Option<&'static str>) {
+    match crate::redact::looks_like_secret(content) {
+        Some(pattern) => (crate::core::trust::QUARANTINED, Some(pattern)),
+        None => (crate::core::trust::TRUSTED, None),
+    }
 }
 
 async fn export(
@@ -129,6 +210,12 @@ async fn export(
     .bind(project_id)
     .fetch_all(pool)
     .await?;
+
+    let prune_scope = match project_id {
+        Some(pid) => PruneScope::Project(pid),
+        None => PruneScope::Everything,
+    };
+    let mut digest = BundleDigest::default();
 
     let entities_dir = root.join("entities");
     std::fs::create_dir_all(&entities_dir).context("mkdir entities/")?;
@@ -214,13 +301,16 @@ async fn export(
         };
         let basename = format!("{}-{}.json", slug(&name), &id.to_string()[..8]);
         let path = entities_dir.join(&basename);
-        ensure_within(&root, &path)?;
-        std::fs::write(&path, serde_json::to_vec_pretty(&file)?)
-            .with_context(|| format!("write entity {basename}"))?;
+        write_bundle_file(
+            &root,
+            &path,
+            &serde_json::to_vec_pretty(&file)?,
+            &mut digest,
+        )?;
         entity_paths.insert(path);
         entity_files += 1;
     }
-    prune_stale_files(&entities_dir, &entity_paths)?;
+    prune_stale_files(&entities_dir, &entity_paths, prune_scope)?;
 
     type EpCols = (
         Uuid,
@@ -251,7 +341,6 @@ async fn export(
         let dir = root.join("episodes").join(&yyyymm);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", ep.0));
-        ensure_within(&root, &path)?;
         let f = EpisodeFile {
             id: ep.0,
             entity_id: ep.1,
@@ -263,11 +352,11 @@ async fn export(
             started_at: ep.7,
             ended_at: ep.8,
         };
-        std::fs::write(&path, serde_json::to_vec_pretty(&f)?)?;
+        write_bundle_file(&root, &path, &serde_json::to_vec_pretty(&f)?, &mut digest)?;
         episode_paths.insert(path);
         episode_count += 1;
     }
-    prune_stale_episode_files(&root.join("episodes"), &episode_paths)?;
+    prune_stale_episode_files(&root.join("episodes"), &episode_paths, prune_scope)?;
 
     type ErrCols = (
         Uuid,
@@ -295,7 +384,6 @@ async fn export(
     let mut error_paths: HashSet<PathBuf> = HashSet::new();
     for e in error_rows {
         let path = errors_dir.join(format!("{}.json", e.0));
-        ensure_within(&root, &path)?;
         let f = ErrorFile {
             id: e.0,
             error_type: e.1,
@@ -306,14 +394,14 @@ async fn export(
             project_id: e.6,
             created_at: e.7,
         };
-        std::fs::write(&path, serde_json::to_vec_pretty(&f)?)?;
+        write_bundle_file(&root, &path, &serde_json::to_vec_pretty(&f)?, &mut digest)?;
         error_paths.insert(path);
         err_count += 1;
     }
-    prune_stale_files(&errors_dir, &error_paths)?;
+    prune_stale_files(&errors_dir, &error_paths, prune_scope)?;
 
-    let decisions: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, content FROM brain_observations
+    let decisions: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, content, project_id FROM brain_observations
          WHERE observation_type = 'decision'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
          ORDER BY created_at",
@@ -326,15 +414,23 @@ async fn export(
     std::fs::create_dir_all(&dec_dir)?;
     let mut dec_count = 0u32;
     let mut decision_paths: HashSet<PathBuf> = HashSet::new();
-    for (id, content) in &decisions {
+    for (id, content, owner) in &decisions {
         let path = dec_dir.join(format!("{id}.json"));
-        ensure_within(&root, &path)?;
-        let body = serde_json::json!({"id": id.to_string(), "content": content});
-        std::fs::write(&path, serde_json::to_vec_pretty(&body)?)?;
+        let body = serde_json::json!({
+            "id": id.to_string(),
+            "content": content,
+            "project_id": owner.map(|p| p.to_string()),
+        });
+        write_bundle_file(
+            &root,
+            &path,
+            &serde_json::to_vec_pretty(&body)?,
+            &mut digest,
+        )?;
         decision_paths.insert(path);
         dec_count += 1;
     }
-    prune_stale_files(&dec_dir, &decision_paths)?;
+    prune_stale_files(&dec_dir, &decision_paths, prune_scope)?;
 
     let relation_rows: Vec<RelationRow> = sqlx::query_as::<
         _,
@@ -373,18 +469,25 @@ async fn export(
     })
     .collect();
     let rel_count = relation_rows.len() as u32;
-    std::fs::write(
-        root.join("relations.json"),
-        serde_json::to_vec_pretty(&relation_rows)?,
+    write_bundle_file(
+        &root,
+        &root.join("relations.json"),
+        &serde_json::to_vec_pretty(&relation_rows)?,
+        &mut digest,
     )?;
-    std::fs::write(
-        root.join("projects.json"),
-        serde_json::to_vec_pretty(&projects)?,
+    write_bundle_file(
+        &root,
+        &root.join("projects.json"),
+        &serde_json::to_vec_pretty(&projects)?,
+        &mut digest,
     )?;
 
     if with_embeddings && !emb_blob.is_empty() {
         let compressed = crate::sync::compressor::compress(&emb_blob)?;
-        std::fs::write(root.join("embeddings.bin.zst"), compressed)?;
+        let blob_path = root.join("embeddings.bin.zst");
+        ensure_within(&root, &blob_path)?;
+        std::fs::write(&blob_path, compressed)?;
+        digest.record(&root, &blob_path, &emb_blob);
     }
 
     let counts = Counts {
@@ -395,14 +498,9 @@ async fn export(
         errors: err_count,
         relations: rel_count,
     };
-    let payload_for_hash = serde_json::json!({
-        "schema_version": SCHEMA_VERSION,
-        "project_id": project_id,
-        "counts": &counts,
-    });
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
-        manifest_hash: payload_hash(&payload_for_hash.to_string()),
+        manifest_hash: digest.finish(project_id),
         project_id,
         project_name,
         exported_at: Utc::now(),
@@ -473,6 +571,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     let mut tx = pool.begin().await?;
     let mut inserted = 0u32;
+    let mut quarantined = 0u32;
+    let mut quarantine_reasons: HashMap<&'static str, u32> = HashMap::new();
 
     let projects_path = root.join("projects.json");
     if projects_path.exists() {
@@ -529,18 +629,20 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             inserted += r.rows_affected() as u32;
 
             for obs in &file.observations {
+                let (trust, reason) = trust_for_imported(&obs.content);
                 let r = sqlx::query(&format!(
                     "INSERT INTO brain_observations
                         (id, entity_id, content, observation_type, source, importance,
-                         tags, session_id, project_id, embedding_model, created_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                         tags, session_id, project_id, embedding_model, created_at, trust)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                      ON CONFLICT (id) DO {}",
                     if overwrite {
                         "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
                          observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
                          importance = EXCLUDED.importance, tags = EXCLUDED.tags, \
                          session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
-                         embedding_model = EXCLUDED.embedding_model, created_at = EXCLUDED.created_at"
+                         embedding_model = EXCLUDED.embedding_model, \
+                         created_at = EXCLUDED.created_at, trust = EXCLUDED.trust"
                     } else {
                         "NOTHING"
                     }
@@ -556,9 +658,14 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 .bind(obs.project_id)
                 .bind(&obs.embedding_model)
                 .bind(obs.created_at)
+                .bind(trust)
                 .execute(&mut *tx)
                 .await?;
                 inserted += r.rows_affected() as u32;
+                if let Some(pattern) = reason.filter(|_| r.rows_affected() > 0) {
+                    quarantined += 1;
+                    *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+                }
             }
         }
     }
@@ -682,20 +789,15 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
     if manifest.with_embeddings && blob_path.exists() {
         let compressed = std::fs::read(&blob_path)?;
         let raw = crate::sync::compressor::decompress(&compressed)?;
-        let dim = manifest.embedding_dim.unwrap_or(384);
-        let rec_size = 16 + dim * 4;
-        if rec_size == 16 || raw.len() % rec_size != 0 {
-            tracing::warn!(
-                "embeddings blob length {} not a multiple of {} (dim {}) — skipping",
-                raw.len(),
-                rec_size,
-                dim
-            );
-        } else {
+        let dim = manifest
+            .embedding_dim
+            .unwrap_or(crate::embeddings::onnx::EMBEDDING_DIM);
+        let rec_size = embedding_record_size(dim).filter(|size| raw.len() % size == 0);
+        if let Some(rec_size) = rec_size {
             for chunk in raw.chunks_exact(rec_size) {
                 let id_bytes: [u8; 16] = chunk[..16]
                     .try_into()
-                    .expect("chunks_exact guarantees rec_size > 16 bytes");
+                    .expect("embedding_record_size rejects any dim whose record is not longer than the 16-byte uuid");
                 let id = Uuid::from_bytes(id_bytes);
                 let mut floats = Vec::with_capacity(dim);
                 for f_chunk in chunk[16..].chunks_exact(4) {
@@ -714,6 +816,12 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 .await?;
                 embeddings_restored += r.rows_affected() as u32;
             }
+        } else {
+            tracing::warn!(
+                "embeddings blob of {} bytes declares dim {} — skipping",
+                raw.len(),
+                dim
+            );
         }
     }
 
@@ -730,11 +838,22 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     tx.commit().await?;
 
+    let quarantine_note = (quarantined > 0).then(|| {
+        format!(
+            "{quarantined} imported observations look like they carry a credential and were \
+             written with trust=quarantined: they are withheld from cuba_faro until you read \
+             them with cuba_eco action=pending and accept them with cuba_eco action=promote"
+        )
+    });
+
     Ok(serde_json::json!({
         "action": "import",
         "manifest_hash": manifest.manifest_hash,
         "rows_inserted": inserted,
         "embeddings_restored": embeddings_restored,
+        "quarantined": quarantined,
+        "quarantine_reasons": quarantine_reasons,
+        "quarantine_note": quarantine_note,
         "from": root.display().to_string(),
     }))
 }
@@ -833,4 +952,272 @@ async fn status(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
         "pending_import": pending,
         "recent_imports": imported_json,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cuba-sync-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("the test needs a scratch directory");
+        dir
+    }
+
+    fn write_json(dir: &Path, name: &str, body: Value) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&body).expect("a Value serialises"),
+        )
+        .expect("writing the fixture");
+        path
+    }
+
+    #[test]
+    fn a_project_scoped_export_never_prunes_a_file_owned_by_another_project() {
+        let dir = scratch("prune-other-project");
+        let mine = Uuid::new_v4();
+        let theirs = Uuid::new_v4();
+
+        let kept = write_json(
+            &dir,
+            "mine-kept.json",
+            serde_json::json!({"project_id": mine}),
+        );
+        let stale = write_json(
+            &dir,
+            "mine-stale.json",
+            serde_json::json!({"project_id": mine}),
+        );
+        let other = write_json(
+            &dir,
+            "theirs.json",
+            serde_json::json!({"project_id": theirs}),
+        );
+        let global = write_json(&dir, "global.json", serde_json::json!({"project_id": null}));
+
+        let keep: HashSet<PathBuf> = [kept.clone()].into_iter().collect();
+        prune_stale_files(&dir, &keep, PruneScope::Project(mine)).expect("pruning must not fail");
+
+        assert!(kept.exists(), "a file this export just wrote must survive");
+        assert!(
+            !stale.exists(),
+            "a file of the exported project that the export no longer produced is genuinely \
+             stale and pruning it is the whole point of the function"
+        );
+        assert!(
+            other.exists(),
+            "scope=project is the DEFAULT of cuba_sync export, and the keep set only ever holds \
+             this project's files: deleting another project's export left the user with nothing \
+             but whatever git happened to have committed"
+        );
+        assert!(
+            global.exists(),
+            "an entity with project_id NULL is shared by every project; a single project's \
+             export has no standing to delete it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_full_export_still_owns_and_prunes_the_whole_directory() {
+        let dir = scratch("prune-everything");
+        let kept = write_json(&dir, "kept.json", serde_json::json!({"project_id": null}));
+        let stale = write_json(
+            &dir,
+            "stale.json",
+            serde_json::json!({"project_id": Uuid::new_v4()}),
+        );
+        let opaque = dir.join("opaque.json");
+        std::fs::write(&opaque, b"not json at all").expect("writing the fixture");
+
+        let keep: HashSet<PathBuf> = [kept.clone()].into_iter().collect();
+        prune_stale_files(&dir, &keep, PruneScope::Everything).expect("pruning must not fail");
+
+        assert!(kept.exists());
+        assert!(
+            !stale.exists() && !opaque.exists(),
+            "scope=all exports every row there is, so anything left over really was deleted from \
+             the graph — narrowing this case would turn the export directory into an attic"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_does_not_declare_its_project_is_left_alone_by_a_project_export() {
+        let dir = scratch("prune-unattributable");
+        let legacy = write_json(&dir, "legacy.json", serde_json::json!({"id": "x"}));
+        let corrupt = dir.join("corrupt.json");
+        std::fs::write(&corrupt, b"{ truncated").expect("writing the fixture");
+
+        prune_stale_files(&dir, &HashSet::new(), PruneScope::Project(Uuid::new_v4()))
+            .expect("pruning must not fail");
+
+        assert!(
+            legacy.exists() && corrupt.exists(),
+            "deletion needs positive evidence of ownership: a file written by an older version, \
+             or one the user is mid-edit on, must not be destroyed because it failed to parse"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn episode_pruning_is_scoped_the_same_way_as_every_other_directory() {
+        let dir = scratch("prune-episodes");
+        let month = dir.join("2026-08");
+        std::fs::create_dir_all(&month).expect("the test needs the month directory");
+        let mine = Uuid::new_v4();
+        let stale = write_json(&month, "mine.json", serde_json::json!({"project_id": mine}));
+        let other = write_json(
+            &month,
+            "theirs.json",
+            serde_json::json!({"project_id": Uuid::new_v4()}),
+        );
+
+        prune_stale_episode_files(&dir, &HashSet::new(), PruneScope::Project(mine))
+            .expect("pruning must not fail");
+
+        assert!(!stale.exists());
+        assert!(
+            other.exists(),
+            "episodes live one directory deeper but the ownership rule is identical: a project \
+             export deletes only what it produced"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn two_bundles_with_the_same_file_names_but_different_content_hash_differently() {
+        let root = Path::new("/bundle");
+        let project = Some(Uuid::new_v4());
+
+        let mut before = BundleDigest::default();
+        before.record(
+            root,
+            &root.join("entities/a.json"),
+            b"{\"content\":\"original\"}",
+        );
+        before.record(root, &root.join("relations.json"), b"[]");
+
+        let mut after = BundleDigest::default();
+        after.record(
+            root,
+            &root.join("entities/a.json"),
+            b"{\"content\":\"edited\"}",
+        );
+        after.record(root, &root.join("relations.json"), b"[]");
+
+        assert_ne!(
+            before.finish(project),
+            after.finish(project),
+            "the hash used to cover only the row COUNTS, so hand-editing a .json — the \
+             git-friendly workflow the README sells — kept the same hash and the import on the \
+             other machine answered skipped:true and discarded the edit in silence"
+        );
+    }
+
+    #[test]
+    fn the_bundle_hash_does_not_depend_on_the_order_the_files_were_written() {
+        let root = Path::new("/bundle");
+        let project = Some(Uuid::new_v4());
+
+        let mut one = BundleDigest::default();
+        one.record(root, &root.join("entities/a.json"), b"a");
+        one.record(root, &root.join("entities/b.json"), b"b");
+
+        let mut other = BundleDigest::default();
+        other.record(root, &root.join("entities/b.json"), b"b");
+        other.record(root, &root.join("entities/a.json"), b"a");
+
+        assert_eq!(
+            one.finish(project),
+            other.finish(project),
+            "row order comes out of Postgres and directory order comes out of the filesystem: if \
+             either leaked into the hash, the same bundle would look new on every machine and \
+             the already-imported check would never fire"
+        );
+    }
+
+    #[test]
+    fn the_bundle_hash_still_separates_a_project_export_from_a_full_one() {
+        let root = Path::new("/bundle");
+        let mut project_scoped = BundleDigest::default();
+        project_scoped.record(root, &root.join("projects.json"), b"[]");
+        let mut full = BundleDigest::default();
+        full.record(root, &root.join("projects.json"), b"[]");
+
+        assert_ne!(
+            project_scoped.finish(Some(Uuid::new_v4())),
+            full.finish(None),
+            "two exports of identical files still describe different slices of the graph"
+        );
+    }
+
+    #[test]
+    fn a_hostile_embedding_dim_can_never_produce_a_record_shorter_than_the_uuid_it_starts_with() {
+        const HOSTILE: usize = 4611686018427387903;
+
+        assert_eq!(
+            16usize.wrapping_add(HOSTILE.wrapping_mul(4)),
+            12,
+            "this is the arithmetic the import used to do on a manifest.json that arrives \
+             through a shared git repo: a 12-byte record passed the `rec_size == 16` guard, and \
+             then chunk[..16] panicked on a 12-byte slice"
+        );
+        assert_eq!(embedding_record_size(HOSTILE), None);
+        assert_eq!(embedding_record_size(usize::MAX), None);
+        assert_eq!(
+            embedding_record_size(0),
+            None,
+            "dim 0 is the case the old `rec_size == 16` guard did catch, and it must stay caught"
+        );
+        assert_eq!(
+            embedding_record_size(MAX_EMBEDDING_DIM + 1),
+            None,
+            "pgvector cannot store more than {MAX_EMBEDDING_DIM} dimensions, so a larger dim is \
+             never a real export"
+        );
+
+        assert_eq!(embedding_record_size(384), Some(1552));
+        assert_eq!(embedding_record_size(1024), Some(4112));
+        for dim in [1, 2, 384, 1024, MAX_EMBEDDING_DIM] {
+            let size = embedding_record_size(dim).expect("a real dimension is accepted");
+            assert!(
+                size > 16,
+                "the expect() in the import reads chunk[..16] and states that records are longer \
+                 than a uuid; dim {dim} produced {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_imported_observation_that_carries_a_credential_is_quarantined_instead_of_dropped() {
+        let (trust, reason) = trust_for_imported("el deploy usa ghp_abcdefghijklmnop");
+        assert_eq!(
+            trust,
+            crate::core::trust::QUARANTINED,
+            "cuba_sync import reads JSON out of a repository anyone with push can write to, and \
+             a git pull followed by an import puts it in the graph with nobody reading it"
+        );
+        assert_eq!(
+            reason,
+            Some("github token"),
+            "the import has to report WHY a row was held back, or the user cannot judge whether \
+             to promote it"
+        );
+
+        let (trust, reason) = trust_for_imported("el bug era que la password no se validaba");
+        assert_eq!(
+            trust,
+            crate::core::trust::TRUSTED,
+            "prose about credentials is not a credential; quarantining it would hide the ordinary \
+             content of an import behind a review queue"
+        );
+        assert_eq!(reason, None);
+    }
 }
