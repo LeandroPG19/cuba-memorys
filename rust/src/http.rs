@@ -20,6 +20,8 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:8787";
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
+const MAX_BATCH_ITEMS: usize = 256;
+
 const CLIENT_TTL: Duration = Duration::from_secs(24 * 3600);
 const REAP_INTERVAL: Duration = Duration::from_secs(3600);
 
@@ -84,6 +86,19 @@ fn ensure_loopback(addr: &SocketAddr) -> Result<()> {
     )
 }
 
+fn ensure_adopted_loopback(addr: &SocketAddr) -> Result<()> {
+    if addr.ip().is_loopback() || auth_token().is_some() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing the socket systemd handed over on {addr}: it is not loopback and \
+         CUBA_HTTP_TOKEN is unset, so the whole brain would be readable and writable \
+         from every interface. With socket activation the .socket unit picks the \
+         address and CUBA_HTTP_ADDR is ignored — set ListenStream=127.0.0.1:8787 in \
+         cuba-memorys.socket, or set CUBA_HTTP_TOKEN in the service unit"
+    )
+}
+
 pub async fn serve(addr: &str) -> Result<()> {
     let addr: SocketAddr = addr
         .parse()
@@ -138,8 +153,14 @@ pub async fn serve(addr: &str) -> Result<()> {
         .with_state(state);
 
     let listener = match systemd_listener() {
-        Some(std_listener) => tokio::net::TcpListener::from_std(std_listener)
-            .context("failed to adopt systemd-activated socket")?,
+        Some(std_listener) => {
+            let adopted = std_listener
+                .local_addr()
+                .context("cannot read the address of the systemd-activated socket")?;
+            ensure_adopted_loopback(&adopted)?;
+            tokio::net::TcpListener::from_std(std_listener)
+                .context("failed to adopt systemd-activated socket")?
+        }
         None => tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("cannot bind {addr} — is another daemon already running?"))?,
@@ -331,6 +352,26 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+fn request_deadline() -> Duration {
+    protocol::handler_timeout() * 4
+}
+
+fn batch_items(payload: Value) -> Result<(Vec<Value>, bool), Value> {
+    match payload {
+        Value::Array(items) if items.len() > MAX_BATCH_ITEMS => Err(error_envelope(
+            Value::Null,
+            -32600,
+            format!(
+                "batch carries {} requests; this daemon dispatches at most {MAX_BATCH_ITEMS} \
+                 per POST. Split it — a truncated batch would look answered",
+                items.len()
+            ),
+        )),
+        Value::Array(items) => Ok((items, true)),
+        single => Ok((vec![single], false)),
+    }
+}
+
 fn error_envelope(id: Value, code: i64, message: impl Into<String>) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -371,22 +412,47 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         *guard = Instant::now();
     }
 
-    let batch = payload.as_array().cloned();
-    let items = batch.clone().unwrap_or_else(|| vec![payload]);
-
-    let mut responses: Vec<Value> = Vec::with_capacity(items.len());
-    for item in items {
-        state.served.fetch_add(1, Ordering::Relaxed);
-        if let Some(reply) = dispatch_one(&state, &key, item).await {
-            responses.push(reply);
+    let (items, is_batch) = match batch_items(payload) {
+        Ok(split) => split,
+        Err(envelope) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(envelope)).into_response();
         }
-    }
+    };
+
+    let dispatch = async {
+        let mut responses: Vec<Value> = Vec::with_capacity(items.len());
+        for item in items {
+            state.served.fetch_add(1, Ordering::Relaxed);
+            if let Some(reply) = dispatch_one(&state, &key, item).await {
+                responses.push(reply);
+            }
+        }
+        responses
+    };
+
+    let deadline = request_deadline();
+    let Ok(mut responses) = tokio::time::timeout(deadline, dispatch).await else {
+        tracing::warn!(client = %key, secs = deadline.as_secs(), "request hit the deadline");
+        return (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(error_envelope(
+                Value::Null,
+                -32000,
+                format!(
+                    "the request was still running after {}s and was dropped; \
+                     each call already has its own timeout, this bounds the whole POST",
+                    deadline.as_secs()
+                ),
+            )),
+        )
+            .into_response();
+    };
 
     if responses.is_empty() {
         return StatusCode::ACCEPTED.into_response();
     }
 
-    if batch.is_some() {
+    if is_batch {
         axum::Json(Value::Array(responses)).into_response()
     } else {
         axum::Json(responses.remove(0)).into_response()
@@ -535,6 +601,117 @@ mod tests {
 
         let local: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         assert!(ensure_loopback(&local).is_ok());
+    }
+
+    #[test]
+    fn a_systemd_socket_open_to_every_interface_is_refused_even_when_the_argument_was_loopback() {
+        let from_argument: SocketAddr = DEFAULT_ADDR.parse().unwrap();
+        assert!(
+            ensure_loopback(&from_argument).is_ok(),
+            "the address serve() validates is the default one, which is why the .socket \
+             unit slipped past: fd 3 never went through this check"
+        );
+
+        let adopted: SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        let refusal = ensure_adopted_loopback(&adopted).expect_err(
+            "ListenStream=0.0.0.0:8787 with no CUBA_HTTP_TOKEN publishes the whole brain \
+             unauthenticated, and CUBA_HTTP_ADDR cannot take it back",
+        );
+        let text = format!("{refusal:#}");
+        assert!(
+            text.contains("ListenStream"),
+            "the operator has to be told the fix lives in the .socket unit, not in the \
+             environment they were staring at: {text}"
+        );
+    }
+
+    #[test]
+    fn a_systemd_socket_on_loopback_is_adopted() {
+        let adopted: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(
+            ensure_adopted_loopback(&adopted).is_ok(),
+            "the shipped unit binds loopback; refusing it would break socket activation \
+             for everyone who configured it correctly"
+        );
+    }
+
+    fn ping(id: u64) -> Value {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": "ping" })
+    }
+
+    async fn post_mcp(payload: Value) -> (StatusCode, Value) {
+        let body = Bytes::from(serde_json::to_vec(&payload).expect("payload serializes"));
+        let response =
+            mcp_endpoint(State(state_with_clients(None, &[])), HeaderMap::new(), body).await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .expect("response body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_batch_past_the_limit_is_refused_whole_instead_of_dispatched() {
+        let items: Vec<Value> = (0..=MAX_BATCH_ITEMS as u64).map(ping).collect();
+
+        let (status, body) = post_mcp(Value::Array(items)).await;
+
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "an 8 MiB body holds ~4,19 million two-byte entries, so an unbounded batch \
+             is a free way to pin a worker; it answered {} of them instead",
+            body.as_array().map(Vec::len).unwrap_or_default()
+        );
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&(MAX_BATCH_ITEMS + 1).to_string()),
+            "the refusal has to name the size that was sent or the client cannot tell \
+             how far over it went: {body}"
+        );
+        assert!(
+            body.get("result").is_none() && !body.is_array(),
+            "silently answering the first 256 would read as a complete batch: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_at_the_limit_is_dispatched_in_full() {
+        let items: Vec<Value> = (0..MAX_BATCH_ITEMS as u64).map(ping).collect();
+
+        let (status, body) = post_mcp(Value::Array(items)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.as_array().map(Vec::len),
+            Some(MAX_BATCH_ITEMS),
+            "the cap is the largest batch that still works, not the first one refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lone_request_is_answered_with_an_object_not_a_one_element_array() {
+        let (status, body) = post_mcp(ping(7)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.is_object(),
+            "JSON-RPC says a single request gets a single response; wrapping it in an \
+             array breaks every client that does not unwrap: {body}"
+        );
+        assert_eq!(body["id"], 7);
+    }
+
+    #[test]
+    fn the_whole_request_deadline_leaves_room_for_a_full_handler_timeout() {
+        assert!(
+            request_deadline() > protocol::handler_timeout(),
+            "the POST budget must exceed one call's budget, or a single tools/call that \
+             uses its allowance dies of the request deadline instead"
+        );
     }
 
     #[tokio::test]

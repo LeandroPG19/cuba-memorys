@@ -51,14 +51,38 @@ pub fn client_config(public_url: &str, token: &str) -> String {
     serde_json::to_string_pretty(&body).unwrap_or_default()
 }
 
-async fn daemon_is_up(addr: &str) -> bool {
-    let url = format!("http://{addr}/health");
+async fn probe_mcp(addr: &str) -> Option<reqwest::StatusCode> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
-        .build();
-    match client {
-        Ok(c) => matches!(c.get(&url).send().await, Ok(r) if r.status().is_success()),
-        Err(_) => false,
+        .build()
+        .ok()?;
+    let response = client
+        .post(format!("http://{addr}/mcp"))
+        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": "ping" }))
+        .send()
+        .await
+        .ok()?;
+    Some(response.status())
+}
+
+fn refuse_unprotected_daemon(probe: Option<reqwest::StatusCode>, addr: &str) -> Option<String> {
+    match probe {
+        Some(reqwest::StatusCode::UNAUTHORIZED) => None,
+        Some(status) => Some(format!(
+            "el daemon de http://{addr}/mcp respondió {status} a un POST sin cabecera \
+             Authorization, y tenía que responder 401.\n\n\
+             O sea que arrancó sin CUBA_HTTP_TOKEN: el bearer que este túnel imprimiría \
+             lo ignora, y cualquiera con la URL pública leería y escribiría tu memoria. \
+             Que este proceso tenga el token en su entorno no dice nada del daemon, que \
+             puede haber arrancado en otra terminal.\n\n\
+             Parálo y arrancalo con el token:\n\n  \
+             CUBA_HTTP_TOKEN=$CUBA_HTTP_TOKEN cuba-memorys serve {addr}\n"
+        )),
+        None => Some(format!(
+            "no hay daemon respondiendo en http://{addr}/mcp.\n\
+             Arrancalo primero con el mismo token:\n\n  \
+             CUBA_HTTP_TOKEN=$CUBA_HTTP_TOKEN cuba-memorys serve {addr}\n"
+        )),
     }
 }
 
@@ -108,12 +132,8 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     }
     let token = token.unwrap_or_default();
 
-    if !daemon_is_up(&addr).await {
-        anyhow::bail!(
-            "no hay daemon respondiendo en http://{addr}/health.\n\
-             Arrancalo primero con el mismo token:\n\n  \
-             CUBA_HTTP_TOKEN=$CUBA_HTTP_TOKEN cuba-memorys serve {addr}\n"
-        );
+    if let Some(refusal) = refuse_unprotected_daemon(probe_mcp(&addr).await, &addr) {
+        anyhow::bail!(refusal);
     }
 
     let mut child = tokio::process::Command::new("cloudflared")
@@ -213,6 +233,45 @@ mod tests {
              or a header parser treats specially would break the copy-paste: {a}"
         );
         assert!(a.len() >= MIN_TOKEN_CHARS);
+    }
+
+    #[test]
+    fn only_a_daemon_that_answers_401_without_a_bearer_gets_published() {
+        assert_eq!(
+            refuse_unprotected_daemon(Some(reqwest::StatusCode::UNAUTHORIZED), "127.0.0.1:8787"),
+            None,
+            "401 to an unauthenticated POST /mcp is the only proof that the daemon \
+             checks the token this CLI is about to print"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_serves_mcp_without_a_bearer_is_refused() {
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::ACCEPTED,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            let refusal = refuse_unprotected_daemon(Some(status), "127.0.0.1:8787")
+                .unwrap_or_else(|| panic!("{status} means the token is not enforced"));
+            assert!(
+                refusal.contains("sin CUBA_HTTP_TOKEN"),
+                "the token is in THIS process's environment and the daemon may have been \
+                 started in another terminal without it — the refusal has to say so: {refusal}"
+            );
+            assert!(refusal.contains(&status.to_string()), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_silent_port_is_reported_as_a_missing_daemon_not_as_a_missing_token() {
+        let refusal =
+            refuse_unprotected_daemon(None, "127.0.0.1:8787").expect("no answer is not a go-ahead");
+        assert!(
+            refusal.contains("no hay daemon"),
+            "sending someone to fix a token when nothing is listening wastes the one \
+             minute they have before giving up: {refusal}"
+        );
     }
 
     #[test]
