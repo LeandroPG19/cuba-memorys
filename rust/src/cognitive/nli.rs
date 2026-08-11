@@ -36,6 +36,13 @@ pub struct NliVerdict {
 }
 
 fn intra_threads() -> usize {
+    if let Some(n) = std::env::var("CUBA_NLI_INTRA_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
     std::thread::available_parallelism()
         .map(|n| (n.get() / 2).clamp(1, 4))
         .unwrap_or(2)
@@ -106,13 +113,8 @@ fn init(dir: &std::path::Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_intra_threads(intra_threads())
         .map_err(|e| anyhow::anyhow!("intra threads: {e}"))?
-        // Premise and hypothesis lengths vary per verdict, so the memory pattern
-        // planner would keep planning for shapes that never recur.
         .with_memory_pattern(false)
         .map_err(|e| anyhow::anyhow!("memory pattern: {e}"))?
-        // Verdicts arrive in ones, minutes apart. Spinning between ops buys
-        // latency for back-to-back inference and burns a core the rest of the
-        // time, which is the wrong trade for a judge on a laptop.
         .with_intra_op_spinning(false)
         .map_err(|e| anyhow::anyhow!("intra-op spinning: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)

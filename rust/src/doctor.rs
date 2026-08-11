@@ -156,6 +156,35 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
 
     checks.push(Check::ok("database_url", redact_url(url)));
 
+    let machine = crate::resources::probe();
+    let resource_plan = crate::resources::plan(&machine);
+    let footprint = format!(
+        "RAM {} MiB total, {} MiB disponible{} · swap {} MiB · {} núcleos ({} físicos){}",
+        machine.ram_total_mb,
+        machine.ram_available_mb,
+        machine
+            .cgroup_limit_mb
+            .map(|l| format!(", cgroup {l} MiB"))
+            .unwrap_or_default(),
+        machine.swap_total_mb,
+        machine.cores_logical,
+        machine.cores_physical,
+        machine
+            .vram_free_mb
+            .map(|v| format!(" · VRAM libre {v} MiB"))
+            .unwrap_or_default(),
+    );
+    checks.push(Check::ok("machine", footprint));
+    checks.push(match resource_plan.tier {
+        crate::resources::Tier::Minimal => Check::warn(
+            "resource_plan",
+            resource_plan.describe(),
+            "sin presupuesto para los pesos: la búsqueda cae a léxica. Subí el límite de \
+             memoria del contenedor o de la unidad de systemd para recuperar la semántica",
+        ),
+        _ => Check::ok("resource_plan", resource_plan.describe()),
+    });
+
     let t0 = Instant::now();
     match sqlx::query("SELECT 1").fetch_one(pool).await {
         Ok(_) => checks.push(Check::ok(

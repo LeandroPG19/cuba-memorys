@@ -8,9 +8,10 @@ async fn refresh_ood_cache(pool: &PgPool, project_id: Option<uuid::Uuid>) -> Res
         "SELECT embedding FROM brain_observations
          WHERE embedding IS NOT NULL AND observation_type != 'superseded'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
-         ORDER BY id LIMIT 5000",
+         ORDER BY id LIMIT $2",
     )
     .bind(project_id)
+    .bind(crate::resources::ood_fit_limit())
     .fetch_all(pool)
     .await?;
     if raw.len() < MIN_SAMPLES_FOR_OOD {

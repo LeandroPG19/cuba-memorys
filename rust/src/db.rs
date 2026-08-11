@@ -72,9 +72,6 @@ pub fn effective_io_concurrency() -> String {
         .to_string()
 }
 
-/// Shared by both pools. `after_connect` is the part that matters: every
-/// connection must land in UTC, or exponential decay and the REM cycle
-/// silently drift.
 fn pool_options() -> PgPoolOptions {
     let node_name = std::env::var("CUBA_NODE_NAME")
         .ok()
@@ -83,11 +80,8 @@ fn pool_options() -> PgPoolOptions {
         .or_else(|| std::env::var("COMPUTERNAME").ok())
         .unwrap_or_default();
 
-    // One process now answers every client (see http.rs), so the pool sizes
-    // for a handful of local MCP sessions, not one connection per editor
-    // window like the old stdio-per-client model needed.
     PgPoolOptions::new()
-        .max_connections(4)
+        .max_connections(crate::resources::db_max_connections())
         .acquire_timeout(Duration::from_secs(5))
         .idle_timeout(Duration::from_secs(600))
         .max_lifetime(Duration::from_secs(1800))
@@ -123,17 +117,6 @@ fn pool_options() -> PgPoolOptions {
                 Ok(())
             })
         })
-        // `project::current_project_id` sets `app.current_project` with
-        // `set_config(..., false)` (session-scoped, not transaction-local)
-        // through a bare `.execute(pool)` call, so the value it leaves behind
-        // outlives that single logical request on whichever physical
-        // connection the pool happened to hand it. Without this hook a
-        // connection released back to the idle queue keeps carrying a
-        // previous request's (or previous project's) GUC value into
-        // whatever unrelated request acquires it next. Resetting here on
-        // every release closes that gap: a reused connection always rejoins
-        // the pool at the same '' default `after_connect` establishes for
-        // brand-new connections, instead of leaking a stale project id.
         .after_release(|conn, _meta| {
             Box::pin(async move {
                 sqlx::query("SELECT set_config('app.current_project', '', false)")
@@ -210,26 +193,6 @@ async fn downgrade_to_app_role(admin_url: &str) -> Option<PgPool> {
     }
 }
 
-/// A pool that has not connected to anything yet.
-///
-/// `connect_lazy_with` cannot fail: it hands back a pool whose *first query*
-/// is what reaches PostgreSQL — and what reports it unreachable. That is the
-/// difference between an MCP server that cannot serve a tool call and one
-/// that never speaks the protocol at all.
-///
-/// A `database_url` that `PgConnectOptions::from_str` itself rejects (missing
-/// scheme, stray characters, ...) gets the same treatment instead of
-/// propagating that parse error: falling back to `PgConnectOptions::new()`
-/// keeps this function infallible, so a malformed URL also fails at first
-/// query instead of taking the process down before it can speak MCP.
-///
-/// `min_connections` is deliberately NOT set here. A lazy pool that insists on
-/// keeping one connection open would spend the whole session retrying a
-/// database that is not there.
-///
-/// Migrations are not run: `init_schema` needs a live connection. If
-/// PostgreSQL shows up later, the schema is whatever the last successful
-/// startup left.
 pub fn create_lazy_pool(database_url: &str) -> PgPool {
     let options = connect_options(database_url).unwrap_or_else(|_| {
         PgConnectOptions::new()
@@ -367,11 +330,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_lazy_pool_survives_a_malformed_database_url() {
-        // A syntactically invalid DATABASE_URL must not make this function
-        // fail: that would propagate out of run_mcp() and exit the process
-        // before it ever speaks the MCP protocol — the exact bug this
-        // fallback exists to avoid, just triggered by a bad string instead
-        // of an unreachable host.
         for bad_url in ["not a url", "", "://nope", "🦀🦀🦀"] {
             let pool = create_lazy_pool(bad_url);
             assert_eq!(
@@ -383,18 +341,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn released_connection_does_not_leak_app_current_project() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!(
-                "skipping released_connection_does_not_leak_app_current_project: DATABASE_URL not set"
-            );
-            return;
-        };
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL env var required for integration tests");
 
-        // max_connections(1) forces the second query below to reuse the
-        // exact physical connection the first query released, making this
-        // deterministic instead of racing the pool for which connection it
-        // hands back.
         let pool = pool_options()
             .max_connections(1)
             .connect_with(connect_options(&url).expect("valid DATABASE_URL"))

@@ -1361,9 +1361,10 @@ async fn check_ood(
            AND trust = 'trusted'
            AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
          ORDER BY id
-         LIMIT 5000",
+         LIMIT $2",
     )
     .bind(project_id)
+    .bind(crate::resources::ood_fit_limit())
     .fetch_all(pool)
     .await
     .ok()?;

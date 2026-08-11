@@ -67,12 +67,7 @@ async fn drain_background_tasks() {
     }
 }
 
-// The default is one worker per core — 12 here — on top of the intra-op pool
-// every ONNX session builds for itself. This daemon serves a handful of local
-// MCP clients and hands its real work to `spawn_blocking`, so the wide default
-// bought nothing and made the runtime and ONNX fight over the same cores.
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -83,6 +78,32 @@ async fn main() {
         )
         .init();
 
+    let machine = cuba_memorys::resources::probe();
+    let plan = cuba_memorys::resources::plan(&machine);
+    tracing::info!(
+        ram_total_mb = machine.ram_total_mb,
+        ram_available_mb = machine.ram_available_mb,
+        cgroup_limit_mb = machine.cgroup_limit_mb,
+        swap_total_mb = machine.swap_total_mb,
+        cores_logical = machine.cores_logical,
+        cores_physical = machine.cores_physical,
+        vram_free_mb = machine.vram_free_mb,
+        plan = %plan.describe(),
+        "resource plan"
+    );
+    cuba_memorys::resources::apply(&plan);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(plan.worker_threads)
+        .max_blocking_threads(plan.max_blocking_threads)
+        .enable_all()
+        .build()
+        .expect("building the tokio runtime");
+
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(String::as_str) {
         Some("eval") => {
