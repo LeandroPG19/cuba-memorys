@@ -7,50 +7,92 @@ BACKUP_DIR="${BACKUP_DIR:-$ROOT/backups}"
 KEEP_COUNT="${KEEP_COUNT:-7}"
 DATABASE_URL="${DATABASE_URL:-postgresql://cuba:memorys2026@127.0.0.1:5488/brain}"
 
+COUNTED_TABLES=(brain_observations brain_entities brain_relations brain_episodes brain_audit_log)
+
 mkdir -p "$BACKUP_DIR"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$BACKUP_DIR/brain_${STAMP}.dump"
+PART="$OUT.part"
 META="$BACKUP_DIR/brain_${STAMP}.meta.json"
 
-dump_via_docker() {
-  docker exec cuba-memorys-db pg_dump -U cuba -d brain \
-    --format=custom \
-    --no-owner \
-    --no-acl \
-    >"$OUT"
+in_container() {
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cuba-memorys-db'
 }
 
-dump_via_host() {
-  pg_dump "$DATABASE_URL" \
-    --format=custom \
-    --no-owner \
-    --no-acl \
-    --file="$OUT"
+run_psql() {
+  if in_container; then
+    docker exec cuba-memorys-db psql -U cuba -d brain -Atc "$1"
+  else
+    psql "$DATABASE_URL" -Atc "$1"
+  fi
 }
+
+cleanup_part() {
+  rm -f "$PART"
+}
+trap cleanup_part EXIT
 
 echo "Backing up database to $OUT ..."
 
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cuba-memorys-db'; then
+declare -A LIVE_ROWS
+for t in "${COUNTED_TABLES[@]}"; do
+  LIVE_ROWS[$t]="$(run_psql "SELECT COUNT(*) FROM $t" 2>/dev/null || echo -1)"
+done
+
+if in_container; then
   echo "Using pg_dump from container cuba-memorys-db (PG18)."
-  dump_via_docker
+  docker exec cuba-memorys-db pg_dump -U cuba -d brain \
+    --format=custom --no-owner --no-acl >"$PART"
 elif command -v pg_dump >/dev/null 2>&1; then
   echo "Using host pg_dump."
-  dump_via_host
+  pg_dump "$DATABASE_URL" --format=custom --no-owner --no-acl --file="$PART"
 else
   echo "error: no pg_dump and cuba-memorys-db container not running." >&2
   exit 1
 fi
 
-SIZE_BYTES="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT")"
-TABLES=0
-if command -v psql >/dev/null 2>&1; then
-  TABLES="$(psql "$DATABASE_URL" -Atc \
-    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'brain_%'" 2>/dev/null || echo 0)"
-elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'cuba-memorys-db'; then
-  TABLES="$(docker exec cuba-memorys-db psql -U cuba -d brain -Atc \
-    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'brain_%'")"
+echo "Verifying the dump before trusting it ..."
+
+if in_container; then
+  TOC="$(docker exec -i cuba-memorys-db pg_restore --list </"$PART" 2>&1)" || {
+    echo "FAIL: pg_restore --list cannot read the dump. It is unusable." >&2
+    exit 1
+  }
+elif command -v pg_restore >/dev/null 2>&1; then
+  TOC="$(pg_restore --list "$PART" 2>&1)" || {
+    echo "FAIL: pg_restore --list cannot read the dump. It is unusable." >&2
+    exit 1
+  }
+else
+  echo "FAIL: no pg_restore available; refusing to keep an unverified dump." >&2
+  exit 1
 fi
+
+MISSING=()
+for t in "${COUNTED_TABLES[@]}"; do
+  if [[ "${LIVE_ROWS[$t]}" != "0" ]] && ! grep -q "TABLE DATA public $t" <<<"$TOC"; then
+    MISSING+=("$t")
+  fi
+done
+
+if ((${#MISSING[@]} > 0)); then
+  echo "FAIL: the dump has no table data for: ${MISSING[*]}" >&2
+  echo "      Those tables are not empty in the live database." >&2
+  exit 1
+fi
+
+TOC_TABLES="$(grep -c 'TABLE DATA public' <<<"$TOC" || true)"
+SIZE_BYTES="$(stat -c%s "$PART" 2>/dev/null || stat -f%z "$PART")"
+
+mv "$PART" "$OUT"
+trap - EXIT
+
+ROWS_JSON=""
+for t in "${COUNTED_TABLES[@]}"; do
+  [[ -n "$ROWS_JSON" ]] && ROWS_JSON+=","
+  ROWS_JSON+=$'\n    "'"$t"'": '"${LIVE_ROWS[$t]}"
+done
 
 cat >"$META" <<EOF
 {
@@ -58,21 +100,36 @@ cat >"$META" <<EOF
   "database": "brain",
   "dump_file": "$(basename "$OUT")",
   "size_bytes": $SIZE_BYTES,
-  "brain_tables": $TABLES,
+  "verified": true,
+  "toc_tables_with_data": $TOC_TABLES,
+  "rows_at_backup_time": {$ROWS_JSON
+  },
   "tool": "pg_dump",
   "format": "custom"
 }
 EOF
 
+echo "Verified: $TOC_TABLES tables carry data in the dump."
+for t in "${COUNTED_TABLES[@]}"; do
+  echo "  $t: ${LIVE_ROWS[$t]} rows"
+done
 echo "Wrote metadata $META"
 echo "Backup size: $SIZE_BYTES bytes ($(du -h "$OUT" | cut -f1))"
 
-mapfile -t OLD < <(ls -1t "$BACKUP_DIR"/brain_*.dump 2>/dev/null || true)
-if ((${#OLD[@]} > KEEP_COUNT)); then
-  for f in "${OLD[@]:KEEP_COUNT}"; do
+VERIFIED=()
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  meta="${f%.dump}.meta.json"
+  if [[ -f "$meta" ]] && grep -q '"verified": true' "$meta"; then
+    VERIFIED+=("$f")
+  fi
+done < <(ls -1t "$BACKUP_DIR"/brain_*.dump 2>/dev/null || true)
+
+if ((${#VERIFIED[@]} > KEEP_COUNT)); then
+  for f in "${VERIFIED[@]:KEEP_COUNT}"; do
     base="${f%.dump}"
     rm -f "$f" "${base}.meta.json"
-    echo "Pruned old backup: $(basename "$f")"
+    echo "Pruned old verified backup: $(basename "$f")"
   done
 fi
 
