@@ -29,18 +29,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # musl, not gnu: the glibc-linked binary required glibc >= 2.39 (built
-          # on ubuntu-latest's runner), which doesn't exist on Debian 12,
-          # Ubuntu 22.04, or RHEL 9 — all still common server distros. A
-          # static-pie musl binary has no glibc dependency at all (same reason
-          # ripgrep/fd/uv ship musl for Linux). rustls (not OpenSSL) for TLS
-          # everywhere in this crate is what makes the musl cross-build
-          # painless; the one real snag is esaxx-rs (a tokenizers dependency)
-          # needing a musl-targeted C++ compiler that plain `musl-tools` on
-          # the runner doesn't provide — `cross`'s Docker image ships one,
-          # same as it already does for the aarch64 target below.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             artifact: cuba-memorys-linux-x64
             use_cross: true
             features: docs,cuda
@@ -96,6 +86,26 @@ jobs:
       - name: Stage artifact (Unix)
         if: runner.os != 'Windows'
         run: cp rust/target/${{ matrix.target }}/release/cuba-memorys ${{ matrix.artifact }}
+
+      - name: The binary must be able to dlopen ONNX Runtime
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          file "${{ matrix.artifact }}"
+          if ! readelf -l "${{ matrix.artifact }}" | grep -q "Requesting program interpreter"; then
+            echo "::error::${{ matrix.artifact }} is statically linked, so dlopen() always fails."
+            echo "ort is built with load-dynamic: it dlopens libonnxruntime.so at runtime."
+            echo "A static binary therefore ships with the embedder permanently unavailable."
+            exit 1
+          fi
+          MAX_GLIBC=$(readelf -V "${{ matrix.artifact }}" 2>/dev/null \
+            | grep -oE "GLIBC_2\.[0-9]+" | sort -t. -k2 -n | tail -1 || echo none)
+          echo "glibc floor: ${MAX_GLIBC}"
+          FLOOR=${MAX_GLIBC#GLIBC_2.}
+          if [ "${MAX_GLIBC}" != none ] && [ "${FLOOR}" -gt 34 ]; then
+            echo "::error::needs ${MAX_GLIBC}; Debian 12 and RHEL 9 ship 2.34 or older."
+            exit 1
+          fi
 
       - name: Stage artifact (Windows)
         if: runner.os == 'Windows'
