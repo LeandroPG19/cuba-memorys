@@ -39,8 +39,18 @@ static CACHE: OnceLock<std::sync::Mutex<TtlLruCache<Vec<f32>>>> = OnceLock::new(
 
 static ONNX_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
+const ONNX_DEFAULT_CONCURRENCY: usize = 1;
+
+pub fn embed_concurrency() -> usize {
+    std::env::var("CUBA_EMBED_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(ONNX_DEFAULT_CONCURRENCY)
+}
+
 fn get_semaphore() -> &'static tokio::sync::Semaphore {
-    ONNX_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(2))
+    ONNX_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(embed_concurrency()))
 }
 
 static MODEL_STATUS: OnceLock<ModelStatus> = OnceLock::new();
@@ -496,5 +506,25 @@ mod tests {
     fn test_fallback_mode() {
         let emb = compute_hash_embedding("test").unwrap();
         assert_eq!(emb.len(), embedding_dim());
+    }
+
+    #[test]
+    fn embed_concurrency_defaults_to_one_and_is_configurable() {
+        unsafe { std::env::remove_var("CUBA_EMBED_CONCURRENCY") };
+        assert_eq!(
+            embed_concurrency(),
+            1,
+            "the ONNX session sits behind a single Mutex during inference — \
+             advertising more concurrency than that just queues a second \
+             blocking thread behind the first"
+        );
+
+        unsafe { std::env::set_var("CUBA_EMBED_CONCURRENCY", "3") };
+        assert_eq!(embed_concurrency(), 3);
+
+        unsafe { std::env::set_var("CUBA_EMBED_CONCURRENCY", "0") };
+        assert_eq!(embed_concurrency(), 1, "0 must fall through to the default");
+
+        unsafe { std::env::remove_var("CUBA_EMBED_CONCURRENCY") };
     }
 }

@@ -83,12 +83,6 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    // `enabled()` resolves the OnceLock, which on a cold process reads a 1.1 GB model
-    // — its own doc-comment forbids calling it from an async task, because it parks a
-    // tokio worker (there are 4) for the whole load and under the shared daemon that
-    // stalls every other client. This is the common path: it runs on every cuba_faro
-    // that does not pass `rerank` explicitly. The `&&` still short-circuits, so a mode
-    // that does not want the reranker never pays the load.
     let enable_rerank = match args.get("rerank").and_then(|v| v.as_bool()) {
         Some(explicit) => explicit,
         None => {
@@ -383,10 +377,6 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
                     .unwrap_or("")
             })
             .collect();
-        // Same contract as above. Kept *before* the timeout on purpose: the model
-        // arrives warm at `rerank()`, so the 20 s budget measures inference and not
-        // the load. Moving the load inside that budget is what made the August
-        // attempt look like a regression and got it reverted.
         let have_model = tokio::task::spawn_blocking(crate::search::rerank::enabled)
             .await
             .context("reranker status task panicked")?;
@@ -1382,8 +1372,8 @@ async fn check_ood(
         return None;
     }
     let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
-    let stats = OodStats::fit(&embeddings)?;
-    crate::search::ood_cache::store(project_id, stats.clone());
+    let stats = std::sync::Arc::new(OodStats::fit(&embeddings)?);
+    crate::search::ood_cache::store(project_id, std::sync::Arc::clone(&stats));
     let dist = stats.mahalanobis(&query_emb)?;
     ood_abstain_json(query, tau, dist)
 }

@@ -34,9 +34,10 @@ impl OodStats {
             for (i, &v) in e.iter().enumerate() {
                 diff[i] = v as f64 - mean[i];
             }
-            cov += &diff * diff.transpose();
+            cov.syger(1.0, &diff, &diff, 1.0);
             centered.push(diff);
         }
+        cov.fill_upper_triangle_with_lower_triangle();
         cov /= (n - 1).max(1) as f64;
 
         let mu = (0..d).map(|i| cov[(i, i)]).sum::<f64>() / d as f64;
@@ -128,6 +129,84 @@ pub const MIN_SAMPLES_FOR_OOD: usize = 50;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn covariance_the_old_way(embeddings: &[Vec<f32>], mean: &DVector<f64>) -> DMatrix<f64> {
+        let d = mean.len();
+        let mut cov = DMatrix::<f64>::zeros(d, d);
+        for e in embeddings {
+            let mut diff = DVector::<f64>::zeros(d);
+            for (i, &v) in e.iter().enumerate() {
+                diff[i] = v as f64 - mean[i];
+            }
+            cov += &diff * diff.transpose();
+        }
+        cov
+    }
+
+    fn covariance_with_syger(embeddings: &[Vec<f32>], mean: &DVector<f64>) -> DMatrix<f64> {
+        let d = mean.len();
+        let mut cov = DMatrix::<f64>::zeros(d, d);
+        for e in embeddings {
+            let mut diff = DVector::<f64>::zeros(d);
+            for (i, &v) in e.iter().enumerate() {
+                diff[i] = v as f64 - mean[i];
+            }
+            cov.syger(1.0, &diff, &diff, 1.0);
+        }
+        cov.fill_upper_triangle_with_lower_triangle();
+        cov
+    }
+
+    #[test]
+    fn syger_accumulates_the_same_covariance_bit_for_bit() {
+        let center: Vec<f32> = (0..64).map(|i| (i as f32) * 0.013 - 0.4).collect();
+        let samples = random_around(&center, 120, 0.35);
+
+        let d = samples[0].len();
+        let mut mean = DVector::<f64>::zeros(d);
+        for e in &samples {
+            for (i, &v) in e.iter().enumerate() {
+                mean[i] += v as f64;
+            }
+        }
+        mean /= samples.len() as f64;
+
+        let old = covariance_the_old_way(&samples, &mean);
+        let new = covariance_with_syger(&samples, &mean);
+
+        for i in 0..d {
+            for j in 0..d {
+                assert_eq!(
+                    old[(i, j)],
+                    new[(i, j)],
+                    "cov[{i},{j}] diverged: {} vs {}. syger must reproduce the outer-product \
+                     accumulation exactly, including the upper triangle it does not write",
+                    old[(i, j)],
+                    new[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fit_inverts_a_symmetric_matrix() {
+        let center: Vec<f32> = (0..48).map(|i| (i as f32) * 0.021 - 0.5).collect();
+        let stats = OodStats::fit(&random_around(&center, 90, 0.4)).expect("fit should succeed");
+
+        let inv = &stats.inverse_covariance;
+        let d = inv.nrows();
+        for i in 0..d {
+            for j in (i + 1)..d {
+                let (a, b) = (inv[(i, j)], inv[(j, i)]);
+                assert!(
+                    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+                    "inverse_covariance[{i},{j}]={a} but [{j},{i}]={b}. The covariance was not \
+                     symmetric before inversion — the upper triangle syger skips was never \
+                     filled in, so half the matrix is zeros"
+                );
+            }
+        }
+    }
 
     fn random_around(center: &[f32], n: usize, jitter: f32) -> Vec<Vec<f32>> {
         let mut out = Vec::with_capacity(n);

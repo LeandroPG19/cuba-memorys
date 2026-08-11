@@ -18,7 +18,7 @@ async fn refresh_ood_cache(pool: &PgPool, project_id: Option<uuid::Uuid>) -> Res
     }
     let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
     if let Some(stats) = OodStats::fit(&embeddings) {
-        crate::search::ood_cache::store(project_id, stats);
+        crate::search::ood_cache::store(project_id, std::sync::Arc::new(stats));
     }
     Ok(())
 }
