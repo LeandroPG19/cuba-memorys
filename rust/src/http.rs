@@ -442,26 +442,30 @@ async fn dispatch_one(state: &AppState, key: &str, item: Value) -> Option<Value>
     })
 }
 
-async fn health(State(state): State<AppState>) -> Response {
+async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.pool)
         .await
         .is_ok();
 
-    let clients: Vec<String> = state
-        .seen
-        .read()
-        .map(|g| g.keys().cloned().collect())
-        .unwrap_or_default();
-
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "status": if db_ok { "ok" } else { "degraded" },
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": state.started.elapsed().as_secs(),
         "requests_served": state.served.load(Ordering::Relaxed),
         "database": if db_ok { "up" } else { "unreachable" },
-        "clients": clients,
     });
+
+    if authorized(&state, &headers) {
+        let clients: Vec<String> = state
+            .seen
+            .read()
+            .map(|g| g.keys().cloned().collect())
+            .unwrap_or_default();
+        body["clients"] = serde_json::json!(clients);
+    } else {
+        body["clients_count"] = serde_json::json!(state.seen.read().map(|g| g.len()).unwrap_or(0));
+    }
 
     let code = if db_ok {
         StatusCode::OK
@@ -557,5 +561,70 @@ mod tests {
             &headers_with("authorization", "Bearer wrongg")
         ));
         assert!(!authorized(&state, &HeaderMap::new()));
+    }
+
+    fn state_with_clients(token: Option<&str>, clients: &[&str]) -> AppState {
+        let seen = std::collections::HashMap::from_iter(
+            clients.iter().map(|c| ((*c).to_string(), Instant::now())),
+        );
+        AppState {
+            pool: crate::db::create_lazy_pool("postgres://unused/unused"),
+            token: token.map(|t| Arc::new(t.to_string())),
+            started: Instant::now(),
+            served: Arc::new(AtomicU64::new(0)),
+            seen: Arc::new(std::sync::RwLock::new(seen)),
+            last_activity: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+
+    async fn health_body(state: AppState, headers: HeaderMap) -> Value {
+        let response = health(State(state), headers).await;
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .expect("health body");
+        serde_json::from_slice(&bytes).expect("health returns JSON")
+    }
+
+    #[tokio::test]
+    async fn health_names_the_clients_when_the_caller_proved_it_may_see_them() {
+        let state = state_with_clients(Some("s3cret"), &["editor-a", "editor-b"]);
+
+        let body = health_body(state, headers_with("authorization", "Bearer s3cret")).await;
+
+        let names = body["clients"].as_array().expect("clients is a list");
+        assert_eq!(names.len(), 2);
+        assert!(body.get("clients_count").is_none());
+    }
+
+    #[tokio::test]
+    async fn health_hides_who_is_connected_from_an_unauthenticated_caller() {
+        let state = state_with_clients(Some("s3cret"), &["editor-a", "laptop-de-leandro"]);
+
+        let body = health_body(state, HeaderMap::new()).await;
+
+        assert!(
+            body.get("clients").is_none(),
+            "a client id names a machine and a person, and /health takes no auth: {body}"
+        );
+        assert_eq!(body["clients_count"], 2);
+        assert_eq!(
+            body["version"],
+            env!("CARGO_PKG_VERSION"),
+            "liveness must survive the redaction — that is what /health is for"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_without_a_configured_token_still_names_them() {
+        let state = state_with_clients(None, &["editor-a"]);
+
+        let body = health_body(state, HeaderMap::new()).await;
+
+        assert_eq!(
+            body["clients"].as_array().map(Vec::len),
+            Some(1),
+            "with no token the daemon is loopback-only by ensure_loopback, and hiding \
+             the list there would cost debugging for no security"
+        );
     }
 }
