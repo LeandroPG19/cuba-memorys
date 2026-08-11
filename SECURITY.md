@@ -40,17 +40,33 @@ and sometimes material under NDA.
   by writing iptables rules in the `DOCKER` chain that bypass UFW, so a host firewall would
   not have saved you; the bind address is the control that works. Override with
   `CUBA_PG_BIND` only if you know why.
-- **Credentials** — generated per installation, stored mode 0600 at
-  `~/.cache/cuba-memorys/pgpass`. Nothing is compiled into the binary.
-- **Least privilege** — the runtime connects as `cuba_app`: `NOSUPERUSER`, `NOBYPASSRLS`,
-  and without `UPDATE`/`DELETE` on the audit log. Migrations run separately under an admin
-  role. A superuser would bypass row-level security unconditionally, which is why this
-  separation exists at all.
+- **Credentials** — generated per installation and stored mode 0600 at
+  `~/.cache/cuba-memorys/pgpass`, *when the setup creates the container*. If a
+  `cuba-memorys-db` container already exists, setup keeps the credential it was built
+  with rather than locking you out of your own database — and that fallback,
+  `memorys2026`, IS compiled into the binary (`setup.rs`), as is `app2026` in
+  `secure_role.sql`. Both are development defaults. Rotate them before exposing the
+  database to anything.
+- **Least privilege** — the runtime downgrades itself to `cuba_app` (`NOSUPERUSER`,
+  `NOBYPASSRLS`) when that role exists and its credential works; migrations run separately
+  under an admin role. What stops `cuba_app` writing to the audit log is a trigger, not a
+  missing GRANT: `secure_role.sql` grants UPDATE/DELETE on every table in `public`, and
+  `0016_audit_log.up.sql` refuses them unless the caller is a member of `cuba_admin`.
+  Both matter — a disabled trigger leaves the permission wide open.
+  **Verify, do not assume**: `cuba-memorys doctor` fails the `runtime_role` check if the
+  process is still connected as a superuser while `cuba_app` sits ready. A superuser
+  satisfies `pg_has_role(..., 'cuba_admin', ...)` for everything, so on that connection
+  neither the trigger nor row-level security does anything at all.
 - **Memory poisoning** — content from sources you do not control can be ingested with
   `untrusted: true`, which quarantines it: stored and inspectable, withheld from search
   until explicitly promoted.
-- **Supply chain** — model downloads are verified against SHA-256 digests and a mismatch
-  deletes the file and aborts. CI runs `cargo audit` and `cargo deny`.
+- **Supply chain** — CI runs `cargo audit` and `cargo deny`. Model downloads are checked
+  against SHA-256 digests **only where a digest is registered**: today that is the reranker
+  weights and its tokenizer. The embedding model, the NLI files and — importantly — the
+  ONNX Runtime shared library are downloaded without verification, and that library is
+  `dlopen`ed into the process. `models_cli` says so at download time (`sin checksum
+  registrado`) rather than implying a check it did not make. The npm wrapper downloads the
+  release binary over TLS with no checksum or signature.
 
 ### Not protected — know these before you rely on them
 

@@ -187,7 +187,7 @@ Two things it will not do. It will not **confirm** a claim on weak evidence: ent
 
 ### Calibrated abstention
 
-The out-of-distribution gate rejects queries the corpus cannot answer. The threshold is **not** a magic constant: Ledoit-Wolf covariance shrinkage plus a conformal quantile, calibrated against your own corpus with `cuba-memorys calibrate --apply` and persisted. (The theoretical χ² threshold rejected **100% of answerable queries.** Distribution-free calibration is not a nicety here.)
+The out-of-distribution gate rejects queries the corpus cannot answer. The threshold is **not** a magic constant: Ledoit-Wolf covariance shrinkage plus a conformal quantile, calibrated against your own corpus with `cuba-memorys calibrate --dataset <questions.jsonl> --apply` and persisted (the dataset is required — without it the command refuses). (The theoretical χ² threshold rejected **100% of answerable queries.** Distribution-free calibration is not a nicety here.)
 
 ### And it tells you when it is broken
 
@@ -331,7 +331,7 @@ Requires=cuba-memorys.socket
 
 [Service]
 Type=exec
-ExecStart=%h/.local/bin/cuba-memorys serve 127.0.0.1:8787
+ExecStart=%h/.local/bin/cuba-memorys-daemon serve 127.0.0.1:8787
 # An idle shutdown exits 0 — Restart=always would bounce it straight back up.
 Restart=on-failure
 Environment=CUBA_IDLE_SHUTDOWN_SECS=1200
@@ -340,7 +340,11 @@ Environment=CUBA_RERANK_DEVICE=gpu
 Environment=CUBA_NLI_DEVICE=cpu
 ```
 
+Both units ship in [`packaging/`](packaging/). `ExecStart` has to name the binary you actually installed — `command -v cuba-memorys` — and the `-daemon` suffix above is only the convention for keeping a GPU build beside a stock one. A wrong path here fails as `status=203/EXEC`.
+
 `serve` adopts the socket systemd passes as fd 3 (`LISTEN_FDS`), so the port is held while the daemon is not running and no client sees a refused connection.
+
+The unit must also bind loopback. With socket activation the `.socket` unit's `ListenStream` decides the address and `CUBA_HTTP_ADDR` is ignored, so `serve` checks the address of the socket it is handed and refuses a routable one unless `CUBA_HTTP_TOKEN` is set.
 </details>
 
 ### Host RAM: it sizes itself to your machine
