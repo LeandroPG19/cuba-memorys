@@ -30,13 +30,34 @@ fn read_mem() -> Mem {
 
 fn read_vram_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-compute-apps=pid,used_memory",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    let me = std::process::id().to_string();
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_once(',').filter(|(pid, _)| pid.trim() == me))
+            .filter_map(|(_, mb)| mb.trim().parse::<u64>().ok())
+            .sum(),
+    )
+}
+
+fn read_card_used_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok())
+        .flatten()
 }
 
 fn mib(kb: u64) -> f64 {
@@ -69,6 +90,7 @@ async fn main() {
 
     let base = read_mem();
     let vram_base = read_vram_mib();
+    let others_on_card = read_card_used_mib().unwrap_or(0) - vram_base.unwrap_or(0);
     println!(
         "  {:<34} {:>9.1} {:>9.1} {:>9.1} {:>7} MiB",
         "process start",
@@ -129,10 +151,11 @@ async fn main() {
     let peak = read_mem();
     println!("  {}", "─".repeat(76));
     println!(
-        "\n  peak RSS {:.1} MiB · swap {:.1} MiB · VRAM {} MiB",
+        "\n  peak RSS {:.1} MiB · swap {:.1} MiB · VRAM {} MiB (this process; {} MiB held by others)",
         mib(peak.hwm_kb),
         mib(peak.swap_kb),
-        read_vram_mib().unwrap_or(0)
+        read_vram_mib().unwrap_or(0),
+        others_on_card,
     );
     println!(
         "  embedder load {:.2}s · reranker {} {:.2}s · OOD fit {:.2}s over n={n} d={d}",

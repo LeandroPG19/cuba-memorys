@@ -234,7 +234,7 @@ So `--apply` merges only what is **provable** (identical after normalizing case 
 
 ## The 28 tools
 
-Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise only `cuba_tools` + `cuba_call` — **67% smaller tool catalogue, zero functions lost**, schemas loaded on demand.
+Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise an everyday core of 6 plus `cuba_tools` + `cuba_call` — **8 of 30, a 73% smaller catalogue with zero functions lost**, the rest reachable on demand.
 
 **Knowledge graph** — `cuba_alma` (entities) · `cuba_cronica` (observations, episodes, timeline) · `cuba_puente` (typed relations, traversal, link prediction) · `cuba_ingesta` (bulk import)
 
@@ -263,7 +263,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `DATABASE_URL` | auto (Docker) | PostgreSQL connection. Set it (external + TLS) for `red` mode. |
 | `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | auto (`~/.cache`) | Semantic embeddings. `cuba-memorys models` sets these up for you. |
 | `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the stronger Spanish model |
-| `CUBA_TOOL_PROFILE` | `full` | `lean` → 2 tools, 67% smaller catalogue, nothing lost |
+| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 30, 73% smaller catalogue, nothing lost |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
@@ -343,6 +343,52 @@ Environment=CUBA_NLI_DEVICE=cpu
 `serve` adopts the socket systemd passes as fd 3 (`LISTEN_FDS`), so the port is held while the daemon is not running and no client sees a refused connection.
 </details>
 
+### Host RAM: it sizes itself to your machine
+
+VRAM was only half of it. The weights also live in host memory, and that appetite used to be fixed no matter what the machine had. Measured with `cargo run --release --features cuda --example mem_bench`, daemon stopped, on the 6 GB laptop GPU:
+
+| stage | added RSS | VRAM | load |
+|---|---|---|---|
+| process start | 5,5 MiB | 0 | — |
+| + PostgreSQL pool | +1,3 MiB | 0 | — |
+| + embedder (bge-m3, CPU) | +862,0 MiB | 0 | 1,72 s |
+| + reranker (fused FP16, GPU) | +1034,7 MiB | 1460 MiB | 3,73 s |
+| + OOD fit (n=1811, d=1024) | +37,4 MiB | 0 | 11,45 s |
+| **peak** | **2677 MiB** | **1460 MiB** | |
+
+Resident settles near 1941 MiB; the peak is 2677 because loading a 1,1 GB ONNX file costs transient memory on top of the weights it leaves behind. The peak is the number that has to fit, not the steady state.
+
+On the machine this was measured on that is fine. On a 4 GB laptop it is not, and under a systemd unit capped at `MemoryHigh=4500M` it has been seen paging **2,56 GiB to swap** — `MemoryHigh` does not kill, it reclaims, and reclaiming is paging.
+
+Two traps worth knowing if you re-run this. `mem_bench` attributes VRAM to its own PID via `nvidia-smi --query-compute-apps`, because reading `memory.used` charges you for every other process on the card — that is how a first attempt showed 3590 MiB "at process start" that belonged to a game and a desktop shell. And run it with the daemon's own environment: with `CUBA_RERANKER_PATH` unset it silently loads the *unfused* artifact and the warm-up goes from 3,7 s to 131 s on CPU.
+
+So the daemon now reads the machine at startup and picks a level. Nothing is invented for this: all three degradations already existed and are tested.
+
+| level | models loaded | host RAM | what you give up |
+|---|---|---|---|
+| **minimal** | none | ~220 MiB | semantic search. BM25 + full-text + trigram still answer |
+| **lean** | embedder | ~1,1 GiB | reranking and local entailment |
+| **standard** | embedder + reranker | ~2,2 GiB | the NLI judge, which drops to its own fallback ladder |
+| **full** | all three | ~3,3 GiB | nothing |
+
+**How the level is chosen.** The budget is `min(cgroup limit, system available) − 768 MiB` of headroom, and the cgroup has to win. On this machine `/proc/meminfo` reports 7,16 GB available while the daemon's cgroup caps it at 4,39 GiB — believing `/proc` would load 2,6 GiB of weights against a limit where the kernel already starts paging. The reader walks from the cgroup root down to the leaf and takes the tightest `memory.max` or `memory.high` it finds, because the limit is usually set on an ancestor.
+
+Models are then fitted in order of measured value: the embedder first, then the reranker (**+93% nDCG**, so it outranks the judge), then NLI.
+
+**The plan can only take away.** Every knob is capped at the value the daemon already used, so on a machine with room the level is `full` and nothing changes. Degradation only goes downward.
+
+**You always win.** Any of these set by hand is left untouched — the regulator fills gaps, it does not overwrite decisions:
+
+```bash
+CUBA_EMBED_INTRA_THREADS   CUBA_RERANK_INTRA_THREADS   CUBA_NLI_INTRA_THREADS
+CUBA_RERANK_CHUNK          CUBA_GPU_MEM_LIMIT_MB       CUBA_OOD_FIT_LIMIT
+CUBA_DB_MAX_CONNECTIONS
+```
+
+To force a model off regardless of the budget, point it at a path that does not exist — `CUBA_RERANKER_PATH=/nonexistent` or `CUBA_NLI_PATH=/nonexistent`. That is the same mechanism the regulator itself uses.
+
+**To see what it decided**, run `cuba-memorys doctor`: it reports the reading and the resulting plan, and warns when the level falls to `minimal`. The plan is also logged at startup with the full machine reading behind it.
+
 ### The reranker artifact
 
 The published `bge-reranker-v2-m3` ONNX is converted to FP16 **before** any graph fusion, which leaves 785 `Cast` nodes threaded through it. ONNX Runtime claws some of that back at load time (2023 → 897 nodes, 49 `SkipLayerNormalization`), but it cannot fuse Gelu and it repeats the work on every cold start. Rebuilding from the FP32 export and fusing *first*:
@@ -389,7 +435,7 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 |---|---|
 | **`compact` by default** | **−30% tokens, nDCG +0.0090** (paired 95% CI [+0.0024, +0.0166], n=191). The earlier "exactly 0.0000" was measured with a harness that let the 5000-token response budget truncate the ranking before scoring it: verbose lost its tail, compact did not. The old "−40%" came from the broken benchmark. |
 | **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
-| **`lean` tool profile** | −67% catalogue, zero functions lost. |
+| **`lean` tool profile** | 8 tools of 30, −73% catalogue, zero functions lost. |
 | **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |
 | **The benchmark itself** | 221 queries (was 10), relevance by document **id**, bootstrap confidence intervals, and the **minimum detectable effect** printed beside every result — so nobody reads a 3-point difference as a finding again. |
 
