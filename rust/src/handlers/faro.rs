@@ -1,4 +1,5 @@
 use crate::cognitive::dual_strength;
+use crate::search::cache::TtlLruCache;
 use crate::search::confidence as grounding;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -31,11 +32,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("hybrid");
     let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(DEFAULT_LIMIT)
-        .min(MAX_LIMIT);
+    let limit = requested_limit(&args);
 
     let max_tokens = args
         .get("max_tokens")
@@ -61,7 +58,7 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     let before = args.get("before").and_then(|v| v.as_str());
     let after = args.get("after").and_then(|v| v.as_str());
-    let time_bounds = parse_time_bounds(before, after);
+    let time_bounds = parse_time_bounds(before, after)?;
 
     let diversify = args
         .get("diversify")
@@ -125,24 +122,45 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
+fn requested_limit(args: &Value) -> i64 {
+    args.get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT)
+}
+
+#[derive(Debug)]
 struct TimeBounds {
     after: chrono::DateTime<chrono::Utc>,
     before: chrono::DateTime<chrono::Utc>,
 }
 
-fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> TimeBounds {
-    let after_ts = after
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+fn parse_bound(field: &str, raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
         .map(|d| d.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
-    let before_ts = before
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::days(365));
-    TimeBounds {
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{field}={raw:?} is not an RFC 3339 timestamp ({e}). \
+                 Use e.g. 2026-08-11T00:00:00Z. Rejected instead of ignored: a bound \
+                 that silently defaults widens the window you asked to narrow."
+            )
+        })
+}
+
+fn parse_time_bounds(before: Option<&str>, after: Option<&str>) -> Result<TimeBounds> {
+    let after_ts = match after {
+        Some(raw) => parse_bound("after", raw)?,
+        None => chrono::DateTime::from_timestamp(0, 0)
+            .expect("the unix epoch is representable as a DateTime<Utc>"),
+    };
+    let before_ts = match before {
+        Some(raw) => parse_bound("before", raw)?,
+        None => chrono::Utc::now() + chrono::Duration::days(365),
+    };
+    Ok(TimeBounds {
         after: after_ts,
         before: before_ts,
-    }
+    })
 }
 
 struct SearchOpts<'a> {
@@ -159,6 +177,37 @@ struct SearchOpts<'a> {
     enable_rerank: bool,
     track_access: bool,
     associative: bool,
+}
+
+fn annotate_degradation(
+    response: &mut Value,
+    vector_failed: bool,
+    bm25_failed: bool,
+    reranker_failed: bool,
+) {
+    if vector_failed {
+        response["degraded"] = serde_json::json!(true);
+        response["degraded_reason"] = serde_json::json!(
+            "La búsqueda vectorial falló: estos resultados son SOLO léxicos y el recall \
+             está degradado. Causa habitual: la dimensión del embedding no coincide con la \
+             de la columna. Diagnosticá con `cuba-memorys doctor`."
+        );
+    }
+    if bm25_failed {
+        response["bm25_degraded"] = serde_json::json!(true);
+        response["bm25_degraded_reason"] = serde_json::json!(
+            "BM25 falló: estos resultados salen sin la señal léxica exacta, así que una \
+             consulta con términos raros pierde recall. Mirá los logs (nivel ERROR)."
+        );
+    }
+    if reranker_failed {
+        response["reranker_degraded"] = serde_json::json!(true);
+        response["reranker_degraded_reason"] = serde_json::json!(
+            "Pediste rerank y el cross-encoder falló: estos resultados vienen SIN reordenar, \
+             tal cual los dejó RRF. Se pagó el tiempo de inferencia y no se aplicó nada. \
+             Mirá los logs (nivel ERROR) para la causa."
+        );
+    }
 }
 
 async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Result<Value> {
@@ -194,7 +243,13 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         .bind(opts.project_id)
         .fetch_all(pool)
         .await
-        .unwrap_or_default();
+        .with_context(|| {
+            format!(
+                "looking up observations tagged {tag:?}. Failing loud instead of returning \
+                 the untagged ranking: those results would be presented as if the tag had \
+                 been applied and simply matched nothing."
+            )
+        })?;
 
         for (id, entity_name, content, obs_type, importance, score) in tagged_obs {
             let id_str = id.to_string();
@@ -288,8 +343,9 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         }
     }
 
+    let mut bm25_failed = false;
     if opts.enable_bm25 {
-        let bm25_results = crate::search::bm25::bm25_search(
+        let bm25_results = match crate::search::bm25::bm25_search(
             pool,
             query,
             opts.scope,
@@ -297,7 +353,19 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
             opts.project_id,
         )
         .await
-        .unwrap_or_default();
+        {
+            Ok(results) => results,
+            Err(e) => {
+                bm25_failed = true;
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "BM25 SEARCH FAILED — hybrid retrieval lost its lexical half. \
+                     Usually a query that cuba_or_tsquery could not parse, a missing GIN \
+                     index, or the pool timing out. Run `cuba-memorys doctor`."
+                );
+                Vec::new()
+            }
+        };
         for (rank, result) in bm25_results.iter().enumerate() {
             let id = result
                 .get("id")
@@ -598,23 +666,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         "graphrag_context": graphrag_context
     });
 
-    if vector_failed {
-        response["degraded"] = serde_json::json!(true);
-        response["degraded_reason"] = serde_json::json!(
-            "La búsqueda vectorial falló: estos resultados son SOLO léxicos y el recall \
-             está degradado. Causa habitual: la dimensión del embedding no coincide con la \
-             de la columna. Diagnosticá con `cuba-memorys doctor`."
-        );
-    }
-
-    if reranker_failed {
-        response["reranker_degraded"] = serde_json::json!(true);
-        response["reranker_degraded_reason"] = serde_json::json!(
-            "Pediste rerank y el cross-encoder falló: estos resultados vienen SIN reordenar, \
-             tal cual los dejó RRF. Se pagó el tiempo de inferencia y no se aplicó nada. \
-             Mirá los logs (nivel ERROR) para la causa."
-        );
-    }
+    annotate_degradation(&mut response, vector_failed, bm25_failed, reranker_failed);
 
     Ok(response)
 }
@@ -986,7 +1038,14 @@ async fn text_search(
         .bind(project_id)
         .fetch_all(pool)
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                error = %e,
+                "EPISODE LEXICAL SEARCH FAILED — the ranking carries observations only. \
+                 No episode can surface for this query and nothing in the response says so."
+            );
+            Vec::new()
+        });
         results.extend(
             rows.into_iter()
                 .map(|(id, entity_name, content, importance, score)| {
@@ -1101,7 +1160,15 @@ async fn vector_search(
     .bind(project_id)
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            "EPISODE VECTOR SEARCH FAILED — the semantic half of the ranking carries \
+             observations only. Usual cause is the same as for observations: the episode \
+             embedding column disagrees with the model's dimension. Run `cuba-memorys doctor`."
+        );
+        Vec::new()
+    });
 
     results.extend(episodes.iter().map(|(id, entity_name, content, sim)| {
         serde_json::json!({
@@ -1302,11 +1369,29 @@ fn env_threshold() -> Option<f64> {
         .filter(|t| t.is_finite() && *t > 0.0)
 }
 
+fn threshold_cache() -> &'static std::sync::Mutex<TtlLruCache<Option<f64>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<TtlLruCache<Option<f64>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(TtlLruCache::new()))
+}
+
+fn cached_threshold(dim: usize) -> Option<Option<f64>> {
+    threshold_cache().lock().ok()?.get(&dim.to_string())
+}
+
+fn remember_threshold(dim: usize, value: Option<f64>) {
+    if let Ok(mut cache) = threshold_cache().lock() {
+        cache.put(dim.to_string(), value);
+    }
+}
+
 async fn calibrated_threshold(pool: &PgPool, dim: usize) -> Option<f64> {
-    static CACHE: tokio::sync::OnceCell<Option<f64>> = tokio::sync::OnceCell::const_new();
-    *CACHE
-        .get_or_init(|| async { crate::search::calibrate::load_ood_threshold(pool, dim).await })
-        .await
+    if let Some(hit) = cached_threshold(dim) {
+        return hit;
+    }
+    let loaded = crate::search::calibrate::load_ood_threshold(pool, dim).await;
+    remember_threshold(dim, loaded);
+    loaded
 }
 
 fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
@@ -1330,13 +1415,31 @@ fn ood_abstain_json(query: &str, threshold: f64, dist: f64) -> Option<Value> {
     }))
 }
 
+fn fit_semaphore() -> &'static tokio::sync::Semaphore {
+    static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(1))
+}
+
+async fn fit_ood_stats(embeddings: Vec<Vec<f32>>) -> Option<crate::search::ood::OodStats> {
+    tokio::task::spawn_blocking(move || crate::search::ood::OodStats::fit(&embeddings))
+        .await
+        .inspect_err(|e| {
+            tracing::error!(
+                error = %e,
+                "the OOD fit task died — abstention is off for this query, which answers \
+                 instead of abstaining"
+            );
+        })
+        .ok()?
+}
+
 async fn check_ood(
     pool: &PgPool,
     query: &str,
     threshold: Option<f64>,
     project_id: Option<uuid::Uuid>,
 ) -> Option<Value> {
-    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, OodStats, default_threshold};
+    use crate::search::ood::{MIN_SAMPLES_FOR_OOD, default_threshold};
 
     if !crate::embeddings::onnx::is_model_loaded() {
         return None;
@@ -1349,6 +1452,13 @@ async fn check_ood(
             .unwrap_or_else(|| default_threshold(query_emb.len())),
     };
 
+    if let Some(stats) = crate::search::ood_cache::get(project_id)
+        && let Some(dist) = stats.mahalanobis(&query_emb)
+    {
+        return ood_abstain_json(query, tau, dist);
+    }
+
+    let _permit = fit_semaphore().acquire().await.ok()?;
     if let Some(stats) = crate::search::ood_cache::get(project_id)
         && let Some(dist) = stats.mahalanobis(&query_emb)
     {
@@ -1373,7 +1483,7 @@ async fn check_ood(
         return None;
     }
     let embeddings: Vec<Vec<f32>> = raw.into_iter().map(|(v,)| v.to_vec()).collect();
-    let stats = std::sync::Arc::new(OodStats::fit(&embeddings)?);
+    let stats = std::sync::Arc::new(fit_ood_stats(embeddings).await?);
     crate::search::ood_cache::store(project_id, std::sync::Arc::clone(&stats));
     let dist = stats.mahalanobis(&query_emb)?;
     ood_abstain_json(query, tau, dist)
@@ -1382,6 +1492,199 @@ async fn check_ood(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_branch_that_silently_degrades_says_so_in_the_response() {
+        let mut clean = serde_json::json!({"results": []});
+        annotate_degradation(&mut clean, false, false, false);
+        assert_eq!(
+            clean,
+            serde_json::json!({"results": []}),
+            "a healthy search must not carry degradation noise"
+        );
+
+        for (vector, bm25, rerank, key) in [
+            (true, false, false, "degraded"),
+            (false, true, false, "bm25_degraded"),
+            (false, false, true, "reranker_degraded"),
+        ] {
+            let mut response = serde_json::json!({"results": []});
+            annotate_degradation(&mut response, vector, bm25, rerank);
+            assert_eq!(
+                response.get(key).and_then(serde_json::Value::as_bool),
+                Some(true),
+                "{key} must reach the caller. A retrieval branch that fails and returns an \
+                 empty list is indistinguishable from a corpus that had no answer, and the \
+                 caller will treat a degraded search as a confident miss"
+            );
+            let reason = format!("{key}_reason");
+            assert!(
+                response
+                    .get(&reason)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|r| !r.trim().is_empty()),
+                "{reason} must explain what was lost, not just that something was"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_limit_is_clamped_to_one_row_instead_of_reaching_postgres() {
+        assert_eq!(
+            requested_limit(&serde_json::json!({"limit": -5})),
+            1,
+            "limit=-5 must never leave this function: Postgres rejects `LIMIT -5` outright, \
+             and bm25_search truncates with `limit as usize`, which turns -5 into \
+             18446744073709551611 and truncates nothing"
+        );
+        assert_eq!(
+            requested_limit(&serde_json::json!({"limit": 0})),
+            1,
+            "limit=0 must return one row, not an empty ranking the caller cannot tell from \
+             a genuine miss"
+        );
+    }
+
+    #[test]
+    fn the_limit_clamp_still_honours_the_default_and_the_ceiling() {
+        assert_eq!(
+            requested_limit(&serde_json::json!({})),
+            DEFAULT_LIMIT,
+            "an absent limit must keep using DEFAULT_LIMIT"
+        );
+        assert_eq!(
+            requested_limit(&serde_json::json!({"limit": 999})),
+            MAX_LIMIT,
+            "the upper bound is what keeps one client from paging the whole corpus into a \
+             single response"
+        );
+        assert_eq!(
+            requested_limit(&serde_json::json!({"limit": 7})),
+            7,
+            "a limit inside the range must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_after_bound_is_rejected_instead_of_silently_widening_the_window() {
+        let err = parse_time_bounds(None, Some("ayer"))
+            .expect_err("`ayer` is not RFC 3339 and must not be accepted");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ayer"),
+            "the error must quote the offending value so the caller sees what it sent: {msg}"
+        );
+        assert!(
+            msg.contains("RFC 3339"),
+            "the error must name the expected format, otherwise the caller retries blind: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_before_bound_is_rejected_too() {
+        let err = parse_time_bounds(Some("2026-13-45"), None)
+            .expect_err("month 13 / day 45 is not a date and must not be accepted");
+        assert!(
+            format!("{err:#}").contains("2026-13-45"),
+            "an out-of-range date used to fall back to now+365d, which is an unbounded \
+             search dressed up as a bounded one"
+        );
+    }
+
+    #[test]
+    fn valid_bounds_parse_and_absent_bounds_stay_open() {
+        let bounds = parse_time_bounds(Some("2026-08-11T00:00:00Z"), Some("2026-08-01T00:00:00Z"))
+            .expect("both values are RFC 3339");
+        assert_eq!(bounds.after.to_rfc3339(), "2026-08-01T00:00:00+00:00");
+        assert_eq!(bounds.before.to_rfc3339(), "2026-08-11T00:00:00+00:00");
+
+        let open = parse_time_bounds(None, None).expect("absent bounds are not an error");
+        assert_eq!(
+            open.after.timestamp(),
+            0,
+            "no `after` still means the whole history"
+        );
+        assert!(
+            open.before > chrono::Utc::now(),
+            "no `before` still means the open future"
+        );
+    }
+
+    #[test]
+    fn a_threshold_cached_for_one_embedding_dimension_never_answers_for_another() {
+        remember_threshold(384, Some(21.25));
+        assert_eq!(
+            cached_threshold(384),
+            Some(Some(21.25)),
+            "the dimension it was measured for must hit the cache"
+        );
+        assert_eq!(
+            cached_threshold(1024),
+            None,
+            "a Mahalanobis threshold is a distance in the space it was calibrated on: serving \
+             the 384-d value to a 1024-d query (e5-small vs the bge-m3 production model) \
+             abstains on everything or on nothing"
+        );
+    }
+
+    #[test]
+    fn a_failed_threshold_load_is_cached_as_a_miss_not_as_an_absent_entry() {
+        remember_threshold(777, None);
+        assert_eq!(
+            cached_threshold(777),
+            Some(None),
+            "a load that found no calibration row must be distinguishable from a cold cache, \
+             or every query re-queries brain_calibration"
+        );
+    }
+
+    fn deterministic_embeddings(n: usize, d: usize) -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| {
+                (0..d)
+                    .map(|j| (((i * 31 + j * 17) % 97) as f32) / 97.0)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn fitting_ood_stats_leaves_the_single_runtime_worker_free_for_other_tasks() {
+        let embeddings = deterministic_embeddings(400, 128);
+
+        let (fitted, fit_elapsed, probe_latency) = tokio::spawn(async move {
+            let spawned_at = std::time::Instant::now();
+            let probe = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                spawned_at.elapsed()
+            });
+
+            let started = std::time::Instant::now();
+            let stats = fit_ood_stats(embeddings).await;
+            let fit_elapsed = started.elapsed();
+            (
+                stats.is_some(),
+                fit_elapsed,
+                probe.await.expect("the probe task must not panic"),
+            )
+        })
+        .await
+        .expect("the fitting task must not panic");
+
+        assert!(fitted, "400 samples of 128 dimensions must fit");
+        assert!(
+            fit_elapsed > std::time::Duration::from_millis(50),
+            "the fit has to stay slow enough for a stalled worker to be measurable; it took \
+             {fit_elapsed:?}, so raise the sample size or this test cannot fail"
+        );
+        assert!(
+            probe_latency * 2 < fit_elapsed,
+            "a 10 ms sleep spawned before the fit resolved after {probe_latency:?} while the \
+             fit ran for {fit_elapsed:?}: the fit is running on the runtime worker instead of \
+             spawn_blocking, so every other task on this runtime waits for it (measured 11,4 s \
+             with n=1811 in production)"
+        );
+    }
 
     #[test]
     fn test_entropy_weights_sum_to_one() {
