@@ -17,7 +17,7 @@ provision_gate_db() {
     -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" \
     -c "CREATE DATABASE $GATE_DB" >/dev/null
   DATABASE_URL="$GATE_DATABASE_URL" CUBA_APP_ROLE=0 ONNX_MODEL_PATH="" \
-    cargo run --quiet --bin cuba-memorys -- doctor >/dev/null 2>&1 || true
+    timeout 300 cargo run --quiet --bin cuba-memorys -- doctor >/dev/null 2>&1 || true
   local tables
   tables="$(docker exec cuba-memorys-db psql -U cuba -d "$GATE_DB" -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"

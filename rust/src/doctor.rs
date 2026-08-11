@@ -175,6 +175,10 @@ fn runtime_role_check(user: &str, is_super: bool, app_role_ready: bool) -> Check
 }
 
 pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
+    run_checks_with(pool, url, false).await
+}
+
+pub async fn run_checks_with(pool: &PgPool, url: &str, deep: bool) -> Vec<Check> {
     let mut checks = Vec::new();
 
     let mode = crate::mode::active();
@@ -357,33 +361,55 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         _ => Check::ok("gpu", gpu.detail),
     });
 
-    if crate::search::rerank::enabled() {
-        checks.push(Check::ok(
-            "reranker",
-            "cargado (bge-reranker-v2-m3) — reordena los candidatos por cross-encoder",
-        ));
-    } else {
-        checks.push(Check::warn(
-            "reranker",
-            "no cargado — el ranking se devuelve tal cual (RRF, sin reordenar)",
-            "es opcional, pero si querías reordenar y no pusiste el modelo, no está \
+    checks.push(
+        match (
+            crate::search::rerank::is_configured(),
+            crate::search::rerank::status_resolved(),
+        ) {
+            (true, true) if crate::search::rerank::enabled() => Check::ok(
+                "reranker",
+                "cargado (bge-reranker-v2-m3) — reordena los candidatos por cross-encoder",
+            ),
+            (true, true) => Check::fail(
+                "reranker",
+                "hay un modelo en disco pero NO carga",
+                "el ranking se devuelve tal cual. Suele ser libonnxruntime.so: comprobá \
+             ORT_DYLIB_PATH.",
+            ),
+            (true, false) => Check::ok(
+                "reranker",
+                "configurado — carga en su primer lote (no lo cargo aquí: son ~1,1 GB)",
+            ),
+            (false, _) => Check::warn(
+                "reranker",
+                "no configurado — el ranking se devuelve tal cual (RRF, sin reordenar)",
+                "es opcional, pero si querías reordenar y no pusiste el modelo, no está \
              pasando nada. Instalalo: cuba-memorys models reranker",
-        ));
-    }
+            ),
+        },
+    );
 
     if crate::cognitive::nli::available() {
-        if crate::cognitive::nli::enabled() {
+        if deep && crate::cognitive::nli::enabled() {
             checks.push(Check::ok(
                 "nli_entailment",
                 "cargado (mDeBERTa-v3-xnli) — verify decide en ~50 ms, sin LLM",
             ));
         } else {
-            checks.push(Check::fail(
-                "nli_entailment",
-                "hay un modelo NLI en disco pero NO carga",
-                "verify se cae al juez LLM (~20 s por afirmación) o al heurístico, que \
-                 no decide nada. Suele ser libonnxruntime.so: comprobá ORT_DYLIB_PATH.",
-            ));
+            checks.push(if deep {
+                Check::fail(
+                    "nli_entailment",
+                    "hay un modelo NLI en disco pero NO carga",
+                    "verify se cae al juez LLM (~20 s por afirmación) o al heurístico, que \
+                     no decide nada. Suele ser libonnxruntime.so: comprobá ORT_DYLIB_PATH.",
+                )
+            } else {
+                Check::ok(
+                    "nli_entailment",
+                    "presente en disco — carga a su primer veredicto (no lo cargo aquí: \
+                     son ~1 GB; `doctor --deep` lo comprueba de verdad)",
+                )
+            });
         }
     } else {
         checks.push(Check::warn(
@@ -630,14 +656,17 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
 pub async fn run_cli(args: &[String]) -> Result<()> {
     let json = args.iter().any(|a| a == "--json");
     let check_updates = args.iter().any(|a| a == "--check-updates");
+    let deep = args.iter().any(|a| a == "--deep");
     if args.iter().any(|a| a == "-h" || a == "--help") {
         eprintln!(
-            "usage: cuba-memorys doctor [--json] [--check-updates]\n\n\
+            "usage: cuba-memorys doctor [--json] [--check-updates] [--deep]\n\n\
              Read-only health check: asserts the invariants whose violation is silent\n\
              (zero recall, dead vector branch, dimension drift, inert RLS, decay anchor,\n\
              stale binary in a live MCP process). Exits 1 if any check fails.\n\n\
              --check-updates  compara con la última versión publicada en npm. Nunca actualiza\n\
-                              solo, y no corre salvo que lo pidas: es la única red que toca."
+                              solo, y no corre salvo que lo pidas: es la única red que toca.\n\
+             --deep           carga de verdad el reranker y el NLI para comprobar que abren.\n\
+                              Son ~2 GB y minutos: sin esto sólo se informa su presencia."
         );
         return Ok(());
     }
@@ -647,7 +676,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .await
         .context("connecting to database for doctor")?;
 
-    let mut checks = run_checks(&pool, &url).await;
+    let mut checks = run_checks_with(&pool, &url, deep).await;
 
     if check_updates {
         let current = env!("CARGO_PKG_VERSION");
