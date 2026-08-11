@@ -352,6 +352,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn released_connection_does_not_leak_app_current_project() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL env var required for integration tests");
 

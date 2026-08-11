@@ -561,6 +561,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn reembed_reproduces_the_vector_the_write_path_stores() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let pool = test_pool().await;
         let entity_name = unique_name("reembed_entity");
         let entity_type = "concept";
@@ -622,6 +623,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn prune_plans_before_it_deletes_and_stays_inside_the_active_project() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let pool = test_pool().await;
 
         let mine = crate::project::upsert_project(&pool, &unique_name("zafra_proj_mine"))

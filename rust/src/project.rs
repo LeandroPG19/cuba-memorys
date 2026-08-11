@@ -74,11 +74,9 @@ pub async fn observation_in_scope(
 mod tests {
     use super::*;
 
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     #[tokio::test]
     async fn the_scope_the_pool_stamps_is_the_active_project() {
-        let _one_at_a_time = SERIAL.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         crate::session::clear();
         assert_eq!(
             rls_scope(),
@@ -101,7 +99,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_kill_switch_widens_the_scope_instead_of_emptying_it() {
-        let _one_at_a_time = SERIAL.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         crate::session::set(Uuid::new_v4(), Some(Uuid::new_v4()));
         unsafe { std::env::set_var(KILL_SWITCH_ENV, "off") };
 

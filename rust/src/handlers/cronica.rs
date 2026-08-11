@@ -1050,6 +1050,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn adding_to_an_overloaded_entity_supersedes_low_value_observations_and_says_so() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL env var required for integration tests");
         let pool = crate::db::create_pool(&url)

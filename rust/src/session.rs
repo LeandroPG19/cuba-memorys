@@ -21,6 +21,9 @@ tokio::task_local! {
     static CLIENT: String;
 }
 
+#[cfg(test)]
+pub static GLOBAL_STATE_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub fn enable_daemon_mode() {
     DAEMON.store(true, Ordering::Relaxed);
 }
@@ -109,11 +112,9 @@ pub fn session_id() -> Option<Uuid> {
 mod tests {
     use super::*;
 
-    static GLOBAL_SESSION_STATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     #[tokio::test]
     async fn set_get_clear_roundtrip() {
-        let _one_at_a_time = GLOBAL_SESSION_STATE.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let sid = Uuid::new_v4();
         let pid = Uuid::new_v4();
         clear();
@@ -138,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn clients_do_not_see_each_others_sessions() {
-        let _one_at_a_time = GLOBAL_SESSION_STATE.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
 
@@ -166,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_hides_the_global_session_from_unscoped_tasks() {
-        let _one_at_a_time = GLOBAL_SESSION_STATE.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let sid = Uuid::new_v4();
         set(sid, None);
         assert_eq!(
@@ -188,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_client_drops_the_row() {
-        let _one_at_a_time = GLOBAL_SESSION_STATE.lock().await;
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let sid = Uuid::new_v4();
         with_client("ephemeral".to_string(), async {
             set(sid, None);
