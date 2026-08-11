@@ -49,6 +49,8 @@ OPERATIONS:
   codegraph build   parse source (tree-sitter, rust|python) into brain_entities/relations
   rem               run one consolidation cycle now (decay, autolink, backfill, PageRank)
   setup             wire this server into your MCP clients; `setup check` audits them
+  models            download the embedding, NLI and reranker models and the ONNX runtime
+  secure            create the non-superuser cuba_app role so RLS and the audit trigger bite
 
   -h, --help        this
   -V, --version     print the version and exit — touches no database
@@ -281,7 +283,10 @@ async fn async_main() {
         }
 
         Some(unknown) => {
-            eprintln!("cuba-memorys: unknown command '{unknown}'\n");
+            eprintln!(
+                "cuba-memorys: unknown command '{unknown}'\n\nknown commands: {}\n",
+                cuba_memorys::cli::COMMANDS.join(", ")
+            );
             print_help();
             std::process::exit(2);
         }

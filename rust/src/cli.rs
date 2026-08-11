@@ -4,6 +4,31 @@ use sqlx::{PgPool, Row};
 
 use crate::handlers;
 
+pub const COMMANDS: [&str; 22] = [
+    "serve",
+    "tunnel",
+    "search",
+    "save",
+    "delete",
+    "export",
+    "dashboard",
+    "doctor",
+    "recall",
+    "reembed",
+    "calibrate",
+    "link",
+    "dedupe",
+    "skills",
+    "eval",
+    "sync",
+    "hook",
+    "codegraph",
+    "rem",
+    "models",
+    "secure",
+    "setup",
+];
+
 fn undo_dir() -> std::path::PathBuf {
     std::env::var("CUBA_UNDO_DIR").map_or_else(
         |_| dirs_home().join(".cache").join("cuba-memorys").join("undo"),

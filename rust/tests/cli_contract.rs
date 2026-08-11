@@ -48,22 +48,15 @@ fn help_documents_the_command_surface() {
     let (stdout, _, code) = run(&["--help"]);
     assert_eq!(code, 0, "--help must exit 0");
 
-    for cmd in [
-        "search",
-        "save",
-        "delete",
-        "export",
-        "dashboard",
-        "doctor",
-        "recall",
-        "reembed",
-        "calibrate",
-        "link",
-        "skills",
-        "eval",
-        "setup",
-    ] {
-        assert!(stdout.contains(cmd), "--help must document `{cmd}`");
+    for cmd in cuba_memorys::cli::COMMANDS {
+        assert!(
+            stdout.contains(cmd),
+            "--help must document `{cmd}`. This used to check a hand-written list of 13 \
+             names frozen at the time it was written, so models, secure, serve, tunnel, \
+             sync, hook, codegraph, rem and dedupe could all have vanished from the help \
+             with the test still green. It now walks the same list the dispatcher's error \
+             message prints"
+        );
     }
 
     let (short, _, code) = run(&["-h"]);
@@ -170,4 +163,50 @@ fn every_file_that_holds_a_version_agrees() {
             "server.json's {registry} entry says {got}, but {registry} will receive {want}"
         );
     }
+}
+
+#[test]
+fn every_listed_command_is_actually_dispatched() {
+    for cmd in cuba_memorys::cli::COMMANDS {
+        let (_, stderr, code) = run(&[cmd, "--help"]);
+        assert_ne!(
+            code, 2,
+            "`{cmd}` is in COMMANDS but the dispatcher does not know it: {stderr}"
+        );
+        assert!(
+            !stderr.contains("unknown command"),
+            "`{cmd}` reached the unknown-command arm: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn the_readme_counts_the_commands_that_exist() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root");
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md");
+
+    let claimed = readme
+        .split_whitespace()
+        .zip(readme.split_whitespace().skip(1))
+        .find_map(|(n, word)| {
+            word.starts_with("CLI")
+                .then(|| {
+                    n.trim_matches(|c: char| !c.is_ascii_digit())
+                        .parse::<usize>()
+                        .ok()
+                })
+                .flatten()
+        })
+        .expect("README must state how many CLI commands there are");
+
+    assert_eq!(
+        claimed,
+        cuba_memorys::cli::COMMANDS.len(),
+        "the README says {claimed} CLI commands and the binary dispatches {}. A count in \
+         prose is a claim like any other, and this one drifted through three different \
+         numbers — 19 in the README, 20 in --help, 22 dispatched — before anything checked it",
+        cuba_memorys::cli::COMMANDS.len()
+    );
 }
