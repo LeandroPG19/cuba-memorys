@@ -38,3 +38,4 @@ pub mod skills_cli;
 pub mod sync;
 pub mod sync_cli;
 pub mod tasks;
+pub mod tunnel_cli;

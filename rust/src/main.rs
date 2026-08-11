@@ -24,6 +24,9 @@ ONE PROCESS FOR EVERY CLIENT:
                     and give each one an Mcp-Client-Id header so their sessions
                     stay separate. CUBA_HTTP_ADDR overrides the address;
                     CUBA_HTTP_TOKEN requires a bearer token.
+  tunnel            publish that daemon through a Cloudflare quick tunnel and print
+                    the client config, so Claude on the web can reach it. Requires
+                    CUBA_HTTP_TOKEN: a tunnel puts the whole graph on the internet.
 
 THE BRAIN, WITHOUT AN LLM IN BETWEEN:
   search <query>    hybrid search (use --format verbose for the score breakdown)
@@ -246,6 +249,14 @@ async fn async_main() {
             return;
         }
 
+        Some("tunnel") => {
+            if let Err(e) = cuba_memorys::tunnel_cli::run_cli(&argv[2..]).await {
+                tracing::error!(error = %format!("{e:#}"), "tunnel failed");
+                eprintln!("tunnel error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Some("serve") => {
             let addr = argv
                 .get(2)
