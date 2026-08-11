@@ -21,13 +21,6 @@ pub struct EvalConfig {
     pub max_tokens: i64,
 }
 
-/// `faro` recorta la lista de resultados hasta agotar un presupuesto de tokens, y
-/// su default de 5000 se alcanza de sobra con `verbose`: medido sobre el corpus
-/// real, la respuesta pesa 5251 tokens y el recorte se lleva las últimas filas.
-/// Puntuar esa lista mide cuánto ocupa una respuesta, no en qué orden rankea el
-/// motor — un cambio que sólo añadiera un campo por fila se registraría como
-/// regresión de calidad. El presupuesto es una decisión de producto para el
-/// cliente MCP; medir el ranking exige no tenerlo.
 const UNLIMITED_TOKENS: i64 = i64::MAX;
 
 impl Default for EvalConfig {

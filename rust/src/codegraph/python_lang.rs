@@ -51,10 +51,6 @@ fn walk(
                     calls: collect_calls(node, source),
                 });
             }
-            // Fall through to the shared recursion below so nested defs in
-            // the body are extracted as their own symbols too. collect_calls_rec
-            // stops at nested function_definition boundaries, so their calls
-            // aren't double-attributed to this outer function.
         }
         "class_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
@@ -131,8 +127,6 @@ fn collect_calls_rec(node: Node, source: &str, out: &mut Vec<String>) {
         }
     }
     for child in node.children(&mut node.walk()) {
-        // Nested defs are extracted as their own symbols with their own
-        // calls; don't also attribute their internal calls to the enclosing fn.
         if child.kind() == "function_definition" {
             continue;
         }

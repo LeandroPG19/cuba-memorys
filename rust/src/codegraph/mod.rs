@@ -26,8 +26,6 @@ impl SymbolKind {
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
-    /// Qualified, stable identity: "relative/path.rs::name". Two files can each
-    /// have a function called `new` — only the qualified name is unique.
     pub qualified_name: String,
     pub simple_name: String,
     pub kind: SymbolKind,
@@ -35,9 +33,6 @@ pub struct Symbol {
     pub line_start: usize,
     pub line_end: usize,
     pub signature: String,
-    /// Simple names this symbol's body calls, exactly as written in source —
-    /// resolution against the rest of the batch happens after every file is
-    /// parsed, not per-file, so call target order never matters.
     pub calls: Vec<String>,
 }
 
@@ -66,9 +61,6 @@ pub struct Edge {
 #[derive(Debug, Clone)]
 pub struct ModuleImports {
     pub file: String,
-    /// Raw import paths as written (e.g. `crate::db::create_pool`, `os.path`) —
-    /// not resolved to a symbol, since that needs a full module-resolution pass
-    /// this extractor deliberately doesn't attempt.
     pub paths: Vec<String>,
 }
 
@@ -164,11 +156,6 @@ fn walk(root: &Path, dir: &Path, extensions: &[&str], out: &mut ExtractionResult
     Ok(())
 }
 
-/// Resolve `calls` (simple names) into `Calls` edges. A call only becomes an
-/// edge when its simple name matches EXACTLY ONE symbol in the whole batch —
-/// ambiguous (0 or 2+ candidates) names are dropped rather than guessed, so
-/// every edge this produces is something the AST actually supports, not a
-/// heuristic pretending to be one.
 pub fn resolve_call_edges(symbols: &[Symbol]) -> Vec<Edge> {
     let mut by_simple_name: HashMap<&str, Vec<&str>> = HashMap::new();
     for s in symbols {

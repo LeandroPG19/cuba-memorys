@@ -1,9 +1,3 @@
-//! Benchmark: Rust handler latency + embedding performance.
-//!
-//! Usage:
-//!   DATABASE_URL="postgresql://user:pass@localhost:5433/cuba_memorys_test" \
-//!     cargo run --release --example bench_handlers
-
 use std::time::Instant;
 
 fn fmt_duration(d: std::time::Duration) -> String {
@@ -24,7 +18,6 @@ async fn main() {
 
     println!("\n  ═══ cuba-memorys Rust Benchmark ═══\n");
 
-    // ── 1. Embedding (hash fallback) ──────────────────────────────
     {
         let texts = [
             "Rust is a systems programming language focused on safety",
@@ -50,7 +43,6 @@ async fn main() {
         );
     }
 
-    // ── 2. alma::create ───────────────────────────────────────────
     {
         let iterations = 100;
         let start = Instant::now();
@@ -70,7 +62,6 @@ async fn main() {
         );
     }
 
-    // ── 3. alma::get ──────────────────────────────────────────────
     {
         let name = format!("bench_get_{}", uuid::Uuid::new_v4());
         let _ = cuba_memorys::handlers::dispatch(
@@ -97,7 +88,6 @@ async fn main() {
         );
     }
 
-    // ── 4. cronica::add ───────────────────────────────────────────
     {
         let name = format!("bench_cronica_{}", uuid::Uuid::new_v4());
         let iterations = 100;
@@ -123,7 +113,6 @@ async fn main() {
         );
     }
 
-    // ── 5. faro::search (hybrid) ──────────────────────────────────
     {
         let iterations = 50;
         let start = Instant::now();
@@ -140,7 +129,6 @@ async fn main() {
         );
     }
 
-    // ── 6. vigia::summary ─────────────────────────────────────────
     {
         let iterations = 50;
         let start = Instant::now();

@@ -1,14 +1,3 @@
-//! The shared-daemon transport.
-//!
-//! stdio gives every client its own process, and every process its own copy of
-//! the ONNX models — roughly 6 GB each. Three editor windows meant three copies.
-//! Here one process holds the models and answers every client over loopback
-//! HTTP, which is also the shape the 2026-07-28 MCP specification settled on:
-//! no session handshake, every request self-describing.
-//!
-//! Clients identify themselves with the `Mcp-Client-Id` header so that
-//! `jornada start` in one window does not become the active session of another.
-
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,12 +18,8 @@ use crate::protocol::{self, JsonRpcRequest};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8787";
 
-/// Observations can be long, and a rejected body reads to the client as a dead
-/// server. 8 MB is far above anything a tool call carries.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-/// A client that has not spoken in this long is assumed gone, and its session
-/// row is dropped. The daemon is meant to run for weeks.
 const CLIENT_TTL: Duration = Duration::from_secs(24 * 3600);
 const REAP_INTERVAL: Duration = Duration::from_secs(3600);
 
@@ -52,10 +37,6 @@ pub fn bind_addr() -> String {
     std::env::var("CUBA_HTTP_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_string())
 }
 
-/// How long with zero MCP requests (from any client) before the daemon exits.
-/// Unset or `0` keeps the daemon up forever — the behaviour this had before
-/// socket activation existed, and still what a long-lived server deployment
-/// wants. The desktop unit sets this; a bare `cuba-memorys serve` does not.
 fn idle_shutdown_after() -> Option<Duration> {
     let secs: u64 = std::env::var("CUBA_IDLE_SHUTDOWN_SECS")
         .ok()
@@ -64,13 +45,6 @@ fn idle_shutdown_after() -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
-/// systemd hands the already-bound, already-listening socket over as fd 3 when
-/// this unit is socket-activated (`LISTEN_FDS=1`, `LISTEN_PID` naming this
-/// process). Adopting it instead of binding is what lets the daemon start
-/// dormant and only pay for the port on the first real connection.
-///
-/// Unix only — `std::os::fd` does not exist on Windows, and neither does
-/// systemd. Everywhere else this returns `None` and `serve` binds normally.
 #[cfg(unix)]
 fn systemd_listener() -> Option<std::net::TcpListener> {
     use std::os::fd::{FromRawFd, RawFd};
@@ -84,9 +58,6 @@ fn systemd_listener() -> Option<std::net::TcpListener> {
         return None;
     }
     const SD_LISTEN_FDS_START: RawFd = 3;
-    // SAFETY: systemd guarantees fd 3 is a valid, already-listening socket
-    // when LISTEN_PID/LISTEN_FDS name this process — that is the activation
-    // protocol's whole contract.
     let listener = unsafe { std::net::TcpListener::from_raw_fd(SD_LISTEN_FDS_START) };
     listener.set_nonblocking(true).ok()?;
     Some(listener)
@@ -103,9 +74,6 @@ fn auth_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Rejects anything that is not loopback. The daemon answers without
-/// authentication by default, so binding it to a routable address would hand
-/// the whole knowledge graph to the network.
 fn ensure_loopback(addr: &SocketAddr) -> Result<()> {
     if addr.ip().is_loopback() || auth_token().is_some() {
         return Ok(());
@@ -122,7 +90,6 @@ pub async fn serve(addr: &str) -> Result<()> {
         .with_context(|| format!("invalid listen address: {addr}"))?;
     ensure_loopback(&addr)?;
 
-    // Every session read from now on resolves per client instead of per process.
     crate::session::enable_daemon_mode();
 
     let database_url = crate::setup::resolve_database_url().await;
@@ -140,8 +107,6 @@ pub async fn serve(addr: &str) -> Result<()> {
         }
     };
 
-    // One process now, so one consolidation cycle. Under stdio every window ran
-    // its own REM against the same database.
     if connected {
         let rem_pool = pool.clone();
         tokio::spawn(async move { protocol::rem_daemon(rem_pool).await });
@@ -159,8 +124,6 @@ pub async fn serve(addr: &str) -> Result<()> {
     let reaper_seen = state.seen.clone();
     tokio::spawn(async move { reap_idle_clients(reaper_seen).await });
 
-    // Signalled instead of exited: `main` still has to drain the background
-    // tasks after `serve` returns, and those tasks are what persist embeddings.
     let idle_shutdown = Arc::new(tokio::sync::Notify::new());
     if let Some(idle_after) = idle_shutdown_after() {
         let last_activity = state.last_activity.clone();
@@ -188,10 +151,6 @@ pub async fn serve(addr: &str) -> Result<()> {
         "cuba-memorys daemon listening — point clients at http://{addr}/mcp"
     );
 
-    // Load the models now, in the background. The listener is already up, so a
-    // client connecting during the load waits on its first search instead of
-    // timing out the connection — which is exactly how the stdio server used to
-    // strand 6 GB processes nobody was talking to.
     tokio::spawn(async {
         let started = Instant::now();
         warm_models().await;
@@ -231,14 +190,6 @@ async fn shutdown_signal(idle: Arc<tokio::sync::Notify>) {
     }
 }
 
-/// Whether the reranker pays its load at startup rather than on its first batch.
-///
-/// Measured on this machine: warming the embedder alone takes 0.26 s, warming
-/// both takes 11 s — the cross-encoder is 1.08 GB and its warm-up runs a real
-/// 50-candidate batch. Under socket activation with an idle shutdown the daemon
-/// starts far more often than it reranks, and plenty of those starts only ever
-/// answer a `save` or a `jornada`. The reranker already loads lazily on its
-/// first real batch, so the default is to let it.
 fn warm_reranker_eagerly() -> bool {
     matches!(
         std::env::var("CUBA_WARM_RERANKER").as_deref(),
@@ -246,9 +197,6 @@ fn warm_reranker_eagerly() -> bool {
     )
 }
 
-/// Pays the model load once, at startup, instead of on some client's first
-/// search. Both calls are the ones the search path itself uses, so this only
-/// moves the cost — it changes no behaviour and no model.
 async fn warm_models() {
     if crate::search::rerank::is_configured() {
         if !warm_reranker_eagerly() {
@@ -271,17 +219,6 @@ async fn warm_models() {
     }
 }
 
-/// Zero requests from any client for `idle_after` — nothing is holding the ONNX
-/// models in RAM/VRAM for, so give it back.
-///
-/// This notifies the shutdown path rather than calling `process::exit`. An exit
-/// here would skip the drain `main` runs after `serve` returns, and that drain is
-/// what flushes in-flight embedding writes — killing the process instead loses
-/// them silently, which is the one failure mode this daemon must not have.
-///
-/// Returning through the normal path still exits 0, so the unit's
-/// `Restart=on-failure` leaves the daemon down and the paired `.socket` unit is
-/// what brings it back on the next real request.
 async fn shutdown_when_idle(
     last_activity: Arc<Mutex<Instant>>,
     idle_after: Duration,
@@ -336,9 +273,6 @@ async fn reap_idle_clients(
     }
 }
 
-/// Which client this request belongs to. The header is what clients configure;
-/// `_meta` covers the 2026-07-28 style of carrying identity per request, and
-/// `clientInfo` catches an `initialize` that set neither.
 fn client_key(headers: &HeaderMap, payload: &Value) -> String {
     if let Some(id) = headers
         .get("mcp-client-id")
@@ -389,8 +323,6 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
 
-    // Constant-time compare: a length-dependent early exit is enough to walk a
-    // token out of a local server one byte at a time.
     let a = presented.as_bytes();
     let b = expected.as_bytes();
     if a.len() != b.len() {
@@ -450,7 +382,6 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         }
     }
 
-    // Nothing but notifications: JSON-RPC says answer with no body.
     if responses.is_empty() {
         return StatusCode::ACCEPTED.into_response();
     }
@@ -477,9 +408,6 @@ async fn dispatch_one(state: &AppState, key: &str, item: Value) -> Option<Value>
     let pool = state.pool.clone();
     let method = request.method.clone();
 
-    // One process serves every window now, so a panic in one client's handler
-    // would take down everyone else's server. Contain it here and answer that
-    // one request with an error instead.
     let work = crate::session::with_client(key.to_string(), async move {
         protocol::handle_request(&pool, request).await
     });
@@ -605,7 +533,6 @@ mod tests {
         assert!(ensure_loopback(&local).is_ok());
     }
 
-    // Tokio context: the lazy pool registers a background reaper on construction.
     #[tokio::test]
     async fn token_comparison_rejects_wrong_and_short_tokens() {
         let state = AppState {

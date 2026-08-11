@@ -76,15 +76,6 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         .await
         .context("connecting to database for codegraph build")?;
 
-    // This CLI runs as its own process (a manual invocation or the post-commit
-    // hook), so it never inherits an MCP session's `session::set` call — without
-    // this, `current_project_id` below always resolves None and every symbol
-    // gets written project_id=NULL, which RLS's tenant_isolation policy always
-    // lets through regardless of the active project, merging unrelated repos'
-    // code graphs together. Resolve/create the project from `--project` or the
-    // current directory's name (the repo root when run from the hook) and seed
-    // the session so `current_project_id` picks it up the same way it does when
-    // called from a handler.
     let project_name = project_arg.or_else(|| {
         std::env::current_dir().ok().and_then(|d| {
             d.file_name()
@@ -220,13 +211,6 @@ async fn upsert_symbol(
     Ok(())
 }
 
-/// Import targets are raw paths (`crate::db::create_pool`, `os.path`) that
-/// almost never match a parsed symbol's qualified name — resolving them
-/// properly needs full module-path resolution, which this extractor doesn't
-/// attempt. Instead each unique path becomes its own lightweight placeholder
-/// entity, so "this file depends on X" is still a real edge in the graph even
-/// when X is an external crate or stdlib module with no parsed symbols of its
-/// own.
 async fn upsert_placeholder_entity(
     conn: &mut sqlx::PgConnection,
     name: &str,

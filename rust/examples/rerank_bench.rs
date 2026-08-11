@@ -1,27 +1,8 @@
-//! Measures cross-encoder rerank latency against its own budget.
-//!
-//! The reranker is only worth its +93% nDCG if it finishes inside
-//! `CUBA_RERANK_TIMEOUT_SECS` (20 s by default). Past that, `faro` discards the
-//! scores and returns the RRF order — the inference cost is paid and thrown
-//! away. This tells you where a machine actually lands.
-//!
-//! ```bash
-//! cargo run --release --example rerank_bench                 # auto threads
-//! CUBA_RERANK_INTRA_THREADS=2 cargo run --release --example rerank_bench
-//! cargo run --release --example rerank_bench -- 50 3         # 50 candidates, 3 runs
-//! ```
-
 use std::time::{Duration, Instant};
 
 const DEFAULT_CANDIDATES: usize = 50;
 const DEFAULT_RUNS: usize = 3;
 
-/// Roughly the length of a real observation, so token counts are representative.
-///
-/// Real candidates are not all the same size — a one-line preference sits next
-/// to a full postmortem — and since a batch pads to its longest member, that
-/// spread is itself a cost. `uniform` isolates the thread effect; the default
-/// mixed corpus is what a live `faro` call actually hands the cross-encoder.
 fn corpus(n: usize, uniform: bool) -> Vec<String> {
     let base = "The retrieval pipeline fuses lexical BM25 with pgvector cosine similarity \
                 through reciprocal rank fusion, and the surviving candidates are rescored by \
@@ -99,8 +80,6 @@ async fn main() {
         println!("  run {i}: {elapsed:.2?}  ({verdict})");
     }
 
-    // The ranking itself, so a CPU run and a GPU run can be diffed. Speed is only
-    // an improvement if the order it produces is the same one.
     let scored = cuba_memorys::search::rerank::rerank(query, &refs)
         .await
         .expect("rerank failed");

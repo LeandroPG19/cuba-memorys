@@ -1,17 +1,6 @@
 use std::collections::HashSet;
 use uuid::Uuid;
 
-/// `cuba_archivo append` runs as `cuba_app`, the non-superuser role migration 0041
-/// introduced. That migration revokes UPDATE on `brain_audit_log` to make the log
-/// append-only as a privilege rather than only as a trigger — and `SELECT ... FOR
-/// UPDATE` demands the UPDATE privilege even when it updates nothing, so the whole
-/// verb returned "permission denied" from 0.21.0 onwards. Nobody noticed: CI was red
-/// and the E2E never completed.
-///
-/// Two things have to hold at once, which is why they are asserted together: the
-/// append must succeed under the restricted role, and concurrent appends must still
-/// produce one linear chain. Dropping the row lock is only safe because SERIALIZABLE
-/// makes SSI abort the loser with 40001 and the handler retries it.
 #[tokio::test]
 #[ignore]
 async fn concurrent_appends_succeed_as_the_app_role_and_keep_the_chain_linear() {

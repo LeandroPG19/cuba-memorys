@@ -174,11 +174,6 @@ async fn test_project_scoping_end_to_end() {
     .await
     .expect("start global session");
 
-    // Search for this run's own entity name, not the generic word "Project". The
-    // gate runs against the developer's live database, so a common term competes
-    // with the whole corpus for the top-20 and the assertion starts failing the day
-    // someone saves enough memories — which is what happened: it passed at 1804
-    // observations and failed at 1826, with nothing in the code having changed.
     let faro_global = cuba_memorys::handlers::dispatch(
         &pool,
         "cuba_faro",
@@ -189,7 +184,11 @@ async fn test_project_scoping_end_to_end() {
     let faro_global_text = extract_content_text(&faro_global);
     assert!(
         faro_global_text.contains(&ent_a) || faro_global_text.contains(&ent_b),
-        "global session should see at least one of the project entities: {faro_global_text}"
+        "global session should see at least one of the project entities: {faro_global_text}. \
+         The query above is this run's own entity name, not the generic word \"Project\": this \
+         gate runs against the developer's live database, so a common term competes with the \
+         whole corpus for the top-20 and starts failing the day someone saves enough memories — \
+         it passed at 1804 observations and failed at 1826 with no code change."
     );
     println!("  ✓ session without project sees rows from any project");
 

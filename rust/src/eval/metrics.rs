@@ -128,19 +128,6 @@ pub fn bootstrap_ci(scores: &[f64], iterations: usize, confidence: f64) -> (f64,
     (mean, means[lo_idx], means[hi_idx])
 }
 
-/// Worst-case detectable effect, from a single run.
-///
-/// The `sqrt(2/n)` is the standard error of a difference between two
-/// *independent* samples, and `var` is the variance *between questions* — some
-/// questions are easy and some are not. That is the right number when the two
-/// arms share nothing, and it is the only number a single run can produce: the
-/// correlation between arms cannot be known from one of them.
-///
-/// It is not the number to accept or reject a change with. Every comparison this
-/// project makes is paired — the same questions, two configurations — and there
-/// the between-question variance cancels. Use [`minimum_detectable_effect_paired`]
-/// once both arms exist; measured on this project's own published intervals, it
-/// resolves differences around 0.024 where this one demands 0.110.
 pub fn minimum_detectable_effect(scores: &[f64]) -> f64 {
     let n = scores.len();
     if n < 2 {
@@ -151,10 +138,6 @@ pub fn minimum_detectable_effect(scores: &[f64]) -> f64 {
     2.80 * var.sqrt() * (2.0 / n as f64).sqrt()
 }
 
-/// Detectable effect for the test this project actually runs: same questions,
-/// two configurations. Built on the standard deviation of the per-question
-/// *differences*, so whatever makes a question hard cancels instead of counting
-/// as noise.
 pub fn minimum_detectable_effect_paired(a: &[f64], b: &[f64]) -> f64 {
     let Some(diffs) = pairwise_differences(a, b) else {
         return f64::INFINITY;
@@ -168,15 +151,6 @@ pub fn minimum_detectable_effect_paired(a: &[f64], b: &[f64]) -> f64 {
     2.80 * var.sqrt() / (n as f64).sqrt()
 }
 
-/// Percentile bootstrap over the per-question differences `b - a`.
-///
-/// Resamples *pairs*, never the two arms independently — that is the whole point:
-/// question 7 contributes its own before/after or nothing at all. An interval
-/// that does not straddle zero is a real difference.
-///
-/// Returns `None` when the arms cannot be paired. There is no query identifier in
-/// the report to check the pairing with, so equal length is the only guard
-/// available, and both arms must come from the same unmodified dataset.
 pub fn paired_bootstrap(
     a: &[f64],
     b: &[f64],
@@ -198,10 +172,6 @@ fn pairwise_differences(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
 mod tests {
     use super::*;
 
-    /// Ten questions of wildly different difficulty, and a change that helps every
-    /// one of them by the same small amount. The between-question spread is what
-    /// the unpaired estimate calls noise; pairing cancels it, because each question
-    /// is compared against itself.
     fn arms_with_a_consistent_small_gain() -> (Vec<f64>, Vec<f64>, f64) {
         let before = vec![0.10, 0.90, 0.35, 0.72, 0.18, 0.61, 0.44, 0.87, 0.29, 0.53];
         let gain = 0.03;

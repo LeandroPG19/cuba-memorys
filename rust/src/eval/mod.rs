@@ -5,13 +5,6 @@ pub mod reporters;
 
 use anyhow::{Context, Result};
 
-/// Reads `metrics.per_query_ndcg` out of a `--json` report.
-///
-/// Parsed as a bare `Value` on purpose: `EvalReport` does not derive
-/// `Deserialize`, and it could not round-trip anyway — `minimum_detectable_effect`
-/// is `INFINITY` for a one-sample run and serde writes that as `null`. Only the
-/// per-question scores are needed here, and they are the one field a paired test
-/// cannot do without.
 fn per_query_ndcg(path: &str) -> Result<Vec<f64>> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     let doc: serde_json::Value =
@@ -25,11 +18,6 @@ fn per_query_ndcg(path: &str) -> Result<Vec<f64>> {
     Ok(scores.iter().filter_map(|v| v.as_f64()).collect())
 }
 
-/// Compares two `--json` runs with the test this project actually needs.
-///
-/// A single run reports an interval around its own mean, and two overlapping
-/// intervals say nothing about whether the arms differ — that is the overlap
-/// fallacy, and it is what made every sub-0.11 change look like noise.
 fn compare_runs(before: &str, after: &str) -> Result<()> {
     let a = per_query_ndcg(before)?;
     let b = per_query_ndcg(after)?;

@@ -32,8 +32,6 @@ pub(crate) struct JsonRpcRequest {
 static CLIENT_SUPPORTS_SAMPLING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Set by the first `initialize`. The watchdog below reads it to tell a client
-/// that is still coming up from one that gave up and left.
 static HANDSHAKE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn handshake_timeout() -> Option<Duration> {
@@ -44,14 +42,6 @@ fn handshake_timeout() -> Option<Duration> {
     }
 }
 
-/// Exits if no client ever completes the handshake.
-///
-/// This is the bug that started all of it: loading the models can outrun the
-/// client's 30 s connection timeout, and when the client gives up it does *not*
-/// close our stdin — it just stops reading. The process stayed alive holding
-/// every model it had loaded, one abandoned copy per attempt, until the machine
-/// was swapping. Nobody is ever going to talk to a server whose handshake never
-/// landed, so it should not outlive the attempt.
 fn spawn_handshake_watchdog() {
     let Some(limit) = handshake_timeout() else {
         return;
@@ -102,10 +92,6 @@ impl CancelToken {
     }
 }
 
-/// The server->client channel, which only the stdio transport has. HTTP is
-/// request/response, so this is `None` there — and it used to `.expect()`, which
-/// under `panic = "abort"` would have taken the whole daemon (every client's
-/// session with it) down on the first server-initiated message.
 fn outbound() -> Option<&'static mpsc::UnboundedSender<Value>> {
     OUTBOUND.get()
 }
@@ -139,9 +125,6 @@ pub async fn request_sampling_max(prompt: &str, max_tokens: u32) -> anyhow::Resu
         );
     }
 
-    // Resolve the channel before registering anything: on the HTTP daemon there
-    // is none, and an early return after the insert would leak a pending entry
-    // that nothing will ever answer.
     let channel = outbound().ok_or_else(|| {
         anyhow::anyhow!(
             "no server->client channel: sampling needs the stdio transport. \
@@ -250,19 +233,8 @@ fn server_info() -> Value {
 pub async fn run_mcp() -> Result<()> {
     let database_url = crate::setup::resolve_database_url().await;
 
-    // Dying here means never speaking the protocol: the client sees a process
-    // that exited, not a server that cannot reach its database — no tool
-    // list, no reason. Start anyway on a pool that has not connected yet.
-    // `initialize` and `tools/list` touch no database, so the client still
-    // gets the full tool list, and each call then fails with the actual error
-    // instead of a corpse.
     let (pool, connected) = match db::create_pool(&database_url).await {
         Ok(pool) => {
-            // main.rs's own preliminary create_pool() only catches a mismatch
-            // if PostgreSQL already answers before this process starts. Under
-            // a startup race (DB comes up moments later) that check silently
-            // no-ops, and this pool — the one every tool call actually
-            // uses — is the last chance to say so before serving traffic.
             db::assert_embedding_dim(&pool).await?;
             (pool, true)
         }
@@ -275,8 +247,6 @@ pub async fn run_mcp() -> Result<()> {
         }
     };
 
-    // No database, nothing to consolidate: the REM cycle would just wake up
-    // to fail on every tick.
     let rem_handle = connected.then(|| {
         let rem_pool = pool.clone();
         tokio::spawn(async move {
@@ -445,10 +415,6 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
                     .get("capabilities")
                     .and_then(|c| c.get("sampling"))
                     .is_some();
-                // One process, many clients: this flag is global, so honouring
-                // it would let one client's capabilities decide how another
-                // client's judge runs. The daemon has no server->client channel
-                // anyway — leave it false and let the judge use the local NLI.
                 if crate::session::daemon_mode() {
                     if sampling_advertised {
                         tracing::debug!(
@@ -562,11 +528,6 @@ pub(crate) async fn rem_daemon(pool: PgPool) {
 }
 
 pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
-    // The REM cycle runs outside any request, so under the daemon there is no
-    // client in scope and `session_id()` is deliberately blind. Ask the daemon's
-    // table for every client's session instead, and fall back to the database so
-    // a cycle that fires before anyone has called `jornada start` still protects
-    // whatever session is genuinely open.
     let candidates: Vec<uuid::Uuid> = match crate::session::session_id() {
         Some(sid) => vec![sid],
         None if crate::session::daemon_mode() => {
