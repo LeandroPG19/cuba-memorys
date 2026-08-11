@@ -25,6 +25,31 @@ MemoryMax=6G
 OOMScoreAdjust=200
 Nice=5
 
+# Sandboxing. What is here is what this daemon survives; what is missing is
+# missing on purpose:
+#   * PrivateDevices would take away /dev/nvidia*, so the reranker loses the GPU.
+#   * ProtectHome would take away ~/.cache/cuba-memorys, where the models live.
+#   * ProtectSystem=strict would make the sync directory read-only, and that path
+#     is chosen per call — full protects /usr, /boot and /etc, which is the part
+#     this daemon never needs to write.
+#   * MemoryDenyWriteExecute breaks ONNX Runtime, which JITs its kernels.
+# ProtectControlGroups and ProtectKernelTunables stay read-only rather than
+# hidden: the resource planner reads /sys/fs/cgroup and /proc at startup.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# One shared daemon for every editor window: a pool plus a listener plus model
+# file handles. The systemd user default of 1024 is the real ceiling, not a
+# theoretical one.
+LimitNOFILE=4096
+
 # Per-model device placement. Only the reranker gains from a GPU:
 #  * embedder — INT8 dynamic quantisation, which the CUDA provider has no kernel
 #    for, so it always ran on the CPU anyway; registering CUDA for it only

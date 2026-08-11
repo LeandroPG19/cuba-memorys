@@ -91,7 +91,7 @@
     {
       "registryType": "pypi",
       "identifier": "cuba-memorys",
-      "version": "0.21.0",
+      "version": "1.23.0",
       "transport": {
         "type": "stdio"
       },
