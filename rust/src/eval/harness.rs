@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::HashSet;
+use uuid::Uuid;
 
 use super::datasets::EvaluationSample;
 use super::metrics::{
@@ -82,6 +84,12 @@ pub struct EvalReport {
     pub latency_p95_ms: f64,
     #[serde(default)]
     pub warmup_ms: f64,
+    #[serde(default)]
+    pub missing_relevant_ids: usize,
+    #[serde(default)]
+    pub questions_with_missing_ids: usize,
+    #[serde(default)]
+    pub unmeasurable_questions: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +152,9 @@ pub async fn run_faro_eval(
             minimum_detectable_effect: f64::INFINITY,
             per_query_ndcg: Vec::new(),
             scored_by_id: false,
+            missing_relevant_ids: 0,
+            questions_with_missing_ids: 0,
+            unmeasurable_questions: 0,
         });
     }
 
@@ -169,6 +180,10 @@ pub async fn run_faro_eval(
     let mut abstain_correct = 0usize;
     let mut answerable_total = 0usize;
     let mut false_abstentions = 0usize;
+    let mut qa_count = 0usize;
+
+    let surviving_ids = surviving_relevant_ids(pool, samples).await?;
+    let audit = audit_ground_truth(samples, &surviving_ids);
 
     let warmup_started = std::time::Instant::now();
     crate::embeddings::onnx::embed("warm up")
@@ -212,12 +227,20 @@ pub async fn run_faro_eval(
             continue;
         }
 
+        let total_rel = if sample.scored_by_id() {
+            resolvable_relevant_count(sample, &surviving_ids)
+        } else {
+            sample.relevant_count()
+        };
+        if total_rel == 0 {
+            continue;
+        }
+
         answerable_total += 1;
         if ranked.is_empty() {
             false_abstentions += 1;
         }
 
-        let total_rel = sample.relevant_count();
         let s_ndcg = ndcg_at_k(&rels, k, total_rel);
         let s_recall = recall_at_k(&rels, total_rel, k);
         ndcg_sum += s_ndcg;
@@ -237,16 +260,12 @@ pub async fn run_faro_eval(
             let top = ranked.first().map(|h| h.content.as_str()).unwrap_or("");
             em_sum += calculate_exact_match(top, expected);
             f1_sum += calculate_f1_score(top, expected);
+            qa_count += 1;
         }
     }
 
-    let scored = (samples.len() - abstain_total).max(1);
-
+    let scored = ndcg_scores.len().max(1);
     let n = samples.len();
-    let qa_count = samples
-        .iter()
-        .filter(|s| s.expected_answer.is_some())
-        .count();
 
     let ability_scores: Vec<AbilityScore> = per_ability
         .into_iter()
@@ -301,7 +320,77 @@ pub async fn run_faro_eval(
         warmup_ms,
         per_query_ndcg: ndcg_scores,
         scored_by_id: all_by_id,
+        missing_relevant_ids: audit.missing_ids,
+        questions_with_missing_ids: audit.affected_questions,
+        unmeasurable_questions: audit.unmeasurable_questions,
     })
+}
+
+async fn surviving_relevant_ids(
+    pool: &PgPool,
+    samples: &[EvaluationSample],
+) -> Result<HashSet<Uuid>> {
+    let wanted: Vec<Uuid> = samples
+        .iter()
+        .filter(|s| !s.abstain)
+        .flat_map(|s| s.relevant_ids.iter())
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect();
+    if wanted.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let rows: Vec<(Uuid,)> = sqlx::query_as("SELECT id FROM brain_observations WHERE id = ANY($1)")
+        .bind(&wanted)
+        .fetch_all(pool)
+        .await
+        .context("resolving which relevant_ids still exist in the corpus")?;
+
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+fn resolves(id: &str, surviving: &HashSet<Uuid>) -> bool {
+    Uuid::parse_str(id).is_ok_and(|parsed| surviving.contains(&parsed))
+}
+
+fn resolvable_relevant_count(sample: &EvaluationSample, surviving: &HashSet<Uuid>) -> usize {
+    sample
+        .relevant_ids
+        .iter()
+        .filter(|id| resolves(id.as_str(), surviving))
+        .count()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GroundTruthAudit {
+    missing_ids: usize,
+    affected_questions: usize,
+    unmeasurable_questions: usize,
+}
+
+fn audit_ground_truth(samples: &[EvaluationSample], surviving: &HashSet<Uuid>) -> GroundTruthAudit {
+    let mut missing: HashSet<&str> = HashSet::new();
+    let mut audit = GroundTruthAudit::default();
+
+    for sample in samples.iter().filter(|s| !s.abstain && s.scored_by_id()) {
+        let gone: Vec<&str> = sample
+            .relevant_ids
+            .iter()
+            .filter(|id| !resolves(id.as_str(), surviving))
+            .map(String::as_str)
+            .collect();
+        if gone.is_empty() {
+            continue;
+        }
+        audit.affected_questions += 1;
+        if gone.len() == sample.relevant_ids.len() {
+            audit.unmeasurable_questions += 1;
+        }
+        missing.extend(gone);
+    }
+
+    audit.missing_ids = missing.len();
+    audit
 }
 
 struct Hit {
@@ -362,7 +451,6 @@ pub fn percentile_ms(values: &[f64], q: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn the_eval_scores_the_whole_ranking_not_what_fits_in_a_token_budget() {
@@ -406,11 +494,132 @@ mod tests {
         }
     }
 
+    fn marker_sample() -> EvaluationSample {
+        EvaluationSample {
+            query: "error conexión postgres".into(),
+            relevant_ids: HashSet::new(),
+            relevant_markers: vec!["postgres".into()],
+            expected_answer: None,
+            ability: None,
+            abstain: false,
+        }
+    }
+
     fn hit(id: &str, content: &str) -> Hit {
         Hit {
             id: Some(id.into()),
             content: content.into(),
         }
+    }
+
+    const ALIVE: &str = "11111111-1111-4111-8111-111111111111";
+    const ALSO_ALIVE: &str = "22222222-2222-4222-8222-222222222222";
+    const DELETED: &str = "33333333-3333-4333-8333-333333333333";
+    const ALSO_DELETED: &str = "44444444-4444-4444-8444-444444444444";
+
+    fn corpus(ids: &[&str]) -> HashSet<Uuid> {
+        ids.iter()
+            .map(|id| Uuid::parse_str(id).expect("fixture ids must be UUIDs"))
+            .collect()
+    }
+
+    #[test]
+    fn a_deleted_relevant_document_leaves_the_benchmark_ceiling_below_one() {
+        let sample = sample_by_id(&[ALIVE, DELETED]);
+        let found_everything_that_still_exists = vec![true, false, false];
+
+        let honest = ndcg_at_k(
+            &found_everything_that_still_exists,
+            10,
+            resolvable_relevant_count(&sample, &corpus(&[ALIVE])),
+        );
+        let against_the_dataset = ndcg_at_k(&found_everything_that_still_exists, 10, 2);
+
+        assert!(
+            against_the_dataset < 0.99,
+            "this fixture only proves anything if counting the deleted document caps the score \
+             below 1,0 — it scored {against_the_dataset:.4}"
+        );
+        assert!(
+            (honest - 1.0).abs() < 1e-9,
+            "a run that returned every relevant document STILL IN THE CORPUS must score 1,0; \
+             scoring {honest:.4} blames the search for a row somebody deleted"
+        );
+    }
+
+    #[test]
+    fn ids_that_are_not_uuids_are_treated_as_gone_not_as_present() {
+        let sample = sample_by_id(&["not-a-uuid"]);
+
+        assert_eq!(
+            resolvable_relevant_count(&sample, &corpus(&[ALIVE])),
+            0,
+            "an id the database cannot even be asked about is unresolvable, and counting it \
+             would put back the very ceiling this resolution removes"
+        );
+    }
+
+    #[test]
+    fn the_audit_counts_distinct_missing_ids_the_questions_they_hit_and_the_ones_left_blind() {
+        let samples = vec![
+            sample_by_id(&[ALIVE]),
+            sample_by_id(&[ALIVE, DELETED]),
+            sample_by_id(&[DELETED, ALSO_DELETED]),
+            sample_by_id(&[ALSO_ALIVE, ALSO_DELETED]),
+        ];
+
+        let audit = audit_ground_truth(&samples, &corpus(&[ALIVE, ALSO_ALIVE]));
+
+        assert_eq!(
+            audit.missing_ids, 2,
+            "two rows are gone, and the fourth question reuses one of them: counting id \
+             occurrences instead of distinct ids would report 4"
+        );
+        assert_eq!(audit.affected_questions, 3);
+        assert_eq!(
+            audit.unmeasurable_questions, 1,
+            "only the third question lost ALL its ground truth; the others can still be scored \
+             against what survives"
+        );
+    }
+
+    #[test]
+    fn an_abstention_question_is_not_audited_for_missing_ground_truth() {
+        let mut abstainer = sample_by_id(&[DELETED]);
+        abstainer.abstain = true;
+
+        assert_eq!(
+            audit_ground_truth(&[abstainer], &corpus(&[ALIVE])),
+            GroundTruthAudit::default(),
+            "an abstention question is scored by whether the search returned nothing at all, \
+             so its relevant_ids are not a denominator and cannot deflate one"
+        );
+    }
+
+    #[test]
+    fn a_substring_scored_dataset_is_audited_without_a_single_database_row() {
+        let samples = vec![marker_sample()];
+
+        assert_eq!(
+            audit_ground_truth(&samples, &HashSet::new()),
+            GroundTruthAudit::default(),
+            "a dataset with no relevant_ids has no ids to discount: reporting a lowered ceiling \
+             for it would be inventing a limitation"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolving_ground_truth_does_not_dial_the_database_when_there_are_no_ids_to_resolve() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://eval-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network");
+
+        let surviving = surviving_relevant_ids(&pool, &[marker_sample()])
+            .await
+            .expect("a substring-scored dataset must not cost a query at all");
+
+        assert!(surviving.is_empty());
     }
 
     #[test]
@@ -427,14 +636,7 @@ mod tests {
 
     #[test]
     fn marker_scoring_survives_for_old_datasets() {
-        let legacy = EvaluationSample {
-            query: "error conexión postgres".into(),
-            relevant_ids: HashSet::new(),
-            relevant_markers: vec!["postgres".into()],
-            expected_answer: None,
-            ability: None,
-            abstain: false,
-        };
+        let legacy = marker_sample();
         assert!(!legacy.scored_by_id());
         assert!(hit("x", "fallo de conexión postgres en docker").is_relevant(&legacy));
         assert!(!hit("y", "todo ok").is_relevant(&legacy));
@@ -463,5 +665,56 @@ mod tests {
                 "{shape}: falta el contenido"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_run_whose_ground_truth_was_deleted_reports_a_lowered_ceiling() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL env var required for integration tests");
+        let pool = crate::db::create_pool(&url)
+            .await
+            .expect("connect to test database");
+
+        let ghost = Uuid::new_v4();
+        let samples = vec![EvaluationSample {
+            query: "una consulta cualquiera sobre nada en particular".into(),
+            relevant_ids: std::iter::once(ghost.to_string()).collect(),
+            relevant_markers: vec![],
+            expected_answer: None,
+            ability: None,
+            abstain: false,
+        }];
+
+        let report = run_faro_eval(&pool, &samples, &EvalConfig::default())
+            .await
+            .expect("the eval must run even when its ground truth is gone");
+
+        assert_eq!(
+            report.missing_relevant_ids, 1,
+            "the run has to notice that the only document it was scored against does not \
+             exist. Reverting the call site alone leaves every unit test green, because \
+             they exercise the counting function and not its use — this is the wiring"
+        );
+        assert_eq!(report.unmeasurable_questions, 1);
+        assert!(
+            report.per_query_ndcg.is_empty(),
+            "a question whose ground truth is gone must be left OUT of the scores, not \
+             scored as a zero. Counting it as a miss punishes retrieval for a document \
+             nobody could have returned, and this is the assertion that catches the call \
+             site reverting while the counting function stays correct — the audit fields \
+             above do not, because they come from a different pass"
+        );
+        assert!(
+            crate::eval::reporters::summary_line(&report).contains("techo"),
+            "and the report has to say so out loud: a benchmark whose ceiling is not 1.0 \
+             produces a number nobody can compare against a published one"
+        );
     }
 }
