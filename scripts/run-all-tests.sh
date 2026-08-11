@@ -21,6 +21,7 @@ cargo test
 echo "=== DB integration tests (--ignored) ==="
 cargo test --test integration --test v08_project_scoping --test v09_integration \
            --test v021_audit_append_under_app_role -- --ignored --nocapture
+cargo test --lib -- --ignored --nocapture
 
 # build-gpu.sh, not a bare `cargo build --release`. Without --features cuda,
 # gpu::wants_gpu() returns false unconditionally, CUBA_RERANK_DEVICE=gpu goes
