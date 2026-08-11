@@ -21,12 +21,12 @@ const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct JsonRpcRequest {
-    pub(crate) jsonrpc: String,
-    pub(crate) id: Option<Value>,
-    pub(crate) method: String,
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: Option<Value>,
+    pub method: String,
     #[serde(default)]
-    pub(crate) params: Option<Value>,
+    pub params: Option<Value>,
 }
 
 static CLIENT_SUPPORTS_SAMPLING: std::sync::atomic::AtomicBool =
@@ -76,7 +76,7 @@ static PENDING: OnceLock<Mutex<std::collections::HashMap<u64, oneshot::Sender<Va
 
 static NEXT_SERVER_ID: AtomicU64 = AtomicU64::new(1);
 
-static CANCEL_TOKENS: OnceLock<Mutex<std::collections::HashMap<String, CancelToken>>> =
+static CANCEL_TOKENS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, CancelToken>>> =
     OnceLock::new();
 
 #[derive(Clone, Default)]
@@ -89,6 +89,23 @@ impl CancelToken {
     }
     pub fn cancel(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub struct CancelRegistration {
+    key: String,
+    token: CancelToken,
+}
+
+impl CancelRegistration {
+    pub fn token(&self) -> CancelToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for CancelRegistration {
+    fn drop(&mut self) {
+        cancel_tokens().remove(&self.key);
     }
 }
 
@@ -109,8 +126,12 @@ fn pending() -> &'static Mutex<std::collections::HashMap<u64, oneshot::Sender<Va
     PENDING.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-fn cancel_tokens() -> &'static Mutex<std::collections::HashMap<String, CancelToken>> {
-    CANCEL_TOKENS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn cancel_tokens() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, CancelToken>>
+{
+    CANCEL_TOKENS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub async fn request_sampling(prompt: &str) -> anyhow::Result<String> {
@@ -204,16 +225,11 @@ pub fn notify_progress(token: &str, progress: f64, total: Option<f64>, message: 
     }
 }
 
-pub async fn register_cancel_token(request_id: &Value) -> CancelToken {
+pub fn register_cancel_token(request_id: &Value) -> CancelRegistration {
     let token = CancelToken::default();
     let key = request_id.to_string();
-    cancel_tokens().lock().await.insert(key, token.clone());
-    token
-}
-
-pub async fn unregister_cancel_token(request_id: &Value) {
-    let key = request_id.to_string();
-    cancel_tokens().lock().await.remove(&key);
+    cancel_tokens().insert(key.clone(), token.clone());
+    CancelRegistration { key, token }
 }
 
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 5] = [
@@ -462,7 +478,7 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
                 && let Some(req_id) = params.get("requestId")
             {
                 let key = req_id.to_string();
-                if let Some(token) = cancel_tokens().lock().await.get(&key) {
+                if let Some(token) = cancel_tokens().get(&key).cloned() {
                     token.cancel();
                     tracing::info!(req_id = %key, "client requested cancellation");
                 }
@@ -497,14 +513,15 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
 
             tracing::info!(tool = %tool_name, "executing tool");
 
-            let token = register_cancel_token(&req_id).await;
+            let registration = register_cancel_token(&req_id);
+            let token = registration.token();
             let cancel_fut = async {
                 while !token.cancelled() {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             };
 
-            let outcome = tokio::select! {
+            tokio::select! {
                 result = tokio::time::timeout(
                     handler_timeout(),
                     handlers::dispatch(pool, &tool_name, arguments),
@@ -519,10 +536,7 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
                     tracing::warn!(tool = %tool_name, req_id = %req_id, "handler cancelled by client");
                     Err(anyhow::anyhow!("Handler cancelled by client"))
                 }
-            };
-
-            unregister_cancel_token(&req_id).await;
-            outcome
+            }
         }
 
         _ => {
@@ -1092,6 +1106,126 @@ mod tests {
         let mut unique = SUPPORTED_PROTOCOL_VERSIONS.to_vec();
         unique.dedup();
         assert_eq!(unique.len(), SUPPORTED_PROTOCOL_VERSIONS.len());
+    }
+
+    fn pool_that_never_connects() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_lazy("postgres://cancel-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    fn tools_call(id: &str, tool: &str, arguments: Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::String(id.to_string())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({ "name": tool, "arguments": arguments })),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tools_call_dropped_mid_flight_leaves_no_cancel_token_behind() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let key = Value::String("drop-probe".to_string()).to_string();
+        let pool = pool_that_never_connects();
+
+        let in_flight = tokio::spawn(async move {
+            handle_request(
+                &pool,
+                tools_call(
+                    "drop-probe",
+                    "cuba_pizarra",
+                    serde_json::json!({ "action": "read" }),
+                ),
+            )
+            .await
+        });
+
+        let mut registered = false;
+        for _ in 0..200 {
+            if cancel_tokens().contains_key(&key) {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            registered,
+            "the call never reached the select!, so this test would prove nothing about \
+             what happens when its future is dropped"
+        );
+        assert!(
+            !in_flight.is_finished(),
+            "the handler was supposed to still be blocked acquiring a connection that will \
+             never come; if it returned early the drop below happens after the normal \
+             cleanup and the leak stays invisible"
+        );
+
+        in_flight.abort();
+        assert!(
+            in_flight.await.is_err_and(|e| e.is_cancelled()),
+            "aborting must drop the handler future, which is what axum does to the /mcp \
+             handler when the client hangs up"
+        );
+
+        assert!(
+            !cancel_tokens().contains_key(&key),
+            "a request abandoned by the client leaked one entry in CANCEL_TOKENS for the \
+             whole life of the daemon: request ids are a monotonic counter, so nothing ever \
+             reuses the key and the map only grows"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tools_call_that_returns_normally_leaves_no_cancel_token_behind() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let key = Value::String("finish-probe".to_string()).to_string();
+        let pool = pool_that_never_connects();
+
+        let outcome = handle_request(
+            &pool,
+            tools_call("finish-probe", "no_such_tool", Value::Null),
+        )
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "an unknown tool must fail without touching the pool, which is what keeps this \
+             test free of a database"
+        );
+        assert!(
+            !cancel_tokens().contains_key(&key),
+            "the happy path must clean up too: moving the cleanup into Drop is worthless if \
+             it stops running when the handler simply returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registered_call_is_cancellable_through_the_map_until_it_is_dropped() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let req_id = Value::String("cancel-probe".to_string());
+        let key = req_id.to_string();
+
+        let registration = register_cancel_token(&req_id);
+        let published = cancel_tokens()
+            .get(&key)
+            .cloned()
+            .expect("registering must publish the token before the handler starts");
+        published.cancel();
+
+        assert!(
+            registration.token().cancelled(),
+            "notifications/cancelled flips the flag it finds in the map; if that were a copy \
+             instead of a shared handle, cancelling would silently do nothing"
+        );
+
+        drop(registration);
+        assert!(
+            !cancel_tokens().contains_key(&key),
+            "cleanup must be tied to the registration's lifetime, not to a call the caller \
+             may never reach"
+        );
     }
 
     #[test]
