@@ -58,6 +58,9 @@ jobs:
       - name: cargo test (--features docs)
         run: cargo test --features docs
 
+      - name: cargo clippy (--features observability,anthropic-api)
+        run: cargo clippy --all-targets --features observability,anthropic-api -- -D warnings
+
       - name: cargo audit
         run: |
           cargo install cargo-audit --quiet

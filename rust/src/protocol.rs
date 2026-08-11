@@ -216,9 +216,33 @@ pub async fn unregister_cancel_token(request_id: &Value) {
     cancel_tokens().lock().await.remove(&key);
 }
 
-fn server_info() -> Value {
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 5] = [
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
+
+const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    let Some(requested) = requested else {
+        return FALLBACK_PROTOCOL_VERSION;
+    };
+    SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|supported| *supported == requested)
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
+fn server_info(params: Option<&Value>) -> Value {
+    let requested = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(Value::as_str);
     serde_json::json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": negotiate_protocol_version(requested),
         "capabilities": {
             "tools": { "listChanged": false },
             "resources": { "listChanged": false, "subscribe": false }
@@ -430,7 +454,7 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
                     }
                 }
             }
-            Ok(server_info())
+            Ok(server_info(request.params.as_ref()))
         }
         "initialized" | "notifications/initialized" => Ok(Value::Null),
         "notifications/cancelled" => {
@@ -1012,4 +1036,76 @@ async fn read_resource(pool: &PgPool, uri: &str) -> Result<Value> {
     }
 
     anyhow::bail!("Unknown cuba:// URI scheme: {uri}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_we_speak_is_echoed_back_unchanged() {
+        for supported in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(
+                negotiate_protocol_version(Some(supported)),
+                supported,
+                "the spec says answer with the client's version when we support it; \
+                 answering something else makes a conforming client disconnect"
+            );
+        }
+    }
+
+    #[test]
+    fn a_version_we_do_not_know_gets_our_newest_not_our_oldest() {
+        assert_eq!(
+            negotiate_protocol_version(Some("2027-01-01")),
+            SUPPORTED_PROTOCOL_VERSIONS[0],
+            "a client from the future is told the newest we speak, so it can decide; \
+             replying 2024-11-05 to it was the bug"
+        );
+        assert_eq!(
+            negotiate_protocol_version(Some("nonsense")),
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+    }
+
+    #[test]
+    fn a_client_that_states_no_version_gets_the_floor() {
+        assert_eq!(
+            negotiate_protocol_version(None),
+            FALLBACK_PROTOCOL_VERSION,
+            "protocolVersion is required, so a missing one means a client that predates \
+             the field or is broken: the oldest version is the only safe answer"
+        );
+    }
+
+    #[test]
+    fn the_supported_list_is_ordered_newest_first_and_has_no_duplicates() {
+        let mut sorted = SUPPORTED_PROTOCOL_VERSIONS;
+        sorted.sort_unstable();
+        sorted.reverse();
+        assert_eq!(
+            sorted, SUPPORTED_PROTOCOL_VERSIONS,
+            "negotiation falls back to index 0, so the list being newest-first is what \
+             makes that fallback the newest instead of an arbitrary entry"
+        );
+
+        let mut unique = SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+        unique.dedup();
+        assert_eq!(unique.len(), SUPPORTED_PROTOCOL_VERSIONS.len());
+    }
+
+    #[test]
+    fn initialize_answers_with_the_version_the_client_asked_for() {
+        let params = serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        });
+
+        let info = server_info(Some(&params));
+
+        assert_eq!(info["protocolVersion"], "2025-06-18");
+        assert_eq!(info["serverInfo"]["name"], "cuba-memorys");
+        assert!(info["capabilities"]["tools"].is_object());
+    }
 }

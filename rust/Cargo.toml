@@ -71,9 +71,6 @@ tree-sitter-python = "0.25.0"
 
 [features]
 default = []
-bitemporal = []
-graph-energy = []
-eval-benchmarks = []
 anthropic-api = []
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
