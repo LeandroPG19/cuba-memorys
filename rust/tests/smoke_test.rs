@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 
 #[test]
 fn test_all_tools_defined() {
@@ -82,62 +82,6 @@ fn test_tool_schema_structure() {
 }
 
 #[test]
-fn test_jsonrpc_request_format() {
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": "cuba_alma",
-            "arguments": {
-                "action": "get",
-                "name": "test_entity"
-            }
-        }
-    });
-
-    assert_eq!(request["jsonrpc"], "2.0");
-    assert_eq!(request["method"], "tools/call");
-    assert!(request["params"]["name"].is_string());
-    assert!(request["params"]["arguments"].is_object());
-}
-
-#[test]
-fn test_jsonrpc_response_format() {
-    let response = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "content": [{
-                "type": "text",
-                "text": "{\"status\": \"ok\"}"
-            }]
-        }
-    });
-
-    assert_eq!(response["jsonrpc"], "2.0");
-    assert_eq!(response["id"], 1);
-    let content = &response["result"]["content"];
-    assert!(content.is_array());
-    assert_eq!(content[0]["type"], "text");
-}
-
-#[test]
-fn test_jsonrpc_error_format() {
-    let error = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "error": {
-            "code": -32602,
-            "message": "Invalid params"
-        }
-    });
-
-    assert_eq!(error["error"]["code"], -32602);
-    assert!(error["error"]["message"].is_string());
-}
-
-#[test]
 fn test_threshold_invariants() {
     use cuba_memorys::constants::*;
 
@@ -171,11 +115,23 @@ fn advertised_tools_are_all_dispatchable() {
 }
 
 #[test]
-fn test_schema_sql_content() {
-    let schema = include_str!("../src/schema.sql");
-    assert!(!schema.is_empty());
+fn the_embedded_migrations_build_every_object_the_handlers_query() {
+    let migrator = sqlx::migrate!("./migrations");
+    let up: String = migrator
+        .migrations
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration())
+        .map(|m| m.sql.as_ref())
+        .collect::<Vec<&str>>()
+        .join("\n");
 
-    for table in &[
+    assert!(
+        !up.is_empty(),
+        "sqlx::migrate! resolved zero up-migrations, so db.rs would hand the handlers an \
+         empty database and every query would fail at runtime"
+    );
+
+    for object in &[
         "brain_entities",
         "brain_observations",
         "brain_relations",
@@ -184,28 +140,24 @@ fn test_schema_sql_content() {
         "brain_episodes",
         "brain_triggers",
         "brain_verify_log",
+        "brain_audit_log",
+        "brain_procedures",
+        "brain_wm",
+        "embedding_model",
+        "session_id",
+        "importance",
+        "tags TEXT[]",
+        "idx_obs_high_importance",
+        "CREATE EXTENSION IF NOT EXISTS vector",
+        "pg_trgm",
     ] {
-        assert!(schema.contains(table), "Missing table: {table}");
+        assert!(
+            up.contains(object),
+            "«{object}» is queried by the handlers but no migration creates it. This test \
+             reads the set sqlx::migrate! embeds — the same one db.rs applies — precisely \
+             because src/schema.sql froze at v0.6.0 and is 20 tables behind"
+        );
     }
-
-    assert!(schema.contains("vector"), "Missing pgvector");
-    assert!(schema.contains("pg_trgm"), "Missing pg_trgm");
-    assert!(schema.contains("embedding"), "Missing embedding column");
-    assert!(schema.contains("importance"), "Missing importance column");
-    assert!(
-        schema.contains("embedding_model"),
-        "Missing embedding_model column"
-    );
-    assert!(schema.contains("session_id"), "Missing session_id column");
-    assert!(schema.contains("tags TEXT[]"), "Missing tags column");
-    assert!(
-        schema.contains("idx_obs_high_importance"),
-        "Missing partial importance index"
-    );
-    assert!(
-        schema.contains("tags TEXT[]"),
-        "Missing tags column definition"
-    );
 }
 
 #[test]
@@ -279,4 +231,32 @@ fn model_tag_follows_the_environment() {
     );
 
     unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
+}
+
+#[test]
+fn a_request_without_an_id_parses_as_a_notification() {
+    use cuba_memorys::protocol::JsonRpcRequest;
+
+    let notification: JsonRpcRequest = serde_json::from_str(
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    )
+    .expect("a notification is a valid envelope: params is #[serde(default)] and id is optional");
+    assert!(
+        notification.id.is_none(),
+        "an absent id is the only thing separating a notification from a call. Parsed with \
+         one, the server would answer something nobody is waiting for and the client would \
+         see an orphan response"
+    );
+    assert_eq!(notification.method, "notifications/initialized");
+
+    let call: JsonRpcRequest =
+        serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#)
+            .expect("a call with no params is valid");
+    assert_eq!(call.id, Some(serde_json::json!(7)));
+
+    assert!(
+        serde_json::from_str::<JsonRpcRequest>(r#"{"jsonrpc":"2.0","id":1}"#).is_err(),
+        "with no method there is nothing to dispatch: it has to die in the parser and come \
+         back as -32600, not reach a handler"
+    );
 }

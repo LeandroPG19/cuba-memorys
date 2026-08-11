@@ -4,6 +4,31 @@ use crate::handlers::receta;
 
 const TRUSTED: f64 = 0.5;
 
+const NO_HISTORY: &str = "> **Sin historial.** Este procedimiento nunca se ejecutó, así que no hay evidencia \
+     de que funcione. Verificá cada paso y reportá el resultado con \
+     `cuba_receta action=outcome`.\n\n";
+
+const UNRELIABLE: &str = "> Falla más veces de las que funciona. Tratalo como una hipótesis, \
+     no como una receta: probablemente esté desactualizado.\n\n";
+
+const THIN_EVIDENCE: &str = "> Ha funcionado más de lo que ha fallado, pero se ejecutó demasiado \
+     pocas veces como para prometer nada. Verificá los pasos y reportá el \
+     resultado — con unas pocas ejecuciones más, esto se vuelve fiable.\n\n";
+
+fn verdict(successes: i64, failures: i64) -> (&'static str, Option<&'static str>) {
+    let total = successes + failures;
+    if total == 0 {
+        return ("Sin historial", Some(NO_HISTORY));
+    }
+    if receta::wilson_lower_bound(successes, failures) >= TRUSTED {
+        ("Probado", None)
+    } else if (successes as f64) / (total as f64) < 0.5 {
+        ("POCO FIABLE", Some(UNRELIABLE))
+    } else {
+        ("Sin evidencia suficiente", Some(THIN_EVIDENCE))
+    }
+}
+
 fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -113,43 +138,15 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         body.push_str(&format!("# {name}\n\n"));
 
         let total = successes + failures;
-        if total == 0 {
-            body.push_str(
-                "> **Sin historial.** Este procedimiento nunca se ejecutó, así que no hay evidencia \
-                 de que funcione. Verificá cada paso y reportá el resultado con \
-                 `cuba_receta action=outcome`.\n\n",
-            );
-        } else {
-            let rate = successes as f64 / total as f64;
-            let pct = rate * 100.0;
-
-            let (mark, caveat) = if reliability >= TRUSTED {
-                ("Probado", None)
-            } else if rate < 0.5 {
-                (
-                    "POCO FIABLE",
-                    Some(
-                        "> Falla más veces de las que funciona. Tratalo como una hipótesis, \
-                         no como una receta: probablemente esté desactualizado.\n\n",
-                    ),
-                )
-            } else {
-                (
-                    "Sin evidencia suficiente",
-                    Some(
-                        "> Ha funcionado más de lo que ha fallado, pero se ejecutó demasiado \
-                         pocas veces como para prometer nada. Verificá los pasos y reportá el \
-                         resultado — con unas pocas ejecuciones más, esto se vuelve fiable.\n\n",
-                    ),
-                )
-            };
-
+        let (mark, caveat) = verdict(successes, failures);
+        if total > 0 {
+            let pct = successes as f64 / total as f64 * 100.0;
             body.push_str(&format!(
                 "> **{mark}: {successes} de {total} veces** ({pct:.0}%, fiabilidad {reliability:.2}).\n\n"
             ));
-            if let Some(c) = caveat {
-                body.push_str(c);
-            }
+        }
+        if let Some(c) = caveat {
+            body.push_str(c);
         }
 
         if !preconditions.is_empty() {
@@ -196,26 +193,55 @@ mod tests {
 
     #[test]
     fn low_confidence_is_not_the_same_as_a_bad_procedure() {
-        fn verdict(successes: i64, failures: i64) -> &'static str {
-            let total = successes + failures;
-            if total == 0 {
-                return "sin historial";
-            }
-            let reliability = crate::handlers::receta::wilson_lower_bound(successes, failures);
-            let rate = successes as f64 / total as f64;
-            if reliability >= TRUSTED {
-                "probado"
-            } else if rate < 0.5 {
-                "poco fiable"
-            } else {
-                "sin evidencia suficiente"
-            }
-        }
+        assert_eq!(
+            verdict(47, 3),
+            ("Probado", None),
+            "47 de 50 clears the Wilson floor: the only case the Skill may advertise \
+             without a caveat, because the agent will follow it unquestioned"
+        );
 
-        assert_eq!(verdict(3, 1), "sin evidencia suficiente");
-        assert_eq!(verdict(1, 9), "poco fiable");
-        assert_eq!(verdict(0, 0), "sin historial");
-        assert_eq!(verdict(47, 3), "probado");
+        assert_eq!(
+            verdict(3, 1).0,
+            "Sin evidencia suficiente",
+            "3 de 4 works more often than not, so calling it unreliable would bury a \
+             procedure that is probably fine — it just has not run enough times"
+        );
+
+        assert_eq!(
+            verdict(1, 9).0,
+            "POCO FIABLE",
+            "1 de 10 fails far more than it works: the agent must be told to treat it \
+             as a hypothesis instead of running it"
+        );
+
+        assert_eq!(
+            verdict(4, 6).0,
+            "POCO FIABLE",
+            "the cut is rate < 0.5 and 4 de 10 falls on the bad side of it; moving that \
+             threshold to 0.4 would silently promote this procedure to «sin evidencia \
+             suficiente» and hide that it fails more than it works"
+        );
+        assert_eq!(
+            verdict(5, 5).0,
+            "Sin evidencia suficiente",
+            "5 de 10 is the other side of the same cut: a coin flip is not «poco fiable», \
+             it is unproven"
+        );
+
+        assert_eq!(
+            verdict(0, 0).0,
+            "Sin historial",
+            "never executed is not the same as failing: wilson_lower_bound returns 0.0 \
+             for both, so the branch order is what keeps them apart"
+        );
+
+        for (s, f) in [(3, 1), (1, 9), (4, 6), (5, 5), (0, 0)] {
+            assert!(
+                verdict(s, f).1.is_some(),
+                "{s}/{f} is not trustworthy, so its Skill must carry the caveat that says \
+                 so — without it the agent reads the procedure as verified"
+            );
+        }
     }
 
     #[test]

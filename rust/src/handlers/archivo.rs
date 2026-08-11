@@ -33,7 +33,12 @@ pub fn audit_key() -> Option<Vec<u8>> {
     (!key.is_empty()).then(|| key.as_bytes().to_vec())
 }
 
-fn compute_hash(prev_hash: &[u8], action: &str, payload: &[u8], created_at_iso: &str) -> Vec<u8> {
+pub fn compute_hash(
+    prev_hash: &[u8],
+    action: &str,
+    payload: &[u8],
+    created_at_iso: &str,
+) -> Vec<u8> {
     match audit_key() {
         Some(key) => compute_hmac(&key, prev_hash, action, payload, created_at_iso),
         None => compute_sha256(prev_hash, action, payload, created_at_iso),
