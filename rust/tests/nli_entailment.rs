@@ -14,6 +14,7 @@ fn skip_unless_model() -> bool {
 }
 
 #[tokio::test]
+#[ignore]
 async fn true_claim_is_supported() {
     if skip_unless_model() {
         return;
@@ -36,6 +37,7 @@ async fn true_claim_is_supported() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn false_claim_is_contradicted() {
     if skip_unless_model() {
         return;
@@ -53,6 +55,7 @@ async fn false_claim_is_contradicted() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn unrelated_claim_is_neutral() {
     if skip_unless_model() {
         return;
@@ -70,6 +73,7 @@ async fn unrelated_claim_is_neutral() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn english_still_works() {
     if skip_unless_model() {
         return;
@@ -85,6 +89,7 @@ async fn english_still_works() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn distractor_clauses_do_not_dilute_the_verdict() {
     if skip_unless_model() {
         return;
@@ -109,6 +114,7 @@ async fn distractor_clauses_do_not_dilute_the_verdict() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn a_false_claim_is_never_confirmed_on_weak_entailment() {
     if skip_unless_model() {
         return;
@@ -140,6 +146,7 @@ async fn a_false_claim_is_never_confirmed_on_weak_entailment() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn technical_substitutions_are_caught_decisively() {
     if skip_unless_model() {
         return;
@@ -173,6 +180,7 @@ async fn technical_substitutions_are_caught_decisively() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn a_verdict_costs_milliseconds_not_seconds() {
     if skip_unless_model() {
         return;

@@ -478,8 +478,6 @@ async fn get_entity_id(pool: &PgPool, name: &str) -> Result<uuid::Uuid> {
         .context(format!("Entity '{name}' not found"))
 }
 
-/// Adamic-Adar has no natural ceiling; squash it into the (0, 1] the strength
-/// column requires without pretending the score IS a probability.
 fn normalize_aa_score(score: f64) -> f64 {
     (score / (score + 1.0)).clamp(0.01, 1.0)
 }
@@ -505,13 +503,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn create_resets_provenance_to_extracted_on_conflict() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!(
-                "skipping create_resets_provenance_to_extracted_on_conflict: DATABASE_URL not set"
-            );
-            return;
-        };
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL env var required for integration tests");
         let pool = crate::db::create_pool(&url)
             .await
             .expect("connect to test database");
@@ -526,8 +521,6 @@ mod tests {
                 .expect("create test entity");
         }
 
-        // Simulate what `predict` does when asked to persist its guesses:
-        // the edge starts out life explicitly marked as a heuristic, not a fact.
         let from_id = get_entity_id(&pool, &from).await.expect("from_id");
         let to_id = get_entity_id(&pool, &to).await.expect("to_id");
         sqlx::query(
@@ -540,7 +533,6 @@ mod tests {
         .await
         .expect("seed predicted relation");
 
-        // A human now asserts the same edge explicitly via `create`.
         create(
             &pool,
             &serde_json::json!({

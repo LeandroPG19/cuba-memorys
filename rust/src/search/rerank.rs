@@ -33,15 +33,6 @@ pub fn rerank_concurrency() -> usize {
         .unwrap_or(RERANK_DEFAULT_CONCURRENCY)
 }
 
-/// How many threads ONNX Runtime may use inside a single inference.
-///
-/// This was hardcoded to 2. The cross-encoder is an XLM-RoBERTa-large — 24
-/// layers, 1024 hidden — and every candidate is a full forward pass over up to
-/// 512 tokens, so two threads is what pushed a 50-candidate rerank past its own
-/// 20 s budget: the model ran, and the scores were thrown away for a timeout.
-///
-/// Physical cores, not SMT siblings: GEMM kernels saturate the vector units, so
-/// hyperthreads add scheduling overhead without adding throughput.
 fn intra_threads() -> usize {
     if let Some(n) = std::env::var("CUBA_RERANK_INTRA_THREADS")
         .ok()
@@ -50,9 +41,6 @@ fn intra_threads() -> usize {
     {
         return n;
     }
-    // On the GPU the GEMMs run as CUDA kernels and these threads only marshal
-    // tensors across the boundary, so a wide pool is idle stacks contending with
-    // the embedder's — and the embedder is the one that really runs on the CPU.
     if crate::gpu::wants_gpu(crate::gpu::Workload::Reranker) {
         return 2;
     }
@@ -61,18 +49,10 @@ fn intra_threads() -> usize {
         .unwrap_or(2)
 }
 
-/// Whether the cross-encoder is loaded and usable.
-///
-/// Loading is lazy, so the first call pays for a multi-GB model read. That makes
-/// this a *blocking* call: never invoke it straight from an async task — wrap it
-/// in `spawn_blocking`, or one client's first search stalls the whole runtime,
-/// which under the shared daemon means every other client too.
 pub fn enabled() -> bool {
     matches!(get_status(), RerankerStatus::Loaded)
 }
 
-/// True once the status has been resolved, without resolving it. Lets callers
-/// (and tests) tell "not loaded" from "not asked yet" without paying the load.
 pub fn status_resolved() -> bool {
     RERANKER_STATUS.get().is_some()
 }
@@ -186,9 +166,6 @@ fn init_session(model_dir: &std::path::Path) -> Result<()> {
 }
 
 pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)>> {
-    // Nothing to rank: answer before touching the model. This used to sit *after*
-    // the `enabled()` check, so reranking an empty list paid a multi-GB lazy load
-    // in full and then returned the empty vector anyway.
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -201,9 +178,6 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
         .await
         .map_err(|_| anyhow::anyhow!("reranker semaphore closed"))?;
 
-    // `enabled()` may load the model, so it belongs on the blocking pool with the
-    // inference it gates — not on an async worker where it would stall every
-    // other client the daemon is serving.
     let n = candidates.len();
     let scored = tokio::task::spawn_blocking(move || {
         if !enabled() {
@@ -226,14 +200,6 @@ pub async fn rerank(query: &str, candidates: &[&str]) -> Result<Vec<(usize, f64)
 const RERANK_CHUNK: usize = 16;
 const RERANK_MAX_TOKENS: usize = 512;
 
-/// How many candidates cross the encoder in one forward pass.
-///
-/// Activation memory scales with `chunk × tokens`, and under `fixed_shape` every
-/// batch is padded to the full `RERANK_MAX_TOKENS`, which makes this the single
-/// biggest lever on the GPU arena this session reserves. 16 keeps the device
-/// busy; halving it roughly halves peak activations for the price of more
-/// passes over the same total work. Tunable without a rebuild so the tradeoff
-/// can be measured against `nvidia-smi` on the machine that has to live with it.
 fn rerank_chunk() -> usize {
     std::env::var("CUBA_RERANK_CHUNK")
         .ok()
@@ -242,13 +208,6 @@ fn rerank_chunk() -> usize {
         .unwrap_or(RERANK_CHUNK)
 }
 
-/// Whether every batch is padded to `RERANK_MAX_TOKENS`.
-///
-/// Fixed shapes keep the GPU from re-planning per batch, but they also mean a
-/// one-line note costs the same as a full 512-token passage — which is only
-/// worth it when the device is actually running the model. Keyed off the real
-/// placement rather than the compile-time feature, so pointing the reranker at
-/// the CPU does not silently leave it padding everything to 512.
 pub fn bucketed_len(longest: usize) -> usize {
     let bucket = rerank_bucket();
     if bucket == 0 {
@@ -276,17 +235,6 @@ pub fn fixed_shape() -> bool {
     }
 }
 
-/// Whether to group similar-length candidates into the same batch.
-///
-/// A batch pads to its longest member, and every padded position is still a full
-/// column of attention and GEMM work. Real candidate sets mix one-line notes with
-/// long postmortems, so an unsorted batch can spend most of its compute on
-/// padding. Sorting by length first cuts that away.
-///
-/// Scores are unaffected: the attention mask already zeroes padded positions, so
-/// each (query, passage) pair is scored on exactly its own tokens regardless of
-/// who it shares a batch with. Pointless under `fixed_shape`, where every batch
-/// is padded to `RERANK_MAX_TOKENS` by construction.
 fn length_bucketing() -> bool {
     match std::env::var("CUBA_RERANK_LENGTH_BUCKETING").as_deref() {
         Ok("0") | Ok("off") | Ok("false") => false,
@@ -309,8 +257,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
         .get()
         .context("reranker tokenizer not initialized")?;
 
-    // Longest first: the biggest batch runs while the machine is coldest, and a
-    // ragged final chunk carries the shortest inputs instead of the longest.
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     if length_bucketing() {
         order.sort_by_key(|&i| std::cmp::Reverse(candidates[i].len()));
@@ -331,7 +277,6 @@ fn score_pairs(query: &str, candidates: &[String]) -> Result<Vec<f64>> {
             s
         };
 
-        // Back to the caller's order — `rerank` pairs these with their indices.
         for (pos, &original) in chunk.iter().enumerate() {
             scores[original] = chunk_scores[pos];
         }
@@ -442,13 +387,8 @@ fn identity_pairs(n: usize) -> Vec<(usize, f64)> {
 mod tests {
     use super::*;
 
-    /// Resolves the status against a directory that exists but holds no model,
-    /// so the fallback path is exercised without reading the real multi-GB one.
-    /// If something already resolved it, that wins — `OnceLock` is per process.
     fn force_fallback_if_unresolved() {
         if !status_resolved() {
-            // SAFETY: single-threaded setup before the status is first read; the
-            // only reader of this variable is `get_status`, gated by a OnceLock.
             unsafe { std::env::set_var("CUBA_RERANKER_PATH", std::env::temp_dir()) };
         }
     }
@@ -456,10 +396,12 @@ mod tests {
     #[tokio::test]
     async fn identity_when_disabled() {
         force_fallback_if_unresolved();
-        if enabled() {
-            eprintln!("SKIP: reranker already loaded; identity path not exercised");
-            return;
-        }
+        assert!(
+            !enabled(),
+            "force_fallback_if_unresolved must guarantee the fallback path; if this \
+             fires, something else in this process resolved the reranker status first \
+             and the identity path went untested"
+        );
         let pairs = rerank("anything", &["a", "b", "c"]).await.unwrap();
         assert_eq!(pairs.len(), 3);
         assert_eq!(pairs[0].0, 0);
@@ -474,8 +416,6 @@ mod tests {
         }
     }
 
-    /// The regression that hung this suite: reranking nothing used to run the
-    /// lazy model load to completion before returning the empty vector.
     #[tokio::test]
     async fn empty_candidates_returns_empty_without_loading_the_model() {
         let resolved_before = status_resolved();
@@ -498,7 +438,6 @@ mod tests {
 
     #[test]
     fn intra_threads_is_configurable_and_never_zero() {
-        // SAFETY: no other thread reads this variable during the test.
         unsafe { std::env::set_var("CUBA_RERANK_INTRA_THREADS", "6") };
         assert_eq!(intra_threads(), 6);
 

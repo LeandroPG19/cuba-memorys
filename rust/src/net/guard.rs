@@ -143,9 +143,8 @@ mod tests {
 
     #[test]
     fn public_documentation_is_allowed() {
-        match check("https://docs.rs/tokio/latest/tokio/") {
-            Ok(safe) => assert!(!is_forbidden(&safe.addr.ip())),
-            Err(e) => eprintln!("SKIP (sin red): {e:#}"),
-        }
+        let safe = check("https://docs.rs/tokio/latest/tokio/")
+            .expect("docs.rs must resolve and pass the SSRF check");
+        assert!(!is_forbidden(&safe.addr.ip()));
     }
 }
