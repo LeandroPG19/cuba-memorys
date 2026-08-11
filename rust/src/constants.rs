@@ -251,11 +251,12 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_zafra",
-            "Memory maintenance: decay (stratified exponential by type), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats, reembed (re-encode with current model).",
+            "Memory maintenance: decay (stratified exponential by type), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats, reembed (re-encode with current model). prune PLANS by default: it reports how many observations it would delete, broken down by project, and only deletes when you pass confirm=true. Every action is scoped to the active project.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export", "reembed", "decay_episodes"], "description": "Consolidation action. decay_episodes applies power-law decay to brain_episodes."},
+                    "confirm": {"type": "boolean", "description": "prune only: actually delete. Without it prune returns a dry-run plan with would_prune and by_project, and deletes nothing. Read the plan before setting this — the default threshold reaches a large share of a mature corpus."},
                     "entity_name": {"type": "string", "description": "Entity to summarize (for summarize action)"},
                     "compressed_summary": {"type": "string", "description": "Compressed text replacing observations (for summarize)"},
                     "threshold": {"type": "number", "description": "Importance threshold for prune (default 0.1)"},
@@ -685,6 +686,37 @@ mod profile_tests {
         for t in tools_for("agent") {
             let name = t.get("name").and_then(Value::as_str).unwrap_or_default();
             assert!(full.contains(&name.to_string()), "{name} no está en full");
+        }
+    }
+
+    #[test]
+    fn a_tool_that_can_destroy_data_declares_its_safety_switch() {
+        const GUARDED: [&str; 2] = ["cuba_forget", "cuba_zafra"];
+
+        for name in GUARDED {
+            let tool = tool_definitions()
+                .iter()
+                .find(|t| t.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("{name} disappeared from the catalogue"));
+
+            let confirm = tool.pointer("/inputSchema/properties/confirm");
+            assert!(
+                confirm.is_some_and(|c| c.get("type").and_then(Value::as_str) == Some("boolean")),
+                "{name} deletes rows and gates that behind `confirm`, but its schema does not \
+                 declare the key. A caller cannot discover a switch that is not in the schema, \
+                 and clients that strip undeclared properties would make the guarded path \
+                 unreachable"
+            );
+
+            let described = confirm
+                .and_then(|c| c.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                !described.trim().is_empty(),
+                "{name}: a boolean called `confirm` with no description tells the caller \
+                 nothing about what it is confirming"
+            );
         }
     }
 }

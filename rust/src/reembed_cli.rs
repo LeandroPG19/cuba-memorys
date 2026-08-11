@@ -68,15 +68,22 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         );
     }
 
-    let rows: Vec<(uuid::Uuid, String)> = if all {
-        sqlx::query_as("SELECT id, content FROM brain_observations ORDER BY id")
-            .fetch_all(&pool)
-            .await
+    let rows: Vec<crate::handlers::zafra::StaleObservation> = if all {
+        sqlx::query_as(
+            "SELECT o.id, o.content, e.entity_type, e.name AS entity_name
+             FROM brain_observations o
+             JOIN brain_entities e ON e.id = o.entity_id
+             ORDER BY o.id",
+        )
+        .fetch_all(&pool)
+        .await
     } else {
         sqlx::query_as(
-            "SELECT id, content FROM brain_observations
-             WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM $1
-             ORDER BY id",
+            "SELECT o.id, o.content, e.entity_type, e.name AS entity_name
+             FROM brain_observations o
+             JOIN brain_entities e ON e.id = o.entity_id
+             WHERE o.embedding IS NULL OR o.embedding_model IS DISTINCT FROM $1
+             ORDER BY o.id",
         )
         .bind(&model)
         .fetch_all(&pool)
@@ -96,27 +103,9 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut done = 0usize;
     let mut failed = 0usize;
     for chunk in rows.chunks(batch.clamp(1, 5000) as usize) {
-        for (id, content) in chunk {
-            match crate::embeddings::onnx::embed_passage(content).await {
-                Ok(v) => {
-                    sqlx::query(
-                        "UPDATE brain_observations
-                         SET embedding = $1, embedding_model = $2 WHERE id = $3",
-                    )
-                    .bind(pgvector::Vector::from(v))
-                    .bind(&model)
-                    .bind(id)
-                    .execute(&pool)
-                    .await
-                    .context("writing the embedding")?;
-                    done += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, id = %id, "no se pudo embeber");
-                    failed += 1;
-                }
-            }
-        }
+        let (ok, bad) = crate::handlers::zafra::reembed_batch(&pool, chunk, &model).await;
+        done += ok;
+        failed += bad;
         eprintln!("  {done}/{total}");
     }
 
