@@ -52,19 +52,7 @@ impl OodStats {
         }
         target_dist /= d as f64;
 
-        let mut b_bar = 0.0;
-        for x in &centered {
-            let mut acc = 0.0;
-            for i in 0..d {
-                for j in 0..d {
-                    let outer = x[i] * x[j];
-                    let diff = outer - cov[(i, j)];
-                    acc += diff * diff;
-                }
-            }
-            b_bar += acc / d as f64;
-        }
-        b_bar /= (n * n) as f64;
+        let b_bar = mean_squared_outer_deviation(&centered, &cov) / (n * n) as f64;
         let b2 = b_bar.min(target_dist);
 
         let intensity = if target_dist > f64::EPSILON {
@@ -112,6 +100,19 @@ impl OodStats {
     }
 }
 
+fn mean_squared_outer_deviation(centered: &[DVector<f64>], cov: &DMatrix<f64>) -> f64 {
+    let d = cov.nrows() as f64;
+    let cov_frobenius_sq = cov.norm_squared();
+    centered
+        .iter()
+        .map(|x| {
+            let norm_sq = x.norm_squared();
+            let quadratic = x.dot(&(cov * x));
+            (norm_sq * norm_sq - 2.0 * quadratic + cov_frobenius_sq) / d
+        })
+        .sum()
+}
+
 const Z_99: f64 = 2.326_347_9;
 
 pub fn default_threshold(dim: usize) -> f64 {
@@ -155,6 +156,120 @@ mod tests {
         }
         cov.fill_upper_triangle_with_lower_triangle();
         cov
+    }
+
+    fn centered_and_covariance(embeddings: &[Vec<f32>]) -> (Vec<DVector<f64>>, DMatrix<f64>) {
+        let n = embeddings.len();
+        let d = embeddings[0].len();
+        let mut mean = DVector::<f64>::zeros(d);
+        for e in embeddings {
+            for (i, &v) in e.iter().enumerate() {
+                mean[i] += v as f64;
+            }
+        }
+        mean /= n as f64;
+
+        let mut cov = DMatrix::<f64>::zeros(d, d);
+        let mut centered = Vec::with_capacity(n);
+        for e in embeddings {
+            let mut diff = DVector::<f64>::zeros(d);
+            for (i, &v) in e.iter().enumerate() {
+                diff[i] = v as f64 - mean[i];
+            }
+            cov.syger(1.0, &diff, &diff, 1.0);
+            centered.push(diff);
+        }
+        cov.fill_upper_triangle_with_lower_triangle();
+        cov /= (n - 1).max(1) as f64;
+        (centered, cov)
+    }
+
+    fn outer_deviation_by_the_naive_double_loop(
+        centered: &[DVector<f64>],
+        cov: &DMatrix<f64>,
+    ) -> f64 {
+        let d = cov.nrows();
+        let mut total = 0.0;
+        for x in centered {
+            let mut acc = 0.0;
+            for i in 0..d {
+                for j in 0..d {
+                    let outer = x[i] * x[j];
+                    let diff = outer - cov[(i, j)];
+                    acc += diff * diff;
+                }
+            }
+            total += acc / d as f64;
+        }
+        total
+    }
+
+    #[test]
+    fn closed_form_outer_deviation_matches_the_naive_double_loop() {
+        let center: Vec<f32> = (0..96).map(|i| (i as f32) * 0.011 - 0.5).collect();
+        let samples = random_around(&center, 150, 0.3);
+        let (centered, cov) = centered_and_covariance(&samples);
+
+        let naive = outer_deviation_by_the_naive_double_loop(&centered, &cov);
+        let closed = mean_squared_outer_deviation(&centered, &cov);
+        let relative = (naive - closed).abs() / naive.abs().max(f64::MIN_POSITIVE);
+
+        assert!(
+            relative < 1e-12,
+            "closed form gave {closed} against {naive} from the double loop, relative difference \
+             {relative:e}. The identity sum_ij (xi*xj - Cij)^2 = ||x||^4 - 2*x'Cx + ||C||_F^2 is \
+             exact in real arithmetic but NOT bit for bit in f64: the closed form sums d dot \
+             products where the loop sums d^2 scalars, so the rounding order differs. Anything \
+             above 1e-12 is not rounding, it is a wrong term"
+        );
+    }
+
+    #[test]
+    fn shrinkage_intensity_survives_the_closed_form_rewrite() {
+        let center: Vec<f32> = (0..80).map(|i| (i as f32) * 0.017 - 0.6).collect();
+        let samples = random_around(&center, 200, 0.25);
+        let (centered, cov) = centered_and_covariance(&samples);
+        let n = samples.len();
+        let d = cov.nrows();
+
+        let mu = (0..d).map(|i| cov[(i, i)]).sum::<f64>() / d as f64;
+        let mut target_dist = 0.0;
+        for i in 0..d {
+            for j in 0..d {
+                let t = if i == j { mu } else { 0.0 };
+                let diff = cov[(i, j)] - t;
+                target_dist += diff * diff;
+            }
+        }
+        target_dist /= d as f64;
+
+        let intensity_of = |sum: f64| {
+            let b2 = (sum / (n * n) as f64).min(target_dist);
+            (b2 / target_dist).clamp(0.0, 1.0)
+        };
+
+        let naive = intensity_of(outer_deviation_by_the_naive_double_loop(&centered, &cov));
+        let fast = intensity_of(mean_squared_outer_deviation(&centered, &cov));
+        let stats = OodStats::fit(&samples).expect("fit should succeed");
+
+        assert!(
+            fast > 0.0 && fast < 1.0,
+            "intensity is saturated at {fast}, so this fixture cannot tell the two \
+             implementations apart: b2 = b_bar.min(target_dist) would clamp any b_bar to the same \
+             number. Pick a sample count and dimension that leave it strictly inside (0, 1)"
+        );
+        assert!(
+            (naive - fast).abs() < 1e-12,
+            "shrinkage intensity moved from {naive} to {fast} with the closed form. This value \
+             scales the covariance towards its diagonal target, so it propagates to the inverse, \
+             to every Mahalanobis distance and to the abstention verdict"
+        );
+        assert!(
+            (stats.shrinkage - fast).abs() < 1e-12,
+            "fit() reported shrinkage {} but the closed form computed here gives {fast}: fit is \
+             no longer using this term the way the test reproduces it",
+            stats.shrinkage
+        );
     }
 
     #[test]
