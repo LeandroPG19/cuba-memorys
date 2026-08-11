@@ -26,6 +26,11 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         anyhow::bail!("error_message is required");
     }
 
+    crate::redact::refuse_secrets(&args, "error_message", error_message)?;
+    let context_text = serde_json::to_string_pretty(&context)
+        .context("failed to serialise the error context for the secret scan")?;
+    crate::redact::refuse_secrets(&args, "context", &context_text)?;
+
     let project_id = crate::project::current_project_id(pool).await?;
 
     let row: (uuid::Uuid,) = sqlx::query_as(
@@ -83,4 +88,61 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://alarma-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn an_error_report_refuses_a_credential_in_its_message_or_in_its_context() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let cases = [
+            (
+                "error_message",
+                serde_json::json!({
+                    "error_type": "HttpError",
+                    "error_message": "401 al llamar con ghp_abcdefghijklmnop"
+                }),
+            ),
+            (
+                "context",
+                serde_json::json!({
+                    "error_type": "HttpError",
+                    "error_message": "401 al llamar a la API",
+                    "context": {"file": "deploy.rs", "header": "ghp_abcdefghijklmnop"}
+                }),
+            ),
+        ];
+
+        for (field, args) in cases {
+            let Err(failure) = handle(&pool, args).await else {
+                panic!(
+                    "the report answered Ok on a pool that cannot connect: nothing but the \
+                     secret gate could have answered, and the gate must refuse"
+                );
+            };
+
+            let chain = format!("{failure:#}");
+            assert!(
+                chain.contains("github token"),
+                "the token in {field} reached the database: a stack trace or a request context \
+                 is exactly where a live header gets pasted without anyone reading it. Got: \
+                 {chain}"
+            );
+            assert!(
+                !chain.contains("ghp_abcdefghijklmnop"),
+                "the refusal repeated the secret, and refusals get logged: {chain}"
+            );
+        }
+    }
 }

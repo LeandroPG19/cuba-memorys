@@ -418,90 +418,8 @@ fn truncate_for_prompt(s: &str) -> String {
     format!("{head}… [truncado]")
 }
 
-pub fn redact_secrets(s: &str) -> String {
-    const SECRET_KEYS: [&str; 7] = [
-        "password", "passwd", "pwd", "token", "secret", "api_key", "apikey",
-    ];
-
-    fn names_a_secret(key: &str) -> bool {
-        let key = key.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-        let lower = key.to_lowercase();
-        SECRET_KEYS.iter().any(|k| lower.ends_with(k))
-    }
-
-    let mut out = String::with_capacity(s.len());
-    let mut redact_next = false;
-
-    for token in s.split_inclusive(char::is_whitespace) {
-        let trimmed = token.trim_end();
-        let trailing = &token[trimmed.len()..];
-
-        if trimmed.is_empty() {
-            out.push_str(token);
-            continue;
-        }
-
-        if redact_next {
-            out.push_str("***");
-            out.push_str(trailing);
-            redact_next = false;
-            continue;
-        }
-
-        if let Some(at) = trimmed.find('@')
-            && let Some(scheme_end) = trimmed.find("://")
-            && at > scheme_end
-        {
-            let creds = &trimmed[scheme_end + 3..at];
-            if let Some(colon) = creds.find(':') {
-                out.push_str(&trimmed[..scheme_end + 3 + colon + 1]);
-                out.push_str("***");
-                out.push_str(&trimmed[at..]);
-                out.push_str(trailing);
-                continue;
-            }
-        }
-
-        if let Some(sep) = trimmed.find(['=', ':'])
-            && sep > 0
-            && names_a_secret(&trimmed[..sep])
-        {
-            out.push_str(&trimmed[..=sep]);
-            if sep + 1 < trimmed.len() {
-                out.push_str("***");
-            } else {
-                redact_next = true;
-            }
-            out.push_str(trailing);
-            continue;
-        }
-
-        let is_provider_token = [
-            "sk-",
-            "ghp_",
-            "gho_",
-            "github_pat_",
-            "xoxb-",
-            "xoxp-",
-            "AKIA",
-        ]
-        .iter()
-        .any(|p| trimmed.starts_with(p))
-            && trimmed.len() > 12;
-        let is_jwt = trimmed.starts_with("eyJ") && trimmed.matches('.').count() == 2;
-        if is_provider_token || is_jwt {
-            out.push_str("***");
-            out.push_str(trailing);
-            continue;
-        }
-
-        out.push_str(token);
-    }
-    out
-}
-
 fn prepare(content: &str) -> String {
-    truncate_for_prompt(&redact_secrets(content))
+    truncate_for_prompt(&crate::redact::redact_secrets(content))
 }
 
 fn build_prompt(a: &str, b: &str) -> String {
@@ -680,43 +598,6 @@ mod tests {
         assert_eq!(j.verdict, "contradicts");
         assert_eq!(j.confidence, 0.9);
         assert_eq!(j.reason.as_deref(), Some("X"));
-    }
-
-    #[test]
-    fn credentials_never_reach_the_llm() {
-        let dirty = "la app conecta a postgresql://cuba:hunter2-fake@127.0.0.1:5488/brain";
-        let clean = redact_secrets(dirty);
-        assert!(
-            !clean.contains("hunter2-fake"),
-            "la contraseña salió al prompt: {clean}"
-        );
-        assert!(clean.contains("postgresql://cuba:***@127.0.0.1:5488/brain"));
-    }
-
-    #[test]
-    fn provider_tokens_and_jwts_are_stripped() {
-        assert_eq!(
-            redact_secrets("token ghp_abcdefghijklmnop fin"),
-            "token *** fin"
-        );
-        assert_eq!(redact_secrets("bearer eyJhbG.eyJzdWI.SflKxw"), "bearer ***");
-        assert!(!redact_secrets("key sk-ant-api03-XXXXXXXXXXXX").contains("sk-ant"));
-        assert_eq!(redact_secrets("sk-1"), "sk-1");
-    }
-
-    #[test]
-    fn key_value_secrets_are_stripped_but_the_key_stays() {
-        assert_eq!(
-            redact_secrets("DISCORD_TOKEN=abc123xyz"),
-            "DISCORD_TOKEN=***"
-        );
-        assert_eq!(redact_secrets("password: hunter2"), "password: ***");
-        assert_eq!(
-            redact_secrets("api_key: sk-live-1234 fin"),
-            "api_key: *** fin"
-        );
-        assert_eq!(redact_secrets("x=1 nota: todo bien"), "x=1 nota: todo bien");
-        assert_eq!(redact_secrets("ratio 3:1 y listo"), "ratio 3:1 y listo");
     }
 
     #[test]

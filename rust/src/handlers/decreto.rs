@@ -27,6 +27,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 title, context, alternatives, chosen, rationale
             );
 
+            crate::redact::refuse_secrets(&args, "the decision content", &decision_content)?;
+
             sqlx::query(
                 "INSERT INTO brain_entities (name, entity_type, project_id)
                  VALUES ($1, 'concept', $2)
@@ -88,5 +90,50 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             Ok(serde_json::json!({"action": "list", "decisions": list, "count": list.len()}))
         }
         _ => anyhow::bail!("Invalid action: {action}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://decreto-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    #[tokio::test]
+    async fn a_decision_that_pastes_a_credential_is_refused_from_any_of_its_fields() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        for field in ["context", "chosen", "rationale"] {
+            let args = serde_json::json!({
+                "action": "record",
+                "title": "rotar el token del despliegue",
+                field: "quedó apuntado que el viejo era ghp_abcdefghijklmnop"
+            });
+
+            let Err(failure) = handle(&pool, args).await else {
+                panic!(
+                    "record answered Ok on a pool that cannot connect: nothing but the secret \
+                     gate could have answered, and the gate must refuse"
+                );
+            };
+
+            let chain = format!("{failure:#}");
+            assert!(
+                chain.contains("github token"),
+                "the token pasted into {field} reached the database layer: every field of a \
+                 decision ends up concatenated into one stored observation, so checking only \
+                 `chosen` would leave four doors open. Got: {chain}"
+            );
+            assert!(
+                !chain.contains("ghp_abcdefghijklmnop"),
+                "the refusal repeated the secret, and refusals get logged: {chain}"
+            );
+        }
     }
 }

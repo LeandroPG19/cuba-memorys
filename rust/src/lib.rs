@@ -26,6 +26,7 @@ pub mod observability;
 pub mod project;
 pub mod protocol;
 pub mod recall_cli;
+pub mod redact;
 pub mod reembed_cli;
 pub mod rem_cli;
 pub mod resources;

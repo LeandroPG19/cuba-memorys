@@ -100,7 +100,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "observation_id": {"type": "string", "description": "Observation UUID (for delete action)"},
                     "observations": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?, source?} objects (for batch_add, max 100)"},
                     "actors": {"type": "array", "items": {"type": "string"}, "description": "People/agents involved in episode (for episode_add)"},
-                    "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Files/resources affected in episode (for episode_add)"}
+                    "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Files/resources affected in episode (for episode_add)"},
+                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the text carries what looks like a live credential (token, password field, credentials in a URL): stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -174,7 +175,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "error_type": {"type": "string", "description": "Error category: TypeError, ConnectionError, etc."},
                     "error_message": {"type": "string", "description": "Full error message"},
                     "context": {"type": "object", "description": "Context: {file, function, stack_trace, line}"},
-                    "project": {"type": "string", "description": "Project name (default: 'default')"}
+                    "project": {"type": "string", "description": "Project name (default: 'default')"},
+                    "allow_secret": {"type": "boolean", "description": "Writes are refused when error_message or context carry what looks like a live credential (token, password field, credentials in a URL) — a stack trace with a header in it is the usual case. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["error_type", "error_message"]
             }),
@@ -233,7 +235,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "alternatives": {"type": "array", "items": {"type": "string"}, "description": "Options considered"},
                     "chosen": {"type": "string", "description": "Option chosen"},
                     "rationale": {"type": "string", "description": "Why this option was chosen"},
-                    "query": {"type": "string", "description": "Search text (for query action)"}
+                    "query": {"type": "string", "description": "Search text (for query action)"},
+                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the recorded decision carries what looks like a live credential (token, password field, credentials in a URL): stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
                 },
                 "required": ["action"]
             }),
@@ -716,6 +719,38 @@ mod profile_tests {
                 !described.trim().is_empty(),
                 "{name}: a boolean called `confirm` with no description tells the caller \
                  nothing about what it is confirming"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_that_stores_free_text_declares_its_secret_override() {
+        const GATED: [&str; 3] = ["cuba_cronica", "cuba_decreto", "cuba_alarma"];
+
+        for name in GATED {
+            let tool = tool_definitions()
+                .iter()
+                .find(|t| t.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("{name} disappeared from the catalogue"));
+
+            let allow = tool.pointer("/inputSchema/properties/allow_secret");
+            assert!(
+                allow.is_some_and(|a| a.get("type").and_then(Value::as_str) == Some("boolean")),
+                "{name} refuses to store text that looks like a live credential, and \
+                 `allow_secret` is the only way past that refusal. A caller cannot discover a \
+                 switch that is not in the schema, and clients that strip undeclared properties \
+                 would leave the legitimate write with no way through at all"
+            );
+
+            let described = allow
+                .and_then(|a| a.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(
+                described.contains("clear"),
+                "{name}: `allow_secret` must say that the text is then stored verbatim and in \
+                 clear. A caller who reads the switch as 'store it safely' is the one who will \
+                 flip it on a live credential"
             );
         }
     }

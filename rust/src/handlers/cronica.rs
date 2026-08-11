@@ -35,6 +35,8 @@ async fn add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<Value> {
         anyhow::bail!("content must be 1-10000 characters");
     }
 
+    crate::redact::refuse_secrets(args, "content", content)?;
+
     let obs_type = args
         .get("observation_type")
         .and_then(|v| v.as_str())
@@ -368,6 +370,16 @@ async fn batch_add(pool: &PgPool, args: &Value) -> Result<Value> {
             "batch_add limit is 100 observations per call (got {})",
             observations.len()
         );
+    }
+
+    for (index, obs) in observations.iter().enumerate() {
+        if let Some(content) = obs.get("content").and_then(|v| v.as_str()) {
+            crate::redact::refuse_secrets(
+                args,
+                &format!("observations[{index}].content"),
+                content,
+            )?;
+        }
     }
 
     type PendingEmbed = (uuid::Uuid, String, String, String, Option<Vec<f32>>);
@@ -819,6 +831,8 @@ async fn episode_add(pool: &PgPool, entity_name: &str, args: &Value) -> Result<V
         anyhow::bail!("content is required for episode_add");
     }
 
+    crate::redact::refuse_secrets(args, "content", content)?;
+
     let actors: Vec<String> = args
         .get("actors")
         .and_then(|v| v.as_array())
@@ -1007,6 +1021,76 @@ fn extract_tags(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pool_that_cannot_connect() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(250))
+            .connect_lazy("postgres://cronica-test:unused@127.0.0.1:63999/does-not-exist")
+            .expect("connect_lazy only parses the URL, it does not dial the network")
+    }
+
+    const PASTED_TOKEN: &str = "el deploy usa ghp_abcdefghijklmnop";
+
+    #[tokio::test]
+    async fn every_free_text_entry_point_refuses_a_credential_before_the_first_query() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        for args in [
+            serde_json::json!({"action": "add", "entity_name": "redact-gate", "content": PASTED_TOKEN}),
+            serde_json::json!({"action": "episode_add", "entity_name": "redact-gate", "content": PASTED_TOKEN}),
+            serde_json::json!({"action": "batch_add", "observations": [
+                {"entity_name": "redact-gate", "content": "esta observación no tiene nada raro"},
+                {"entity_name": "redact-gate", "content": PASTED_TOKEN}
+            ]}),
+        ] {
+            let action = args["action"].as_str().unwrap_or_default().to_string();
+            let Err(failure) = handle(&pool, args).await else {
+                panic!(
+                    "{action} answered Ok on a pool that cannot connect: it never reached the \
+                     database, so nothing but the secret gate could have answered — and the gate \
+                     must refuse, not accept"
+                );
+            };
+
+            let chain = format!("{failure:#}");
+            assert!(
+                chain.contains("github token"),
+                "{action} failed on the database instead of refusing the pasted token: the check \
+                 either is not wired in or runs after the first query, and by then batch_add has \
+                 already created entities. Got: {chain}"
+            );
+            assert!(
+                !chain.contains("ghp_abcdefghijklmnop"),
+                "{action} repeated the secret in its refusal, and refusals get logged: {chain}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_secret_lets_the_write_reach_the_database() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_cannot_connect();
+
+        let args = serde_json::json!({
+            "action": "add",
+            "entity_name": "redact-gate",
+            "content": PASTED_TOKEN,
+            "allow_secret": true
+        });
+
+        let Err(failure) = handle(&pool, args).await else {
+            panic!("a pool that cannot connect cannot answer Ok to an insert");
+        };
+
+        let chain = format!("{failure:#}");
+        assert!(
+            !chain.contains("refusing to write"),
+            "allow_secret did not open the gate: a caller with a legitimate reason to store the \
+             text has no way through, and will store it somewhere with no gate at all. Got: \
+             {chain}"
+        );
+    }
 
     #[test]
     fn test_information_density_diverse() {
