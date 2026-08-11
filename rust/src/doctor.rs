@@ -145,6 +145,35 @@ fn latest_published_version() -> Option<String> {
     json.get("version")?.as_str().map(String::from)
 }
 
+fn runtime_role_check(user: &str, is_super: bool, app_role_ready: bool) -> Check {
+    if !is_super {
+        return Check::ok(
+            "runtime_role",
+            format!("'{user}' sin superuser — RLS y audit efectivos"),
+        );
+    }
+    if app_role_ready {
+        return Check::fail(
+            "runtime_role",
+            format!(
+                "la app corre como '{user}' (SUPERUSER) teniendo {} listo y sin privilegios",
+                crate::db::APP_ROLE
+            ),
+            "la mitigación está construida y desconectada: un superuser ignora RLS y puede \
+             alterar el audit_log, así que el aislamiento por proyecto y la trazabilidad \
+             append-only no existen. Suele ser un binario viejo — reinstalá el daemon, o borrá \
+             ~/.cache/cuba-memorys/pgpass_app si de verdad querés correr como admin.",
+        );
+    }
+    Check::warn(
+        "runtime_role",
+        format!("la app corre como '{user}' (SUPERUSER)"),
+        "un superuser ignora RLS y puede alterar el audit_log: el aislamiento por proyecto y la \
+         trazabilidad append-only son decorativos. Ejecutá `cuba-memorys secure` y apuntá el \
+         runtime a cuba_app.",
+    )
+}
+
 pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     let mut checks = Vec::new();
 
@@ -496,17 +525,21 @@ pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
         Ok(row) => {
             let usr: String = row.try_get("usr").unwrap_or_default();
             let is_super: bool = row.try_get("super").unwrap_or(false);
-            if is_super {
-                checks.push(Check::warn(
-                    "runtime_role",
-                    format!("la app corre como '{usr}' (SUPERUSER)"),
-                    "un superuser ignora RLS y puede alterar el audit_log: el aislamiento por \
-                     proyecto y la trazabilidad append-only son decorativos. Ejecutá \
-                     `cuba-memorys secure` y apuntá el runtime a cuba_app.",
-                ));
+            let app_role_ready = if is_super {
+                sqlx::query_scalar(
+                    "SELECT NOT rolsuper AND NOT rolbypassrls AND rolcanlogin
+                     FROM pg_roles WHERE rolname = $1",
+                )
+                .bind(crate::db::APP_ROLE)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false)
             } else {
-                checks.push(Check::ok("runtime_role", format!("'{usr}' sin superuser — RLS y audit efectivos")));
-            }
+                false
+            };
+            checks.push(runtime_role_check(&usr, is_super, app_role_ready));
         }
         Err(e) => checks.push(Check::warn("runtime_role", format!("no verificable: {e}"), "revisar permisos")),
     }
@@ -715,5 +748,49 @@ mod tests {
         assert_eq!(parse_vector_dim("vector(384)"), Some(384));
         assert_eq!(parse_vector_dim("vector(1024)"), Some(1024));
         assert_eq!(parse_vector_dim("text"), None);
+    }
+}
+
+#[cfg(test)]
+mod runtime_role_tests {
+    use super::*;
+
+    #[test]
+    fn a_non_superuser_runtime_is_the_healthy_case() {
+        let check = runtime_role_check("cuba_app", false, false);
+        assert_eq!(check.status, Status::Ok);
+    }
+
+    #[test]
+    fn a_superuser_runtime_with_the_app_role_ready_is_a_failure_not_a_warning() {
+        let check = runtime_role_check("cuba", true, true);
+
+        assert_eq!(
+            check.status,
+            Status::Fail,
+            "cuba_app exists, cannot log in as superuser and cannot bypass RLS, and the app \
+             still connects as an admin: the mitigation is built and unplugged. A warning has \
+             been sitting there unread while the append-only audit trigger and the tenant \
+             policy did nothing"
+        );
+        assert!(
+            check.detail.contains("cuba_app"),
+            "the message has to name the role that is ready: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn a_superuser_runtime_without_the_app_role_only_warns() {
+        let check = runtime_role_check("cuba", true, false);
+
+        assert_eq!(
+            check.status,
+            Status::Warn,
+            "a fresh install has no cuba_app yet, and its Docker container hands out a \
+             superuser by design. Failing there would paint every new user red for a state \
+             they were shipped in, and a doctor that is always red is a doctor nobody reads"
+        );
+        assert!(check.hint.is_some_and(|h| h.contains("secure")));
     }
 }
