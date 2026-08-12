@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn read(relative: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -115,6 +115,162 @@ fn the_docs_do_not_promise_commands_the_binary_does_not_have() {
         "the README tells the reader to run `cuba-memorys <x>` for commands that do not exist. \
          A copied-and-pasted line that errors out is how a reader decides the whole document is \
          stale. Known commands: {known:?}. Not found: {unknown:?}"
+    );
+}
+
+const NOT_A_KNOB_AN_OPERATOR_SETS: [(&str, &str); 9] = [
+    (
+        "HOME",
+        "the OS sets it; the code only reads it to locate ~/.cache",
+    ),
+    ("USERPROFILE", "the Windows spelling of HOME, same use"),
+    (
+        "HOSTNAME",
+        "read only as the fallback for CUBA_NODE_NAME, which is documented",
+    ),
+    ("COMPUTERNAME", "the Windows spelling of HOSTNAME, same use"),
+    (
+        "PATH",
+        "the OS search path; the code only asks whether the judge CLI is on it",
+    ),
+    (
+        "LD_LIBRARY_PATH",
+        "the dynamic loader's own variable, searched for libonnxruntime",
+    ),
+    (
+        "LISTEN_PID",
+        "systemd's socket-activation protocol: systemd sets it, an operator never does",
+    ),
+    (
+        "LISTEN_FDS",
+        "systemd's socket-activation protocol, same as LISTEN_PID",
+    ),
+    (
+        "CUBA_RESOURCES_TEST_KNOB",
+        "invented inside a #[test] in resources.rs; it does not exist at runtime",
+    ),
+];
+
+fn looks_like_an_env_name(word: &str) -> bool {
+    word.starts_with(|c: char| c.is_ascii_uppercase())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn env_names_read_in(body: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+
+    for marker in ["env::var(", "env::var_os("] {
+        for call in body.split(marker).skip(1) {
+            if let Some(literal) = call
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+                && looks_like_an_env_name(literal)
+            {
+                names.insert(literal.to_string());
+            }
+        }
+    }
+
+    for line in body.lines() {
+        for literal in line.split('"').skip(1).step_by(2) {
+            if literal.starts_with("CUBA_") && looks_like_an_env_name(literal) {
+                names.insert(literal.to_string());
+            }
+        }
+    }
+
+    names
+}
+
+fn env_names_the_code_reads() -> BTreeMap<String, BTreeSet<String>> {
+    let mut found: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src/ is readable").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("readable");
+            let file = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            for name in env_names_read_in(&body) {
+                found.entry(name).or_default().insert(file.clone());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn every_environment_variable_the_code_reads_is_in_the_readme() {
+    let read_by_code = env_names_the_code_reads();
+
+    assert!(
+        read_by_code.len() >= 60,
+        "the scanner found {} environment variables in src/, and there are around 70. A green \
+         result from a scanner that found almost nothing proves nothing at all",
+        read_by_code.len()
+    );
+    for anchor in ["DATABASE_URL", "CUBA_DOCS"] {
+        assert!(
+            read_by_code.contains_key(anchor),
+            "{anchor} is read by the code and the scanner missed it, so the scanner is broken. \
+             These two anchor the two halves: DATABASE_URL is read through env::var(\"…\") \
+             directly, CUBA_DOCS only ever reaches env::var as an argument to mode::env_toggle, \
+             and a scanner that only looked for the first would silently skip every variable \
+             read through a helper or a constant"
+        );
+    }
+
+    let readme = read("README.md");
+    let documented: BTreeSet<&str> = readme
+        .split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .filter(|w| looks_like_an_env_name(w))
+        .collect();
+    assert!(
+        documented.contains("CUBA_MODE"),
+        "the README parser did not even find CUBA_MODE, the first row of the configuration \
+         table, so it is the parser that is broken and not the document"
+    );
+
+    let excluded: BTreeMap<&str, &str> = NOT_A_KNOB_AN_OPERATOR_SETS.into_iter().collect();
+    for (name, reason) in &excluded {
+        assert!(
+            read_by_code.contains_key(*name),
+            "{name} is excluded from this contract because {reason}, but nothing in src/ reads \
+             it any more. An exclusion that outlives its variable is a hole nobody can audit: \
+             drop the entry from NOT_A_KNOB_AN_OPERATOR_SETS"
+        );
+    }
+
+    let undocumented: Vec<String> = read_by_code
+        .iter()
+        .filter(|(name, _)| !documented.contains(name.as_str()))
+        .filter(|(name, _)| !excluded.contains_key(name.as_str()))
+        .map(|(name, files)| format!("{name} (read in {files:?})"))
+        .collect();
+
+    assert!(
+        undocumented.is_empty(),
+        "these variables change what the program does and the README never mentions them, so \
+         nobody outside this file knows they exist. That is not hypothetical here: \
+         CUBA_AUDIT_KEY decided whether the audit chain could be forged and was documented \
+         nowhere, so every operator ran with a chain anyone could recompute. Either add a row \
+         to the configuration table in README.md or, if the variable is not something an \
+         operator sets, add it to NOT_A_KNOB_AN_OPERATOR_SETS with the reason. Missing: \
+         {undocumented:#?}"
     );
 }
 

@@ -263,14 +263,24 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `DATABASE_URL` | auto (Docker) | PostgreSQL connection. Set it (external + TLS) for `red` mode. |
 | `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | auto (`~/.cache`) | Semantic embeddings. `cuba-memorys models` sets these up for you. |
 | `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the stronger Spanish model |
+| `CUBA_QUERY_PREFIX` · `CUBA_PASSAGE_PREFIX` | `query: ` · `passage: ` | Instruction prefixes prepended before tokenising. E5 was trained with them; `bge-m3` was not — set both to the empty string when you switch, or every vector is computed on text the model never saw that way |
+| `CUBA_CHUNK_THRESHOLD_CHARS` · `CUBA_CHUNK_CHARS` | `1800` · `1400` | Content longer than the threshold is split into chunks of this many characters (200-char overlap). `CUBA_CHUNK_CHARS` is floored at 200. A value that is not a positive integer falls back to the default |
+| `CUBA_EMBED_CONCURRENCY` | `1` | Permits on the semaphore around the ONNX embedding session. Sized once, on first use |
 | `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 28, 71% smaller catalogue, nothing lost |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
+| `CUBA_JUEZ_CLI` · `CUBA_JUEZ_MODEL` | `claude` · `claude-haiku-4-5` | The CLI the offline judge shells out to, and the model it asks for. `CUBA_JUEZ_CLI` also decides the automatic path: if that name is not on `PATH` there is no CLI judge and the choice falls through |
+| `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Budget for one judgement, CLI and API alike. Anything that does not parse as an integer leaves the default |
+| `CUBA_JUEZ_MAX_PAIRS` | `5` | Candidate pairs `cuba_juez` sends per call |
+| `ANTHROPIC_API_KEY` | unset | Only in builds with the `anthropic-api` feature: the key for the `anthropic_api` judge, and what makes it the automatic fallback when `CUBA_JUEZ_CLI` is not on `PATH` |
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
 | `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+93% nDCG); on CPU it falls back to RRF past the budget |
 | `CUBA_RERANK_INTRA_THREADS` | physical cores (2 on GPU) | ONNX threads per rerank inference. Past the physical core count it gets *slower* — measure with `rerank_bench` before raising it |
 | `CUBA_RERANK_LENGTH_BUCKETING` | on (off under fixed shape) | Batch similar-length candidates so padding does not become compute. Scores are unchanged |
 | `CUBA_RERANK_CHUNK` | `16` | Candidates per forward pass. Under fixed shapes every batch pads to 512 tokens, making this the main lever on the GPU arena: `16` → 2938 MiB, `4` → 2364 MiB. Scores are unchanged — a verbose search at 16 and at 4 came back byte-identical |
+| `CUBA_RERANK_CONCURRENCY` | `1` | Permits on the semaphore around the reranker session. The session is a mutex, so raising this queues callers rather than parallelising them |
+| `CUBA_RERANK_BUCKET` | `512` | Rounds the padded sequence length up to a multiple of this. Only `0` or a power of two up to 512 is accepted — anything else leaves the default. `0` pads to the longest candidate instead |
+| `CUBA_RERANK_FIXED_SHAPE` | on when the reranker runs on GPU | Pads every batch to the same 512-token shape. `0` / `off` / `false` disables it; any other value enables it. It also flips the default of `CUBA_RERANK_LENGTH_BUCKETING`, which has nothing left to do once every batch is the same size — and it is what makes `CUBA_RERANK_CHUNK` the main lever on VRAM |
 | `CUBA_EMBED_DEVICE` · `CUBA_RERANK_DEVICE` · `CUBA_NLI_DEVICE` | `cpu` · `gpu` · `cpu` | Per-model placement. Only the reranker gains from a GPU; the INT8 embedder cannot use one and the FP32 NLI is not worth the VRAM. Set to `gpu`/`cpu` to A/B a placement without rebuilding |
 | `CUBA_GPU_MEM_LIMIT_MB` | `2048` | Caps the CUDA arena and pins `arena_extend_strategy` to `SameAsRequested`. The default (`NextPowerOfTwo`) doubles its reservation on every growth, which is how 1,65 GB of weights became 5+ GB of VRAM. The cap is **per session** |
 | `CUBA_EMBED_INTRA_THREADS` | half the logical cores, max 4 | ONNX threads per embedding. Measured on 12 threads: 1 → 94,8 ms, 2 → 52,3 ms, **4 → 35,8 ms**, 6 → 68,1 ms, 12 → 155,4 ms per query |
@@ -278,10 +288,24 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_WARM_RERANKER` | off | Load the cross-encoder at startup instead of on its first batch. Off, a cold start costs 0,027 s instead of 11 s and holds no VRAM until something actually reranks |
 | `CUBA_HTTP_ADDR` · `CUBA_HTTP_TOKEN` | `127.0.0.1:8787` · unset | Address for `serve`, and the bearer token it requires. A token is mandatory to bind anything but loopback |
 | `CUBA_HANDSHAKE_TIMEOUT_SECS` | `60` | stdio exits if no MCP handshake arrives, instead of holding the models for a client that gave up. `0` disables |
+| `CUBA_HANDLER_TIMEOUT_SECS` | `30` | Ceiling on one tool call. It is also the budget the LLM extraction inside `cuba_ingesta` gets, at 60% of this value — raising it lets extraction think longer |
 | `CUBA_DOCS` | **off** | `1` enables `cuba_docs`, the only tool that leaves your machine. Unset, it is not even advertised. |
 | `CUBA_COMPACT_CHARS` | `1200` | Compact truncation (measured knee) |
 | `CUBA_OOD_THRESHOLD` | calibrated | Override the abstention threshold |
 | `CUBA_BITEMPORAL` | on | Mirror observations into `brain_facts` |
+| `CUBA_AUDIT_KEY` | unset → `~/.cache/cuba-memorys/audit_key` | HMAC key for the `cuba_archivo` hash chain. Without a key the chain is plain SHA-256, which anyone with write access to the table can recompute — the entries stay consistent and the forgery is invisible |
+| `CUBA_APP_ROLE` | on | After migrations the pool reconnects as the unprivileged `cuba_app` role. `0` / `off` / `false` keeps the admin connection instead — the superuser stays live for the whole session |
+| `CUBA_PROJECT_FILTER` | unset (filter on) | `off` (any case) disables per-project scoping: the RLS scope becomes `*` and every project's memories are visible at once. Any other value leaves the filter on |
+| `CUBA_QUARANTINE_INFERENCE` | off | `1` / `on` / `true` stores anything with `source=inference` as `quarantined` instead of `trusted`, unless the caller set the trust level explicitly |
+| `CUBA_PG_BIND` | `127.0.0.1` | Host address the managed Postgres container publishes its port on. Anything but loopback exposes the database to the network |
+| `CUBA_RANDOM_PAGE_COST` · `CUBA_IO_CONCURRENCY` | `1.1` · `200` | Per-connection planner settings for the pool. Accepted ranges are `0.1`–`10.0` and `≤ 1000`; outside them the default stands |
+| `CUBA_REM_AUTOLINK` | on | `0` / `off` / `false` stops the REM cycle from creating NPMI co-occurrence edges between entities |
+| `CUBA_REM_RELATION_BATCH` | `5` | Entities the REM cycle runs a relation scan over per pass. `0` skips the scan |
+| `CUBA_REM_SCAN_TIMEOUT_SECS` | `90` | Budget for one entity's relation scan |
+| `CUBA_REM_BACKFILL_LIMIT` | `100` | Observations without an embedding that the REM cycle backfills per pass. `0` disables the backfill; a negative value leaves the default |
+| `CUBA_SYNC_DIR` | unset → `.cuba-memorys` under the working directory | Root for `cuba_sync` export/import. It is also the confinement boundary: a `--dir` outside this root is refused, so setting it is how you sync somewhere else instead of escaping with `../` |
+| `CUBA_UNDO_DIR` | `~/.cache/cuba-memorys/undo` | Where destructive CLI commands write their undo snapshots |
+| `CUBA_METRICS_PORT` · `CUBA_METRICS_BIND` | `9090` · `127.0.0.1` | Prometheus `/metrics` listener. Only in builds with the `observability` feature; unparsable values leave the defaults |
 
 ---
 
