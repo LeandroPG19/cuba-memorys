@@ -28,7 +28,7 @@ pub enum Scope {
     Peer,
 }
 
-pub const PEER_VERBS: [(&str, &str); 1] = [("cuba_sync", "status")];
+pub const PEER_VERBS: [(&str, &str); 2] = [("cuba_sync", "status"), ("cuba_sync", "pull")];
 
 pub fn current_scope() -> Scope {
     SCOPE.try_with(|s| *s).unwrap_or(Scope::Full)

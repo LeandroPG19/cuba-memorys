@@ -40,7 +40,23 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         }
         "diff" => diff(pool, dir_arg).await,
         "status" => status(pool, dir_arg).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status"),
+        "pull" => {
+            let offset = args
+                .get("offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(usize::MAX as u64) as usize;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .map(|n| n.max(1) as usize);
+            let vectors = args
+                .get("with_embeddings")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            pull(pool, offset, limit, vectors).await
+        }
+        _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status/pull"),
     }
 }
 
@@ -218,6 +234,16 @@ async fn export(
     with_embeddings: bool,
 ) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
+    export_into(pool, &root, scope, with_embeddings).await
+}
+
+async fn export_into(
+    pool: &PgPool,
+    root: &Path,
+    scope: &str,
+    with_embeddings: bool,
+) -> Result<Value> {
+    let root = root.to_path_buf();
     let mut lock = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SYNC_LOCK)
@@ -686,6 +712,92 @@ pub const OBSERVATION_SOURCES: [&str; 5] = [
 ];
 
 pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
+
+const PULL_PAGE_BYTES: usize = 3 * 1024 * 1024;
+
+fn bundle_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+async fn pull(
+    pool: &PgPool,
+    offset: usize,
+    limit: Option<usize>,
+    with_embeddings: bool,
+) -> Result<Value> {
+    let staging = std::env::temp_dir().join(format!("cuba-pull-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&staging).context("staging directory for a peer pull")?;
+
+    let served = pull_from_staging(pool, &staging, offset, limit, with_embeddings).await;
+    let _ = std::fs::remove_dir_all(&staging);
+    served
+}
+
+async fn pull_from_staging(
+    pool: &PgPool,
+    staging: &Path,
+    offset: usize,
+    limit: Option<usize>,
+    with_embeddings: bool,
+) -> Result<Value> {
+    let summary = export_into(pool, staging, "all", with_embeddings).await?;
+    let paths = bundle_files(staging)?;
+    let total = paths.len();
+
+    let mut files = Vec::new();
+    let mut bytes = 0usize;
+    for path in paths.iter().skip(offset) {
+        let raw = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let relative = path
+            .strip_prefix(staging)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let encoded = match String::from_utf8(raw.clone()) {
+            Ok(text) => serde_json::json!({"path": relative, "text": text}),
+            Err(_) => serde_json::json!({"path": relative, "hex": hex::encode(&raw)}),
+        };
+        let size = encoded.to_string().len();
+        let full = bytes + size > PULL_PAGE_BYTES || limit.is_some_and(|n| files.len() >= n);
+        if !files.is_empty() && full {
+            break;
+        }
+        bytes += size;
+        files.push(encoded);
+    }
+
+    let delivered = offset + files.len();
+    Ok(serde_json::json!({
+        "action": "pull",
+        "manifest_hash": summary["manifest_hash"],
+        "node_id": summary["node_id"],
+        "schema_version": crate::sync::chunk::SCHEMA_VERSION,
+        "with_embeddings": with_embeddings,
+        "total_files": total,
+        "offset": offset,
+        "files": files,
+        "has_more": delivered < total,
+        "next_offset": delivered,
+        "note": "every page re-exports the whole bundle, so manifest_hash has to be identical \
+                 across the pages of one pull. If it changes, this node was written to \
+                 mid-transfer and the pages no longer describe one state: discard them and \
+                 start again. A torn bundle that happens to parse is the one failure mode that \
+                 commits and records its hash forever."
+    }))
+}
 
 fn recompute_digest(root: &Path, project_id: Option<Uuid>) -> Result<String> {
     let mut digest = BundleDigest::default();
