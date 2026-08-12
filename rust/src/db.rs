@@ -225,7 +225,20 @@ pub async fn init_schema(pool: &PgPool) -> Result<()> {
                     "CUBA_SKIP_MIGRATIONS is set but _sqlx_migrations is unreadable — \
              run migrations once as an admin role before starting the app",
                 )?;
+        let embedded = MIGRATOR
+            .iter()
+            .map(|m| m.version)
+            .max()
+            .expect("the binary embeds at least one migration");
         match applied.map(|(v,)| v) {
+            Some(v) if v < embedded => anyhow::bail!(
+                "this database is at migration {v} and this binary expects {embedded}. \
+                 CUBA_SKIP_MIGRATIONS is set, so nothing will bring it forward and the \
+                 first query naming a column added after {v} takes down whatever \
+                 transaction it is in — an import gets through hundreds of rows before \
+                 dying. Run the binary once with CUBA_SKIP_MIGRATIONS unset under an \
+                 admin role, then start it again."
+            ),
             Some(v) => tracing::warn!(
                 latest_migration = v,
                 "CUBA_SKIP_MIGRATIONS active — skipping migrator (non-superuser runtime)"
@@ -401,6 +414,65 @@ mod tests {
             cleared, "",
             "the same physical connection must not carry one request's project into \
              the next — this pool holds exactly one"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_database_behind_the_binary_is_refused_instead_of_dying_mid_import() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL required");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+
+        let embedded: i64 = MIGRATOR
+            .iter()
+            .map(|m| m.version)
+            .max()
+            .expect("the binary embeds migrations");
+        let removed: (i64, String, Vec<u8>, bool, i64) = sqlx::query_as(
+            "DELETE FROM _sqlx_migrations WHERE version = $1
+             RETURNING version, description, checksum, success, execution_time",
+        )
+        .bind(embedded)
+        .fetch_one(&pool)
+        .await
+        .expect("the newest migration row is what this test borrows");
+
+        unsafe { std::env::set_var("CUBA_SKIP_MIGRATIONS", "1") };
+        let verdict = init_schema(&pool).await;
+        unsafe { std::env::remove_var("CUBA_SKIP_MIGRATIONS") };
+
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations
+                (version, description, installed_on, checksum, success, execution_time)
+             VALUES ($1, $2, NOW(), $3, $4, $5)",
+        )
+        .bind(removed.0)
+        .bind(&removed.1)
+        .bind(&removed.2)
+        .bind(removed.3)
+        .bind(removed.4)
+        .execute(&pool)
+        .await
+        .expect("put the migration row back");
+
+        let Err(failure) = verdict else {
+            panic!(
+                "startup accepted a database one migration behind the binary. \
+                 CUBA_SKIP_MIGRATIONS is the recommended runtime mode, and it only checked \
+                 that SOME migration had been applied — never which. The failure that \
+                 follows is not at startup: it is the first query naming a column added \
+                 later, hundreds of rows into a transaction that then loses all of it"
+            );
+        };
+        let chain = format!("{failure:#}");
+        assert!(
+            chain.contains(&embedded.to_string()),
+            "the refusal has to name the version the binary expects, or the operator cannot \
+             tell which side is stale. Got: {chain}"
         );
     }
 }
