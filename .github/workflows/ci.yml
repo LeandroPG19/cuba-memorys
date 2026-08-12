@@ -173,7 +173,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             features: docs
-            cross_cc: gcc-aarch64-linux-gnu
+            cross_cc: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
           - os: macos-14
             target: x86_64-apple-darwin
             features: docs
@@ -191,14 +191,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # A build script compiles C for the target, so `cargo check --target` needs a
-      # cross C compiler even though it never links the binary. Measured locally:
-      # without this, aarch64 dies on `cc-rs: failed to find tool
-      # "aarch64-linux-gnu-gcc"` — a toolchain failure wearing a compile error's
-      # clothes, which is worse than no check because nobody trusts a job that cries
-      # wolf. macOS and Windows runners already ship a native toolchain for their own
-      # targets.
-      - name: Cross C toolchain
+      # Build scripts compile both C and C++ for the target, so `cargo check --target`
+      # needs a cross toolchain even though it never links the binary — and it needs
+      # BOTH, in separate Debian packages. Measured, one failure at a time: with
+      # neither, cc-rs cannot find `aarch64-linux-gnu-gcc`; with only gcc it gets
+      # further and then cannot find `aarch64-linux-gnu-g++`; with both, aarch64
+      # checks clean in 20s. The first version of this job shipped with only gcc and
+      # went red on aarch64 for exactly that reason, which is the failure mode this
+      # comment exists to prevent repeating: a toolchain gap wearing a compile error's
+      # clothes teaches everyone to ignore the job. macOS and Windows runners already
+      # ship a native toolchain for their own targets.
+      - name: Cross toolchain
         if: matrix.cross_cc != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.cross_cc }}
 
