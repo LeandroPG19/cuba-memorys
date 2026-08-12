@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -57,6 +57,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             pull(pool, offset, limit, vectors).await
         }
         "notify" => notify(pool, &args).await,
+        "conflicts" => conflicts(pool).await,
+        "resolve" => resolve_conflict(pool, &args).await,
         "fetch" => {
             let confirm = args
                 .get("confirm")
@@ -65,7 +67,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             fetch(pool, &args, conflict, confirm).await
         }
         _ => anyhow::bail!(
-            "Invalid action: {action}. Use export/import/diff/status/pull/notify/fetch"
+            "Invalid action: {action}. Use \
+             export/import/diff/status/pull/notify/fetch/conflicts/resolve"
         ),
     }
 }
@@ -718,6 +721,134 @@ pub const OBSERVATION_SOURCES: [&str; 5] = [
 ];
 
 pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
+
+type ConflictRow = (Uuid, Uuid, String, String, Option<String>, DateTime<Utc>);
+
+async fn conflicts(pool: &PgPool) -> Result<Value> {
+    let rows: Vec<ConflictRow> = sqlx::query_as(
+        "SELECT id, observation_id, local_content, incoming_content, incoming_origin_node,
+                detected_at
+         FROM brain_sync_conflicts WHERE resolved_at IS NULL
+         ORDER BY detected_at DESC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let open: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, obs, ours, theirs, node, at)| {
+            serde_json::json!({
+                "id": id,
+                "observation_id": obs,
+                "ours": ours,
+                "theirs": theirs,
+                "their_node": node,
+                "detected_at": at,
+            })
+        })
+        .collect();
+
+    let total: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM brain_sync_conflicts WHERE resolved_at IS NULL")
+            .fetch_one(pool)
+            .await?;
+
+    Ok(serde_json::json!({
+        "action": "conflicts",
+        "open": open.len(),
+        "total_open": total,
+        "conflicts": open,
+        "note": "close one with cuba_sync action=resolve, id=<id>, keep=ours|theirs|both. \
+                 'both' keeps what is here and records the other machine's text in \
+                 previous_versions, which is the only choice that discards nothing."
+    }))
+}
+
+async fn resolve_conflict(pool: &PgPool, args: &Value) -> Result<Value> {
+    let id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("resolve needs the id of a conflict from action=conflicts")
+        })?;
+    let keep = args.get("keep").and_then(Value::as_str).unwrap_or("both");
+    if !matches!(keep, "ours" | "theirs" | "both") {
+        anyhow::bail!("keep must be ours, theirs or both; got {keep:?}");
+    }
+
+    let mut tx = pool.begin().await?;
+    let row: Option<(Uuid, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT observation_id, local_content, incoming_content, incoming_origin_node
+         FROM brain_sync_conflicts WHERE id = $1 AND resolved_at IS NULL FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((observation_id, ours, theirs, their_node)) = row else {
+        anyhow::bail!("no open conflict with id {id}: it may already be resolved");
+    };
+
+    let loser = match keep {
+        "theirs" => Some((ours.clone(), None)),
+        "both" => Some((theirs.clone(), their_node.clone())),
+        _ => None,
+    };
+    if let Some((text, node)) = loser {
+        sqlx::query(
+            "UPDATE brain_observations SET previous_versions = brain_append_version(
+                 previous_versions,
+                 jsonb_build_array(jsonb_build_object(
+                     'content', $2::text,
+                     'version', version,
+                     'origin_node', $3::text,
+                     'superseded_at', NOW()::text)))
+             WHERE id = $1",
+        )
+        .bind(observation_id)
+        .bind(&text)
+        .bind(node.as_deref().unwrap_or("this node"))
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if keep == "theirs" {
+        sqlx::query(
+            "UPDATE brain_observations
+             SET content = $2, version = version + 1, embedding = NULL, embedding_half = NULL
+             WHERE id = $1",
+        )
+        .bind(observation_id)
+        .bind(&theirs)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        "UPDATE brain_sync_conflicts SET resolved_at = NOW(), resolution = $2 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(keep)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(serde_json::json!({
+        "action": "resolve",
+        "id": id,
+        "observation_id": observation_id,
+        "kept": keep,
+        "note": match keep {
+            "ours" => "the incoming text was already on the floor and stays there; this only \
+                       closes the record so it stops being reported",
+            "theirs" => "the incoming text is now the observation's content, the local one went \
+                         into previous_versions, and the embedding was cleared because it \
+                         described the text that is no longer there",
+            _ => "this machine's text stays current and the other machine's went into \
+                  previous_versions, where cuba_cronica reads it back",
+        },
+    }))
+}
 
 const PULL_PAGE_BYTES: usize = 3 * 1024 * 1024;
 
@@ -1697,12 +1828,24 @@ async fn import(
 
             if !overwrite {
                 let already: Vec<Uuid> = sqlx::query_scalar(
-                    "SELECT o.id
-                     FROM jsonb_to_recordset($1::jsonb) AS u(id uuid, content text)
+                    "INSERT INTO brain_sync_conflicts
+                        (observation_id, local_content, incoming_content,
+                         incoming_origin_node, manifest_hash)
+                     SELECT o.id, o.content, u.content, u.origin_node, $2
+                     FROM jsonb_to_recordset($1::jsonb) AS u(
+                         id uuid, content text, origin_node text)
                      JOIN brain_observations o ON o.id = u.id
-                     WHERE o.content IS DISTINCT FROM u.content",
+                     WHERE o.content IS DISTINCT FROM u.content
+                     ON CONFLICT (observation_id) WHERE resolved_at IS NULL
+                     DO UPDATE SET incoming_content = EXCLUDED.incoming_content,
+                                   local_content = EXCLUDED.local_content,
+                                   incoming_origin_node = EXCLUDED.incoming_origin_node,
+                                   manifest_hash = EXCLUDED.manifest_hash,
+                                   detected_at = NOW()
+                     RETURNING observation_id",
                 )
                 .bind(&batch)
+                .bind(&manifest.manifest_hash)
                 .fetch_all(&mut *tx)
                 .await?;
                 diverged.extend(already);
