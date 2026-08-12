@@ -37,6 +37,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
     }
 }
 
+pub const SYNC_LOCK: i64 = 0x0CBA_A0D1_7106_0002;
+
 #[derive(Clone, Copy)]
 enum PruneScope {
     Everything,
@@ -138,7 +140,9 @@ fn write_bundle_file(
     digest: &mut BundleDigest,
 ) -> Result<()> {
     ensure_within(root, path)?;
-    std::fs::write(path, bytes).with_context(|| format!("write bundle file {path:?}"))?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, bytes).with_context(|| format!("write bundle file {tmp:?}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("publish bundle file {path:?}"))?;
     digest.record(root, path, bytes);
     Ok(())
 }
@@ -164,6 +168,13 @@ async fn export(
     with_embeddings: bool,
 ) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
+    let mut lock = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK)
+        .execute(&mut *lock)
+        .await
+        .context("taking the sync lock")?;
+
     let project_id = if scope == "all" {
         None
     } else {
@@ -521,6 +532,8 @@ async fn export(
         None
     };
 
+    lock.commit().await?;
+
     Ok(serde_json::json!({
         "action": "export",
         "dir": root.display().to_string(),
@@ -549,10 +562,23 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         );
     }
 
+    let overwrite = match conflict {
+        "skip" | "merge" => false,
+        "overwrite" => true,
+        _ => anyhow::bail!("invalid conflict policy: {conflict}"),
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK)
+        .execute(&mut *tx)
+        .await
+        .context("taking the sync lock")?;
+
     let already: Option<(i32,)> =
         sqlx::query_as("SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1")
             .bind(&manifest.manifest_hash)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *tx)
             .await?;
     if let Some((prev,)) = already {
         return Ok(serde_json::json!({
@@ -563,13 +589,6 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         }));
     }
 
-    let overwrite = match conflict {
-        "skip" | "merge" => false,
-        "overwrite" => true,
-        _ => anyhow::bail!("invalid conflict policy: {conflict}"),
-    };
-
-    let mut tx = pool.begin().await?;
     let mut inserted = 0u32;
     let mut diverged: Vec<Uuid> = Vec::new();
     let mut quarantined = 0u32;
