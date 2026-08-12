@@ -548,6 +548,144 @@ async fn export(
     }))
 }
 
+pub const OBSERVATION_TYPES: [&str; 9] = [
+    "fact",
+    "decision",
+    "lesson",
+    "preference",
+    "error",
+    "solution",
+    "context",
+    "tool_usage",
+    "superseded",
+];
+
+pub const OBSERVATION_SOURCES: [&str; 5] = [
+    "agent",
+    "error_detection",
+    "user",
+    "consolidation",
+    "inference",
+];
+
+pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
+
+async fn validate_bundle(pool: &PgPool, root: &Path) -> Result<()> {
+    let mut offences: Vec<String> = Vec::new();
+    let mut known: HashSet<Uuid> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+
+    let entities_dir = root.join("entities");
+    if entities_dir.exists() {
+        for entry in std::fs::read_dir(&entities_dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let file: EntityFile = serde_json::from_slice(&std::fs::read(&path)?)
+                .with_context(|| format!("parse {}", path.display()))?;
+            known.insert(file.id);
+            names.push(file.name.clone());
+            for obs in &file.observations {
+                if !OBSERVATION_TYPES.contains(&obs.observation_type.as_str()) {
+                    offences.push(format!(
+                        "{}: observation {} has observation_type {:?}",
+                        path.display(),
+                        obs.id,
+                        obs.observation_type
+                    ));
+                }
+                if !OBSERVATION_SOURCES.contains(&obs.source.as_str()) {
+                    offences.push(format!(
+                        "{}: observation {} has source {:?}",
+                        path.display(),
+                        obs.id,
+                        obs.source
+                    ));
+                }
+            }
+        }
+    }
+
+    let local: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM brain_entities")
+        .fetch_all(pool)
+        .await?;
+    known.extend(local);
+    let local_named: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM brain_entities WHERE name = ANY($1)")
+            .bind(&names)
+            .fetch_all(pool)
+            .await?;
+    known.extend(local_named);
+
+    let relations_path = root.join("relations.json");
+    if relations_path.exists() {
+        let rels: Vec<RelationRow> = serde_json::from_slice(&std::fs::read(&relations_path)?)
+            .with_context(|| format!("parse {}", relations_path.display()))?;
+        for rel in &rels {
+            for (side, id) in [
+                ("from_entity", rel.from_entity),
+                ("to_entity", rel.to_entity),
+            ] {
+                if !known.contains(&id) {
+                    offences.push(format!(
+                        "relations.json: relation {} {side} {id} exists nowhere",
+                        rel.id
+                    ));
+                }
+            }
+            if !RELATION_PROVENANCES.contains(&rel.provenance.as_str()) {
+                offences.push(format!(
+                    "relations.json: relation {} has provenance {:?}",
+                    rel.id, rel.provenance
+                ));
+            }
+        }
+    }
+
+    let episodes_root = root.join("episodes");
+    if episodes_root.exists() {
+        for month in std::fs::read_dir(&episodes_root)? {
+            let month = month?.path();
+            if !month.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&month)? {
+                let path = entry?.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let f: EpisodeFile = serde_json::from_slice(&std::fs::read(&path)?)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                if !known.contains(&f.entity_id) {
+                    offences.push(format!(
+                        "{}: episode {} hangs off entity {} which exists nowhere",
+                        path.display(),
+                        f.id,
+                        f.entity_id
+                    ));
+                }
+            }
+        }
+    }
+
+    if offences.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to import: {} row(s) would be rejected by the database, and the import runs \
+         in one transaction — the first rejection takes every other row down with it, hundreds \
+         deep, with a bare Postgres error. Nothing was written. Fix the bundle and retry.\n  {}",
+        offences.len(),
+        offences
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    )
+}
+
 async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
     let manifest_path = root.join("manifest.json");
@@ -565,6 +703,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             SCHEMA_VERSION
         );
     }
+
+    validate_bundle(pool, &root).await?;
 
     let overwrite = match conflict {
         "skip" | "merge" => false,
