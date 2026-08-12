@@ -31,6 +31,9 @@ run_if_present() {
 
 GATE_DB="${GATE_DB:-brain_gate}"
 GATE_DATABASE_URL="${LIVE_DATABASE_URL%/*}/$GATE_DB"
+PEER_DB="${PEER_DB:-brain_gate_peer}"
+PEER_DATABASE_URL="${LIVE_DATABASE_URL%/*}/$PEER_DB"
+export CUBA_PEER_DATABASE_URL="$PEER_DATABASE_URL"
 
 cd "$RUST_DIR"
 
@@ -63,11 +66,32 @@ provision_gate_db() {
     exit 1
   fi
   echo "OK  throwaway database $GATE_DB ready ($tables tables, vector($dim))"
+
+  docker exec cuba-memorys-db psql -U cuba -d postgres -q \
+    -c "DROP DATABASE IF EXISTS $PEER_DB WITH (FORCE)" \
+    -c "CREATE DATABASE $PEER_DB" >/dev/null
+  DATABASE_URL="$PEER_DATABASE_URL" CUBA_APP_ROLE=0 ONNX_MODEL_PATH="" \
+    timeout 300 cargo run --quiet --bin cuba-memorys -- doctor >/dev/null 2>&1 || true
+  if [[ "$CUBA_EMBEDDING_DIM" != "384" ]]; then
+    DATABASE_URL="$PEER_DATABASE_URL" "$ROOT/scripts/migrate-embedding-dim.sh" \
+      "$CUBA_EMBEDDING_DIM" >/dev/null 2>&1 || true
+  fi
+  local peer_tables
+  peer_tables="$(docker exec cuba-memorys-db psql -U cuba -d "$PEER_DB" -Atc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema=\'public\'")"
+  if ((peer_tables < 20)); then
+    echo "FAIL: could not migrate the second node's database (only $peer_tables tables)." >&2
+    echo "      The two-node test would then skip, and a skipped test that reports green is" >&2
+    echo "      how a machine claims two nodes converge without ever having run two." >&2
+    exit 1
+  fi
+  echo "OK  second node database $PEER_DB ready ($peer_tables tables)"
 }
 
 drop_gate_db() {
   docker exec cuba-memorys-db psql -U cuba -d postgres -q \
-    -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" >/dev/null 2>&1 || true
+    -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" \
+    -c "DROP DATABASE IF EXISTS $PEER_DB WITH (FORCE)" >/dev/null 2>&1 || true
 }
 trap drop_gate_db EXIT
 

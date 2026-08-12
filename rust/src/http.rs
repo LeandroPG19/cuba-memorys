@@ -120,14 +120,6 @@ fn ensure_adopted_loopback(addr: &SocketAddr) -> Result<()> {
 }
 
 pub async fn serve(addr: &str) -> Result<()> {
-    let addr: SocketAddr = addr
-        .parse()
-        .with_context(|| format!("invalid listen address: {addr}"))?;
-    ensure_loopback(&addr)?;
-    ensure_tokens_differ()?;
-
-    crate::session::enable_daemon_mode();
-
     let database_url = crate::setup::resolve_database_url().await;
     let (pool, connected) = match crate::db::create_pool(&database_url).await {
         Ok(pool) => {
@@ -142,6 +134,17 @@ pub async fn serve(addr: &str) -> Result<()> {
             (crate::db::create_lazy_pool(&database_url), false)
         }
     };
+    serve_pool(addr, pool, connected).await
+}
+
+pub async fn serve_pool(addr: &str, pool: PgPool, connected: bool) -> Result<()> {
+    let addr: SocketAddr = addr
+        .parse()
+        .with_context(|| format!("invalid listen address: {addr}"))?;
+    ensure_loopback(&addr)?;
+    ensure_tokens_differ()?;
+
+    crate::session::enable_daemon_mode();
 
     if connected {
         let rem_pool = pool.clone();

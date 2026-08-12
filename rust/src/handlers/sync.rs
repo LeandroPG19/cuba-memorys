@@ -57,7 +57,16 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
             pull(pool, offset, limit, vectors).await
         }
         "notify" => notify(pool, &args).await,
-        _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status/pull/notify"),
+        "fetch" => {
+            let confirm = args
+                .get("confirm")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            fetch(pool, &args, conflict, confirm).await
+        }
+        _ => anyhow::bail!(
+            "Invalid action: {action}. Use export/import/diff/status/pull/notify/fetch"
+        ),
     }
 }
 
@@ -717,6 +726,248 @@ pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted
 const PULL_PAGE_BYTES: usize = 3 * 1024 * 1024;
 
 const MAX_NOTICE_CHARS: usize = 2000;
+
+const PEER_INBOX: &str = ".peer-inbox";
+
+fn peer_token_or_refuse() -> Result<String> {
+    std::env::var("CUBA_PEER_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "CUBA_PEER_TOKEN is unset, so there is no secret to present to the other \
+                 machine. It is the same string on both nodes: the one this daemon accepts \
+                 from a peer, and the one it sends when it is the peer"
+            )
+        })
+}
+
+async fn ask_peer(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let endpoint = format!("{}/mcp", url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "cuba_sync", "arguments": arguments},
+    });
+
+    let response = tokio::time::timeout(
+        crate::protocol::handler_timeout(),
+        client.post(&endpoint).bearer_auth(token).json(&body).send(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("{endpoint} did not answer within the handler budget"))?
+    .with_context(|| format!("reaching {endpoint}"))?;
+
+    let status = response.status();
+    let payload: Value = tokio::time::timeout(crate::protocol::handler_timeout(), response.json())
+        .await
+        .map_err(|_| anyhow::anyhow!("{endpoint} answered {status} and then stalled mid-body"))?
+        .with_context(|| format!("{endpoint} answered {status} with something that is not JSON"))?;
+
+    if let Some(error) = payload.get("error") {
+        anyhow::bail!("{endpoint} refused: {error}");
+    }
+    let text = payload["result"]["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{endpoint} answered {status} without an MCP content envelope: {payload}"
+            )
+        })?;
+    serde_json::from_str(text).with_context(|| format!("{endpoint} sent a body that is not JSON"))
+}
+
+async fn fetch(pool: &PgPool, args: &Value, conflict: &str, confirm: bool) -> Result<Value> {
+    let name = args
+        .get("peer")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
+        .to_string();
+    let url = match args.get("url").and_then(Value::as_str) {
+        Some(u) => u.to_string(),
+        None => sqlx::query_scalar::<_, String>("SELECT url FROM brain_sync_peers WHERE name = $1")
+            .bind(&name)
+            .fetch_optional(pool)
+            .await?
+            .or_else(|| {
+                std::env::var("CUBA_PEER_URL")
+                    .ok()
+                    .filter(|u| !u.is_empty())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no address for peer {name:?}: pass url, set CUBA_PEER_URL, or let a previous \
+                 fetch record it"
+                )
+            })?,
+    };
+    let token = peer_token_or_refuse()?;
+
+    let client = reqwest::Client::builder()
+        .build()
+        .context("building the peer client")?;
+
+    let known: Option<String> =
+        sqlx::query_scalar("SELECT last_manifest_hash FROM brain_sync_peers WHERE name = $1")
+            .bind(&name)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+
+    let outcome = drain_peer(pool, &client, &url, &token, known.as_deref()).await;
+
+    let (result, error) = match outcome {
+        Ok(value) => (Some(value), None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+
+    let landed_hash = result
+        .as_ref()
+        .and_then(|v| v["manifest_hash"].as_str())
+        .map(str::to_string);
+
+    sqlx::query(
+        "INSERT INTO brain_sync_peers (name, url, last_manifest_hash, last_synced_at, last_error)
+         VALUES ($1, $2, $3, CASE WHEN $4::text IS NULL THEN NOW() ELSE NULL END, $4)
+         ON CONFLICT (name) DO UPDATE SET
+             url = EXCLUDED.url,
+             last_manifest_hash = COALESCE(EXCLUDED.last_manifest_hash,
+                                           brain_sync_peers.last_manifest_hash),
+             last_synced_at = COALESCE(EXCLUDED.last_synced_at, brain_sync_peers.last_synced_at),
+             last_error = EXCLUDED.last_error",
+    )
+    .bind(&name)
+    .bind(&url)
+    .bind(landed_hash.as_deref())
+    .bind(error.as_deref())
+    .execute(pool)
+    .await
+    .context("recording what this peer last handed over")?;
+
+    let staged = match result {
+        Some(v) => v,
+        None => anyhow::bail!(
+            "{}",
+            error.unwrap_or_else(|| "the peer fetch failed".to_string())
+        ),
+    };
+
+    if staged["unchanged"].as_bool() == Some(true) {
+        return Ok(serde_json::json!({
+            "action": "fetch",
+            "peer": name,
+            "url": url,
+            "unchanged": true,
+            "manifest_hash": staged["manifest_hash"],
+            "note": "the peer is offering the same bundle this node already took, so nothing \
+                     was written and no transaction was opened. Without this the cycle never \
+                     converges in work: importance and access_count move with ordinary use, so \
+                     every export produces a new hash and each side re-imports forever."
+        }));
+    }
+
+    let landed = staged["dir"].as_str().unwrap_or_default().to_string();
+    let imported = import(pool, Some(&landed), conflict, confirm).await;
+    let _ = std::fs::remove_dir_all(&landed);
+    let imported = imported?;
+
+    Ok(serde_json::json!({
+        "action": "fetch",
+        "peer": name,
+        "url": url,
+        "files_received": staged["files"],
+        "imported": imported,
+    }))
+}
+
+async fn drain_peer(
+    _pool: &PgPool,
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    known: Option<&str>,
+) -> Result<Value> {
+    let inbox = resolve_dir(Some(PEER_INBOX))?;
+    let mut offset = 0u64;
+    let mut files = 0usize;
+    let mut hash: Option<String> = None;
+
+    loop {
+        let page = ask_peer(
+            client,
+            url,
+            token,
+            serde_json::json!({"action": "pull", "offset": offset}),
+        )
+        .await?;
+
+        let page_hash = page["manifest_hash"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("the peer sent a page with no manifest_hash: {page}"))?
+            .to_string();
+
+        if offset == 0 {
+            if known == Some(page_hash.as_str()) {
+                return Ok(serde_json::json!({
+                    "unchanged": true,
+                    "manifest_hash": page_hash,
+                }));
+            }
+            let _ = std::fs::remove_dir_all(&inbox);
+            std::fs::create_dir_all(&inbox).context("preparing the peer inbox")?;
+        } else if hash.as_deref() != Some(page_hash.as_str()) {
+            let _ = std::fs::remove_dir_all(&inbox);
+            anyhow::bail!(
+                "the peer changed underneath this transfer: page 0 described {} and this one \
+                 describes {page_hash}. The pages no longer belong to one state, so they were \
+                 discarded rather than imported — a torn bundle that happens to parse is the \
+                 one failure that commits and records its hash forever",
+                hash.unwrap_or_default()
+            );
+        }
+        hash = Some(page_hash);
+
+        for file in page["files"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("a page without files: {page}"))?
+        {
+            let relative = file["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("a file with no path: {file}"))?;
+            let target = inbox.join(relative);
+            ensure_within(&inbox, &target)?;
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            match (file["text"].as_str(), file["hex"].as_str()) {
+                (Some(text), _) => std::fs::write(&target, text)?,
+                (None, Some(blob)) => std::fs::write(&target, hex::decode(blob)?)?,
+                (None, None) => anyhow::bail!("a file arrived with neither text nor hex: {file}"),
+            }
+            files += 1;
+        }
+
+        if !page["has_more"].as_bool().unwrap_or(false) {
+            break;
+        }
+        offset = page["next_offset"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("has_more with no next_offset: {page}"))?;
+    }
+
+    Ok(serde_json::json!({
+        "unchanged": false,
+        "manifest_hash": hash,
+        "files": files,
+        "dir": inbox.display().to_string(),
+    }))
+}
 
 async fn notify(pool: &PgPool, args: &Value) -> Result<Value> {
     let summary = args
