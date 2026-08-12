@@ -7,6 +7,15 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+async fn drain_then_report(result: anyhow::Result<()>, command: &str) {
+    drain_background_tasks().await;
+    if let Err(e) = result {
+        tracing::error!(error = %format!("{e:#}"), command, "command failed");
+        eprintln!("{command} error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
 fn print_help() {
     println!(
         "cuba-memorys {version} — knowledge-graph memory server (MCP)
@@ -32,7 +41,8 @@ THE BRAIN, WITHOUT AN LLM IN BETWEEN:
   search <query>    hybrid search (use --format verbose for the score breakdown)
   save <content>    write an observation
   delete <id>       remove an observation
-  export            dump the graph (json | markdown)
+  export <dir>      write the graph as an Obsidian vault (refuses a non-empty dir
+                    without --apply: the index is README.md)
   dashboard         what is in there, at a glance
 
 OPERATIONS:
@@ -128,12 +138,8 @@ async fn async_main() {
             return;
         }
         Some("reembed") => {
-            if let Err(e) = cuba_memorys::reembed_cli::run_cli(&argv[2..]).await {
-                tracing::error!(error = %format!("{e:#}"), "reembed failed");
-                eprintln!("reembed error: {e:#}");
-                std::process::exit(1);
-            }
-            drain_background_tasks().await;
+            let result = cuba_memorys::reembed_cli::run_cli(&argv[2..]).await;
+            drain_then_report(result, "reembed").await;
             return;
         }
         Some("recall") => {
@@ -185,12 +191,8 @@ async fn async_main() {
             return;
         }
         Some("rem") => {
-            if let Err(e) = cuba_memorys::rem_cli::run_cli(&argv[2..]).await {
-                tracing::error!(error = %format!("{e:#}"), "rem failed");
-                eprintln!("rem error: {e:#}");
-                std::process::exit(1);
-            }
-            drain_background_tasks().await;
+            let result = cuba_memorys::rem_cli::run_cli(&argv[2..]).await;
+            drain_then_report(result, "rem").await;
             return;
         }
         Some("codegraph") => {
@@ -234,12 +236,7 @@ async fn async_main() {
                 "dashboard" => cuba_memorys::dashboard::run_cli(rest).await,
                 _ => cuba_memorys::export::run_cli(rest).await,
             };
-            if let Err(e) = result {
-                tracing::error!(error = %format!("{e:#}"), command = cmd, "command failed");
-                eprintln!("{cmd}: {e:#}");
-                std::process::exit(1);
-            }
-            drain_background_tasks().await;
+            drain_then_report(result, cmd).await;
             return;
         }
         Some("setup") => {

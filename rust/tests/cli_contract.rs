@@ -210,3 +210,45 @@ fn the_readme_counts_the_commands_that_exist() {
         cuba_memorys::cli::COMMANDS.len()
     );
 }
+
+#[test]
+fn nothing_can_exit_a_draining_command_without_draining_first() {
+    let main_rs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("src/main.rs");
+
+    let helper = main_rs
+        .split_once("async fn drain_then_report")
+        .expect("the draining commands must funnel through drain_then_report")
+        .1;
+    let body = helper.split_once("\n}\n").expect("helper body").0;
+
+    let drain = body
+        .find("drain_background_tasks()")
+        .expect("the helper must drain");
+    let exit = body
+        .find("std::process::exit")
+        .expect("the helper must exit");
+    assert!(
+        drain < exit,
+        "the drain has to happen BEFORE the exit. It used to sit after it inside each arm, \
+         so a `save` that returned an error killed the process with its embedding still in \
+         flight — the write survived, the vector did not, and nothing said so"
+    );
+
+    for command in ["reembed", "rem"] {
+        let arm = main_rs
+            .split_once(&format!("Some(\"{command}\") =>"))
+            .unwrap_or_else(|| panic!("{command} arm"))
+            .1
+            .split_once("\n        }")
+            .expect("arm body")
+            .0;
+        assert!(
+            !arm.contains("std::process::exit"),
+            "`{command}` exits inside its own arm again, which is exactly how the drain got \
+             skipped. Route it through drain_then_report instead"
+        );
+    }
+}

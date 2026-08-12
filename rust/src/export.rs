@@ -97,6 +97,37 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn refuse_unless_safe_to_write(dir: &Path, apply: bool) -> Result<()> {
+    if apply || !dir.exists() {
+        return Ok(());
+    }
+    let mut existing: Vec<String> = std::fs::read_dir(dir)
+        .with_context(|| format!("no se pudo leer {}", dir.display()))?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    existing.sort();
+    let shown: Vec<&str> = existing.iter().take(5).map(String::as_str).collect();
+    let more = existing.len().saturating_sub(shown.len());
+    bail!(
+        "{} ya contiene {} entrada(s) ({}{}). El export escribe README.md como índice y una \
+         nota por entidad, así que sobrescribiría lo que coincida en nombre y eso no se \
+         recupera. Volvé a lanzarlo con --apply si es lo que querés.",
+        dir.display(),
+        existing.len(),
+        shown.join(", "),
+        if more > 0 {
+            format!(", y {more} más")
+        } else {
+            String::new()
+        }
+    )
+}
+
 pub async fn export_obsidian(pool: &PgPool, dir: &Path) -> Result<usize> {
     std::fs::create_dir_all(dir).with_context(|| format!("no se pudo crear {}", dir.display()))?;
 
@@ -346,5 +377,82 @@ mod tests {
             "ver \\[\\[otra-memoria\\]\\] para el detalle"
         );
         assert_eq!(neutralize_wikilinks("texto sin links"), "texto sin links");
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cuba-export-guard-{name}"));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_yet_is_safe() {
+        let dir = scratch("missing");
+        assert!(refuse_unless_safe_to_write(&dir, false).is_ok());
+    }
+
+    #[test]
+    fn an_empty_directory_is_safe() {
+        let dir = scratch("empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(refuse_unless_safe_to_write(&dir, false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_repository_is_refused_because_the_index_is_called_readme() {
+        let dir = scratch("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "someone else's readme").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+
+        let refusal = refuse_unless_safe_to_write(&dir, false)
+            .expect_err(
+                "export writes README.md as its index and one note per entity. Run inside a                  project and it eats that project's README, which is the only irrecoverable                  loss the CLI can cause",
+            )
+            .to_string();
+
+        assert!(refusal.contains("README.md"), "{refusal}");
+        assert!(
+            refusal.contains("--apply"),
+            "a refusal has to say how to proceed on purpose: {refusal}"
+        );
+
+        let readme = std::fs::read_to_string(dir.join("README.md")).unwrap();
+        assert_eq!(
+            readme, "someone else's readme",
+            "the guard must refuse BEFORE writing anything"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_is_the_way_to_write_into_a_directory_that_already_has_content() {
+        let dir = scratch("apply");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "x").unwrap();
+
+        assert!(
+            refuse_unless_safe_to_write(&dir, true).is_ok(),
+            "re-exporting into your own vault is the normal case and must stay one flag away"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_directory_holding_only_hidden_entries_still_counts_as_empty() {
+        let dir = scratch("hidden");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+
+        assert!(
+            refuse_unless_safe_to_write(&dir, false).is_ok(),
+            "a freshly `git init`ed directory has a .git and nothing else; refusing there              would block the first export of the very workflow the README recommends"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
