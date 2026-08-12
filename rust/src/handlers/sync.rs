@@ -1464,6 +1464,18 @@ async fn import(
         .await
         .context("taking the sync lock")?;
 
+    let scoped = match manifest.project_id {
+        Some(pid) => {
+            sqlx::query("SELECT set_config('app.current_project', $1, true)")
+                .bind(pid.to_string())
+                .execute(&mut *tx)
+                .await
+                .context("declaring the scope this bundle is allowed to write into")?;
+            true
+        }
+        None => false,
+    };
+
     let tombstones = apply_tombstones(&mut tx, &root, confirm).await?;
 
     if manifest.with_embeddings {
@@ -2069,6 +2081,19 @@ async fn import(
         "quarantine_reasons": quarantine_reasons,
         "quarantine_note": quarantine_note,
         "peer_notices_closed": notices_closed,
+        "scope_enforced": scoped,
+        "scope_note": if scoped {
+            Value::Null
+        } else {
+            serde_json::json!(
+                "this bundle declares no project, so app.current_project stayed empty and the \
+                 row-level policies treat that as no filter — measured, not assumed: with a \
+                 project set an INSERT naming a different one is rejected, and with it empty \
+                 the same INSERT lands. A scope=all bundle crosses projects by definition, so \
+                 the database cannot be the guard here and the bundle's own project_id values \
+                 are taken at face value."
+            )
+        },
         "from": root.display().to_string(),
     }))
 }
