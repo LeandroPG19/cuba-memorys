@@ -60,12 +60,11 @@ impl Adwin {
         }
         let total = prefix[n];
 
-        #[allow(clippy::needless_range_loop)]
-        for cut in 4..(n - 4) {
+        for (cut, &prefix_cut) in prefix.iter().enumerate().take(n - 4).skip(4) {
             let n0 = cut as f64;
             let n1 = (n - cut) as f64;
-            let mean0 = prefix[cut] / n0;
-            let mean1 = (total - prefix[cut]) / n1;
+            let mean0 = prefix_cut / n0;
+            let mean1 = (total - prefix_cut) / n1;
 
             let m = (n0 * n1) / (n0 + n1);
             let delta_prime = self.delta / n as f64;
@@ -124,5 +123,38 @@ mod tests {
         for _ in 0..7 {
             assert!(!a.add(0.5));
         }
+    }
+
+    #[test]
+    fn the_cut_lands_where_the_distribution_actually_changed() {
+        let mut a = Adwin::with_default();
+        for _ in 0..40 {
+            a.add(0.2);
+        }
+        let mut added = 0;
+        let mut cut_at = None;
+        for _ in 0..40 {
+            added += 1;
+            if a.add(0.8) {
+                cut_at = Some(a.len());
+                break;
+            }
+        }
+
+        let remaining = cut_at.expect("a 0.2 to 0.8 shift over 40 samples must be detected");
+        assert_eq!(
+            (added, remaining),
+            (28, 28),
+            "the search walks cuts in ascending order and takes the first one whose two \
+             halves differ by more than the Hoeffding bound, so the number of samples left \
+             after the drain IS the cut index. The four older tests only assert that drift \
+             was or was not detected, and this one pins the index itself, which is what \
+             makes a rewrite of that loop checkable at all. What it still does NOT establish \
+             is the loop's search bounds: shifting 4..n-4 by one leaves every test green, \
+             including this one, because the qualifying cut here lands at 40 and a cut near \
+             4 cannot qualify at any input — with n0=4 the Hoeffding bound is wider than any \
+             mean difference, measured: four 0.0 samples followed by sixty 1.0 samples \
+             produce no drift at all. Those bounds are defensive, not functional"
+        );
     }
 }

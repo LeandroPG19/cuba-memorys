@@ -20,7 +20,6 @@ pub fn handler_timeout() -> Duration {
 const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
     pub id: Option<Value>,

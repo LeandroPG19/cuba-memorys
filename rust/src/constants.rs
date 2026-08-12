@@ -70,8 +70,7 @@ static TOOL_DEFS: OnceLock<Vec<Value>> = OnceLock::new();
 
 pub fn tool_definitions() -> &'static Vec<Value> {
     TOOL_DEFS.get_or_init(|| {
-        #[allow(unused_mut)]
-        let mut defs = vec![
+        let defs = vec![
         tool_def(
             "cuba_alma",
             "CRUD knowledge graph entities (concepts, projects, technologies, patterns, people). Auto-boosts neighbors on access. For transient info use cuba_cronica instead.",
@@ -499,9 +498,13 @@ pub fn tool_definitions() -> &'static Vec<Value> {
     ];
 
         #[cfg(feature = "docs")]
-        if !crate::handlers::docs::enabled() {
-            defs.retain(|t| t.get("name").and_then(Value::as_str) != Some("cuba_docs"));
-        }
+        let defs = if crate::handlers::docs::enabled() {
+            defs
+        } else {
+            defs.into_iter()
+                .filter(|t| t.get("name").and_then(Value::as_str) != Some("cuba_docs"))
+                .collect()
+        };
 
         defs
     })
