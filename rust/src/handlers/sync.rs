@@ -683,17 +683,23 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                     continue;
                 }
                 let f: EpisodeFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+                let (trust, reason) = trust_for_imported(&f.content);
+                if let Some(pattern) = reason {
+                    quarantined += 1;
+                    *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+                }
                 let r = sqlx::query(&format!(
                     "INSERT INTO brain_episodes
                         (id, entity_id, content, actors, artifacts, importance,
-                         project_id, started_at, ended_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                         project_id, started_at, ended_at, trust)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                      ON CONFLICT (id) DO {}",
                     if overwrite {
                         "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
                          actors = EXCLUDED.actors, artifacts = EXCLUDED.artifacts, \
                          importance = EXCLUDED.importance, project_id = EXCLUDED.project_id, \
-                         started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at"
+                         started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, \
+                         trust = EXCLUDED.trust"
                     } else {
                         "NOTHING"
                     }
@@ -707,6 +713,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 .bind(f.project_id)
                 .bind(f.started_at)
                 .bind(f.ended_at)
+                .bind(trust)
                 .execute(&mut *tx)
                 .await?;
                 inserted += r.rows_affected() as u32;
@@ -722,17 +729,28 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 continue;
             }
             let e: ErrorFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+            let searchable = format!(
+                "{}\n{}",
+                e.error_message,
+                e.solution.as_deref().unwrap_or("")
+            );
+            let (trust, reason) = trust_for_imported(&searchable);
+            if let Some(pattern) = reason {
+                quarantined += 1;
+                *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+            }
             let r = sqlx::query(&format!(
                 "INSERT INTO brain_errors
                     (id, error_type, error_message, solution, resolved,
-                     project, project_id, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     project, project_id, created_at, trust)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (id) DO {}",
                 if overwrite {
                     "UPDATE SET error_type = EXCLUDED.error_type, \
                      error_message = EXCLUDED.error_message, solution = EXCLUDED.solution, \
                      resolved = EXCLUDED.resolved, project = EXCLUDED.project, \
-                     project_id = EXCLUDED.project_id, created_at = EXCLUDED.created_at"
+                     project_id = EXCLUDED.project_id, created_at = EXCLUDED.created_at, \
+                     trust = EXCLUDED.trust"
                 } else {
                     "NOTHING"
                 }
@@ -745,6 +763,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             .bind(&e.project)
             .bind(e.project_id)
             .bind(e.created_at)
+            .bind(trust)
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
@@ -840,9 +859,10 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     let quarantine_note = (quarantined > 0).then(|| {
         format!(
-            "{quarantined} imported observations look like they carry a credential and were \
-             written with trust=quarantined: they are withheld from cuba_faro until you read \
-             them with cuba_eco action=pending and accept them with cuba_eco action=promote"
+            "{quarantined} imported rows look like they carry a credential and were written \
+             with trust=quarantined: observations and episodes are withheld from cuba_faro and \
+             errors from cuba_expediente. Read them with cuba_eco action=pending and accept \
+             them with cuba_eco action=promote"
         )
     });
 

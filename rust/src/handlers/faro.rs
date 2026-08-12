@@ -1028,6 +1028,7 @@ async fn text_search(
                 OR similarity(ep.content, $1) > 0.3)
                AND ep.created_at >= $3 AND ep.created_at <= $4
                AND ($5::uuid IS NULL OR ep.project_id = $5 OR ep.project_id IS NULL)
+               AND ep.trust = 'trusted'
              ORDER BY score DESC
              LIMIT $2",
         )
@@ -1150,6 +1151,7 @@ async fn vector_search(
          WHERE ep.embedding IS NOT NULL
            AND ep.created_at >= $3 AND ep.created_at <= $4
            AND ($5::uuid IS NULL OR ep.project_id = $5 OR ep.project_id IS NULL)
+           AND ep.trust = 'trusted'
          ORDER BY ep.embedding <=> $1::vector
          LIMIT $2",
     )
