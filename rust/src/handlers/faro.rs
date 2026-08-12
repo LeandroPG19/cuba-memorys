@@ -697,11 +697,6 @@ fn compact_result(r: &Value) -> Value {
 async fn verify_claim(pool: &PgPool, claim: &str, project_id: Option<uuid::Uuid>) -> Result<Value> {
     use std::collections::HashMap;
 
-    sqlx::query("SET LOCAL hnsw.ef_search = 200")
-        .execute(pool)
-        .await
-        .ok();
-
     let trigram_evidence: Vec<(uuid::Uuid, String, f64, String, String)> = sqlx::query_as(
         "SELECT o.id, o.content, similarity(o.content, $1)::float8 AS sim,
                 o.observation_type, e.name AS entity_name

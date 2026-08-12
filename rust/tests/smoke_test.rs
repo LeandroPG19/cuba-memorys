@@ -154,8 +154,10 @@ fn the_embedded_migrations_build_every_object_the_handlers_query() {
         assert!(
             up.contains(object),
             "«{object}» is queried by the handlers but no migration creates it. This test \
-             reads the set sqlx::migrate! embeds — the same one db.rs applies — precisely \
-             because src/schema.sql froze at v0.6.0 and is 20 tables behind"
+             reads the set sqlx::migrate! embeds, which is the same one db.rs applies. There \
+             used to be a second answer to «what is the schema» in src/schema.sql; it had \
+             frozen at 8 tables against 31 and was deleted rather than repaired, because a \
+             stale second answer is worse than one answer"
         );
     }
 }
@@ -258,5 +260,52 @@ fn a_request_without_an_id_parses_as_a_notification() {
         serde_json::from_str::<JsonRpcRequest>(r#"{"jsonrpc":"2.0","id":1}"#).is_err(),
         "with no method there is nothing to dispatch: it has to die in the parser and come \
          back as -32600, not reach a handler"
+    );
+}
+
+#[test]
+fn a_session_setting_is_never_applied_to_a_pooled_connection() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("src/ is readable").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(std::path::Path::new("src"), &mut files);
+    assert!(
+        files.len() > 20,
+        "the walk found almost nothing, so it proves nothing"
+    );
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let body = std::fs::read_to_string(path).expect("a source file is readable");
+        let lines: Vec<&str> = body.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("SET LOCAL") {
+                continue;
+            }
+            let window = lines[i..(i + 6).min(lines.len())].join("\n");
+            if !window.contains("&mut *tx") {
+                offenders.push(format!("{}:{}", path.display(), i + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "SET LOCAL lives and dies with a transaction. Run it through a pool and it applies to \
+         an implicit single-statement transaction that commits immediately, so the next query \
+         — which may not even land on the same connection — runs with the default. faro.rs \
+         carried `SET LOCAL hnsw.ef_search = 200` on a pool for exactly that reason: measured \
+         in another transaction the setting reads back empty, the .ok() swallowed any \
+         complaint, and EXPLAIN showed a Seq Scan anyway. A knob that cannot move is worse \
+         than no knob, because it reads as tuned. Offenders: {offenders:?}"
     );
 }

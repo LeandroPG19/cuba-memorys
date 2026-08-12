@@ -101,7 +101,6 @@ rust/
 │   ├── lib.rs               # Public API
 │   ├── protocol.rs          # JSON-RPC 2.0 + REM daemon (4h consolidation)
 │   ├── db.rs                # sqlx PgPool (10 max, 600s idle, 1800s lifetime)
-│   ├── schema.sql           # 5 tables, 15+ indexes, HNSW
 │   ├── constants.rs         # Tool definitions, thresholds, enums
 │   ├── handlers/            # 13 MCP tool handlers
 │   │   ├── mod.rs           # dispatch() router
