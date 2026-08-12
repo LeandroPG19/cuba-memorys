@@ -72,6 +72,19 @@ Environment=CUBA_RERANK_CHUNK=4
 
 # Uncomment to have the daemon exit when no client has spoken for 20 minutes.
 # Requires cuba-memorys.socket to be enabled, or nothing will bring it back.
+#
+# Think twice before you do. It reclaims memory the kernel has already given
+# back: measured on a daemon 27 minutes into its life, resident was 114 MB
+# against a historical peak of 2812 MB in that same process. The peak is real
+# and transient; the idle cost is not what the peak suggests.
+#
+# And it silently disables every periodic task, because they all live inside
+# this process. REM consolidation runs on a 4-hour interval — a daemon that
+# exits after 20 minutes of quiet never reaches its first tick. Measured on the
+# machine that had this set: 23 idle shutdowns in 3 days, zero REM cycles ever,
+# and 86 of 146 observations over 1500 characters still without the chunks the
+# backfill inside REM is what creates. Those observations are searchable by
+# their first 512 tokens and nothing says so.
 #Environment=CUBA_IDLE_SHUTDOWN_SECS=1200
 
 Environment=DATABASE_URL=postgresql://cuba:memorys2026@127.0.0.1:5488/brain
