@@ -115,3 +115,108 @@ async fn a_fact_carries_its_layer_by_name_because_the_uuid_is_local_to_one_insta
     let _ = std::fs::remove_dir_all(&bundle);
     unsafe { std::env::remove_var("CUBA_SYNC_DIR") };
 }
+
+#[tokio::test]
+#[ignore]
+async fn two_machines_that_disagree_do_not_leave_two_current_truths() {
+    let url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
+    let bundle = std::env::temp_dir().join(format!("cuba-f4c-{}", Uuid::new_v4()));
+    let pool = cuba_memorys::db::create_pool(&url)
+        .await
+        .expect("connect to test database");
+    let _owns = own_the_sync_dir(&pool).await;
+    std::fs::create_dir_all(&bundle).expect("a scratch bundle directory");
+    unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
+
+    let subject = format!("svc_{}", &Uuid::new_v4().to_string()[..8]);
+    let old_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO brain_facts (fact_id, subject, predicate, object, valid_from, observed_at)
+         VALUES ($1, $2, 'runs', 'postgres 17', NOW() - INTERVAL '2 days',
+                 NOW() - INTERVAL '2 days')",
+    )
+    .bind(old_id)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .expect("what this machine believed two days ago");
+
+    let newer = Uuid::new_v4();
+    std::fs::write(
+        bundle.join("manifest.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 2, "manifest_hash": "recomputed anyway",
+            "project_id": null, "project_name": null,
+            "exported_at": "2026-08-01T00:00:00Z",
+            "counts": {"entities": 0, "observations": 0, "episodes": 0, "decisions": 0, "errors": 0, "relations": 0},
+            "with_embeddings": false
+        }))
+        .expect("serialise"),
+    )
+    .expect("manifest");
+    std::fs::write(
+        bundle.join("facts.json"),
+        serde_json::to_vec_pretty(&json!([{
+            "fact_id": newer, "subject": subject, "predicate": "runs",
+            "object": "postgres 18",
+            "valid_from": chrono::Utc::now(), "observed_at": chrono::Utc::now(),
+            "is_current": true
+        }]))
+        .expect("serialise"),
+    )
+    .expect("facts.json");
+
+    let imported = call(
+        &pool,
+        "cuba_sync",
+        json!({"action": "import", "dir": bundle.display().to_string()}),
+    )
+    .await;
+
+    assert_eq!(
+        imported["facts_superseded"].as_u64(),
+        Some(1),
+        "brain_facts has no unique index on (subject, predicate), so two machines that each \
+         recorded a current answer produce two rows nothing reconciles — and cuba_faro would \
+         return whichever it happened to rank first, as the truth. Got: {imported}"
+    );
+
+    let current: Vec<String> = sqlx::query_scalar(
+        "SELECT object FROM brain_facts WHERE subject = $1 AND predicate = 'runs' AND is_current",
+    )
+    .bind(&subject)
+    .fetch_all(&pool)
+    .await
+    .expect("read the current answers");
+    assert_eq!(
+        current,
+        vec!["postgres 18".to_string()],
+        "exactly one current answer, and it is the one observed later"
+    );
+
+    let (still_there, closed_at): (i64, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT count(*), max(valid_to) FROM brain_facts WHERE fact_id = $1")
+            .bind(old_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the superseded row");
+    assert_eq!(
+        still_there, 1,
+        "and the older answer is closed, not deleted — the whole point of valid_from/valid_to \
+         is that what used to be true stays askable"
+    );
+    assert!(
+        closed_at.is_some(),
+        "a row that stops being current without a valid_to is a fact with no end, which is \
+         the state ck_facts_current_open exists to forbid"
+    );
+
+    sqlx::query("DELETE FROM brain_facts WHERE subject = $1")
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .ok();
+    let _ = std::fs::remove_dir_all(&bundle);
+    unsafe { std::env::remove_var("CUBA_SYNC_DIR") };
+}

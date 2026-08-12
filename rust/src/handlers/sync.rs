@@ -1057,6 +1057,7 @@ async fn import(
     let mut inserted = 0u32;
     let mut diverged: Vec<Uuid> = Vec::new();
     let mut remapped: HashMap<Uuid, Uuid> = HashMap::new();
+    let mut superseded_facts = 0u32;
     let mut quarantined = 0u32;
     let mut quarantine_reasons: HashMap<&'static str, u32> = HashMap::new();
 
@@ -1351,6 +1352,46 @@ async fn import(
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
+
+            if r.rows_affected() > 0 && f.is_current.unwrap_or(true) {
+                let closed = sqlx::query(
+                    "UPDATE brain_facts
+                     SET is_current = FALSE, valid_to = $4
+                     WHERE subject = $1 AND predicate = $2 AND fact_id <> $3
+                       AND is_current
+                       AND observed_at <= $4",
+                )
+                .bind(&f.subject)
+                .bind(&f.predicate)
+                .bind(f.fact_id)
+                .bind(f.observed_at)
+                .execute(&mut *tx)
+                .await?;
+                superseded_facts += closed.rows_affected() as u32;
+
+                let newer: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM brain_facts
+                     WHERE subject = $1 AND predicate = $2 AND fact_id <> $3
+                       AND is_current AND observed_at > $4",
+                )
+                .bind(&f.subject)
+                .bind(&f.predicate)
+                .bind(f.fact_id)
+                .bind(f.observed_at)
+                .fetch_one(&mut *tx)
+                .await?;
+                if newer > 0 {
+                    sqlx::query(
+                        "UPDATE brain_facts SET is_current = FALSE, valid_to = $2
+                         WHERE fact_id = $1",
+                    )
+                    .bind(f.fact_id)
+                    .bind(f.observed_at)
+                    .execute(&mut *tx)
+                    .await?;
+                    superseded_facts += 1;
+                }
+            }
         }
     }
 
@@ -1553,6 +1594,7 @@ async fn import(
         "rows_inserted": inserted,
         "diverged": diverged.len(),
         "edited_since_export": tampered,
+        "facts_superseded": superseded_facts,
         "tombstones_applied": tombstones.deleted,
         "tombstones_withheld": tombstones.withheld,
         "divergence_note": divergence_note,
