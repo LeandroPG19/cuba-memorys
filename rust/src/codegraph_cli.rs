@@ -137,6 +137,10 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn parsed_from(file: &str) -> String {
+    format!("tree-sitter parse of {file}")
+}
+
 pub fn symbol_identity(kind_label: &str, simple_name: &str, file: &str) -> String {
     format!("{kind_label} `{simple_name}` in {file}:")
 }
@@ -174,7 +178,7 @@ async fn upsert_symbol(
 
     let refreshed = sqlx::query(
         "UPDATE brain_observations
-         SET content = $2, updated_at = NOW()
+         SET content = $2, updated_at = NOW(), evidence = 'observed', verification = $5
          WHERE entity_id = $1
            AND observation_type = 'context'
            AND source = 'agent'
@@ -185,6 +189,7 @@ async fn upsert_symbol(
     .bind(&content)
     .bind(identity.chars().count() as i32)
     .bind(&identity)
+    .bind(parsed_from(&symbol.file))
     .execute(&mut *conn)
     .await?;
 
@@ -193,8 +198,9 @@ async fn upsert_symbol(
     }
 
     sqlx::query(
-        "INSERT INTO brain_observations (entity_id, content, observation_type, source, project_id)
-         SELECT $1, $2, 'context', 'agent', $3
+        "INSERT INTO brain_observations
+            (entity_id, content, observation_type, source, project_id, evidence, verification)
+         SELECT $1, $2, 'context', 'agent', $3, 'observed', $6
          WHERE NOT EXISTS (
              SELECT 1 FROM brain_observations
              WHERE entity_id = $1 AND left(content, $4) = $5
@@ -205,6 +211,7 @@ async fn upsert_symbol(
     .bind(project_id)
     .bind(identity.chars().count() as i32)
     .bind(&identity)
+    .bind(parsed_from(&symbol.file))
     .execute(&mut *conn)
     .await?;
 

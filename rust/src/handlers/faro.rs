@@ -658,6 +658,8 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         final_results.push(r);
     }
 
+    annotate_evidence(pool, &mut final_results).await;
+
     let mut response = serde_json::json!({
         "mode": "hybrid",
         "query": query,
@@ -677,6 +679,58 @@ fn compact_chars() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(1200)
+}
+
+async fn annotate_evidence(pool: &PgPool, results: &mut [Value]) {
+    let ids: Vec<uuid::Uuid> = results
+        .iter()
+        .filter_map(|r| r.get("id").or_else(|| r.get("i")))
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+
+    type Row = (uuid::Uuid, String, Option<chrono::DateTime<chrono::Utc>>);
+    let stronger: Vec<Row> = sqlx::query_as(
+        "SELECT id, evidence, verified_at FROM brain_observations
+         WHERE id = ANY($1) AND evidence <> 'asserted'",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    if stronger.is_empty() {
+        return;
+    }
+
+    let by_id: std::collections::HashMap<String, Row> = stronger
+        .into_iter()
+        .map(|row| (row.0.to_string(), row))
+        .collect();
+
+    for r in results.iter_mut() {
+        let Some(id) = r
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|id| by_id.contains_key(id))
+        else {
+            continue;
+        };
+        let (_, evidence, verified_at) = &by_id[&id];
+        let Some(obj) = r.as_object_mut() else {
+            continue;
+        };
+        obj.insert("evidence".to_string(), serde_json::json!(evidence));
+        if let Some(at) = verified_at {
+            obj.insert(
+                "verified_at".to_string(),
+                serde_json::json!(at.to_rfc3339()),
+            );
+        }
+    }
 }
 
 fn compact_result(r: &Value) -> Value {

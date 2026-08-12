@@ -309,3 +309,68 @@ fn a_session_setting_is_never_applied_to_a_pooled_connection() {
          than no knob, because it reads as tuned. Offenders: {offenders:?}"
     );
 }
+
+#[test]
+fn no_mcp_path_can_claim_an_evidence_level_it_did_not_earn() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir)
+            .expect("the directory is readable")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new("src");
+    let mut handlers = Vec::new();
+    walk(&root.join("handlers"), &mut handlers);
+    assert!(
+        handlers.len() > 20,
+        "the walk found {} handler files, too few to conclude anything from their silence",
+        handlers.len()
+    );
+
+    let mut claimants = Vec::new();
+    for path in &handlers {
+        let body = std::fs::read_to_string(path).expect("readable");
+        for (offset, _) in body.match_indices("evidence") {
+            let lead = &body[offset.saturating_sub(220)..offset];
+            if !lead.contains("INSERT INTO") && !lead.contains("SET ") {
+                continue;
+            }
+            claimants.push(format!(
+                "{}:{}",
+                path.display(),
+                body[..offset].matches('\n').count() + 1
+            ));
+        }
+    }
+
+    assert!(
+        claimants.is_empty(),
+        "an evidence level is worth exactly as much as the rule about who may write it. Every \
+         file here is reachable over MCP, which means reachable by a model, and a model that \
+         can write `verified` has turned the level into a synonym for `asserted` with extra \
+         characters. The rule is structural rather than agreed: the column defaults to \
+         asserted and no handler names it in a write, so the MCP path cannot produce another \
+         value even by mistake. Naming the column is the only route — a bind value on its own \
+         cannot reach it, because binds are positional and the statement still has to say \
+         `evidence`. Two earlier versions of this check were wrong in opposite directions: one \
+         matched only SQL-quoted level names and missed a Rust string, the other matched the \
+         bare word and accused faro, where `verified` is a grounding level in mode=verify and \
+         has nothing to do with this column. Claimants: {claimants:?}"
+    );
+
+    let codegraph = std::fs::read_to_string(root.join("codegraph_cli.rs")).expect("readable");
+    assert!(
+        codegraph.contains("'observed'") && codegraph.contains("evidence"),
+        "and the scan has to be able to see the column in a write when one is there, or its \
+         silence over the handlers means nothing. codegraph is the CLI that parses a real \
+         tree-sitter AST, which is what earns `observed`"
+    );
+}
