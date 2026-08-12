@@ -449,28 +449,6 @@ async fn export(
     .fetch_all(pool)
     .await?;
 
-    let dec_dir = root.join("decisions");
-    std::fs::create_dir_all(&dec_dir)?;
-    let mut dec_count = 0u32;
-    let mut decision_paths: HashSet<PathBuf> = HashSet::new();
-    for (id, content, owner) in &decisions {
-        let path = dec_dir.join(format!("{id}.json"));
-        let body = serde_json::json!({
-            "id": id.to_string(),
-            "content": content,
-            "project_id": owner.map(|p| p.to_string()),
-        });
-        write_bundle_file(
-            &root,
-            &path,
-            &serde_json::to_vec_pretty(&body)?,
-            &mut digest,
-        )?;
-        decision_paths.insert(path);
-        dec_count += 1;
-    }
-    prune_stale_files(&dec_dir, &decision_paths, prune_scope)?;
-
     let relation_rows: Vec<RelationRow> = sqlx::query_as::<
         _,
         (
@@ -507,6 +485,7 @@ async fn export(
         provenance: t.8,
     })
     .collect();
+
     let rel_count = relation_rows.len() as u32;
     write_bundle_file(
         &root,
@@ -559,7 +538,7 @@ async fn export(
         entities: entity_files,
         observations: obs_count,
         episodes: episode_count,
-        decisions: dec_count,
+        decisions: decisions.len() as u32,
         errors: err_count,
         relations: rel_count,
     };
@@ -572,6 +551,7 @@ async fn export(
         counts: counts.clone(),
         with_embeddings,
         embedding_dim: emb_dim,
+        embedding_model: Some(crate::embeddings::onnx::model_fingerprint()),
         node_id: Some(crate::db::node_id(pool).await?),
     };
     std::fs::write(
@@ -621,6 +601,35 @@ pub const OBSERVATION_SOURCES: [&str; 5] = [
 ];
 
 pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
+
+fn recompute_digest(root: &Path, project_id: Option<Uuid>) -> Result<String> {
+    let mut digest = BundleDigest::default();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "manifest.json" {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            if name == "embeddings.bin.zst" {
+                let raw = crate::sync::compressor::decompress(&bytes)?;
+                digest.record(root, &path, &raw);
+            } else if path.extension().is_some_and(|e| e == "json") {
+                digest.record(root, &path, &bytes);
+            }
+        }
+    }
+    Ok(digest.finish(project_id))
+}
 
 const TOMBSTONED_TABLES: [&str; 6] = [
     "brain_entities",
@@ -906,16 +915,46 @@ async fn import(
 
     let tombstones = apply_tombstones(&mut tx, &root, confirm).await?;
 
+    if manifest.with_embeddings {
+        let local_dim = crate::embeddings::onnx::embedding_dim();
+        let dim = manifest.embedding_dim.unwrap_or(local_dim);
+        if dim != local_dim {
+            anyhow::bail!(
+                "this bundle carries {dim}-dimensional vectors and this machine produces \
+                 {local_dim}. Writing them would either abort the whole import on the first \
+                 UPDATE or, if the record size happened to divide evenly, fill the index with \
+                 vectors from a space these queries do not live in. Re-export without \
+                 embeddings and run `cuba-memorys reembed` here, which is cheaper than it \
+                 sounds and correct by construction."
+            );
+        }
+        if let Some(theirs) = manifest.embedding_model.as_deref() {
+            let ours = crate::embeddings::onnx::model_fingerprint();
+            if theirs != ours {
+                anyhow::bail!(
+                    "this bundle's vectors come from {theirs} and this machine runs {ours}. \
+                     Same dimension is not the same space: cosine similarity between two \
+                     models' embeddings is not a similarity at all, and nothing downstream \
+                     would notice — the searches would just quietly get worse. Re-export \
+                     without embeddings and reembed here."
+                );
+            }
+        }
+    }
+
+    let on_disk = recompute_digest(&root, manifest.project_id)?;
+    let tampered = on_disk != manifest.manifest_hash;
+
     let already: Option<(i32,)> =
         sqlx::query_as("SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1")
-            .bind(&manifest.manifest_hash)
+            .bind(&on_disk)
             .fetch_optional(&mut *tx)
             .await?;
     if let Some((prev,)) = already {
         return Ok(serde_json::json!({
             "action": "import",
             "skipped": true,
-            "reason": "manifest already imported",
+            "reason": "these exact files were already imported",
             "previous_rows_inserted": prev,
         }));
     }
@@ -1225,7 +1264,7 @@ async fn import(
         let raw = crate::sync::compressor::decompress(&compressed)?;
         let dim = manifest
             .embedding_dim
-            .unwrap_or(crate::embeddings::onnx::EMBEDDING_DIM);
+            .unwrap_or(crate::embeddings::onnx::embedding_dim());
         let rec_size = embedding_record_size(dim).filter(|size| raw.len() % size == 0);
         if let Some(rec_size) = rec_size {
             for chunk in raw.chunks_exact(rec_size) {
@@ -1242,7 +1281,9 @@ async fn import(
                 }
                 let v = pgvector::Vector::from(floats);
                 let r = sqlx::query(
-                    "UPDATE brain_observations SET embedding = $1::vector WHERE id = $2",
+                    "UPDATE brain_observations
+                     SET embedding = $1::vector, embedding_half = NULL
+                     WHERE id = $2",
                 )
                 .bind(v)
                 .bind(id)
@@ -1263,7 +1304,7 @@ async fn import(
         "INSERT INTO brain_sync_state (manifest_hash, project_id, rows_inserted, source_path)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manifest_hash) DO NOTHING",
     )
-    .bind(&manifest.manifest_hash)
+    .bind(&on_disk)
     .bind(manifest.project_id)
     .bind(inserted as i32)
     .bind(root.display().to_string())
@@ -1304,6 +1345,7 @@ async fn import(
         "manifest_hash": manifest.manifest_hash,
         "rows_inserted": inserted,
         "diverged": diverged.len(),
+        "edited_since_export": tampered,
         "tombstones_applied": tombstones.deleted,
         "tombstones_withheld": tombstones.withheld,
         "divergence_note": divergence_note,

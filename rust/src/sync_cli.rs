@@ -6,6 +6,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
     let mut scope = "project".to_string();
     let mut conflict = "merge".to_string();
     let mut with_embeddings = false;
+    let mut confirm = false;
     let mut json = false;
 
     let mut it = args.iter();
@@ -23,11 +24,16 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
                     .context("--conflict needs merge|skip|overwrite")?
             }
             "--with-embeddings" => with_embeddings = true,
+            "--confirm" => confirm = true,
             "--json" => json = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: cuba-memorys sync <export|import|diff|status> [--dir PATH]\n\
                      \x20                          [--scope project|all] [--conflict merge|skip|overwrite]\n\
+                     \x20                          [--confirm]\n\n\
+                     --confirm  a bundle whose tombstones would delete more than 10% of the\n\
+                     \x20          observations here, and at least 25 rows, is refused without\n\
+                     \x20          this. Read what the refusal says before passing it.\n\
                      \x20                          [--with-embeddings] [--json]\n\n\
                      Git-friendly export/import of the knowledge graph — same engine as the\n\
                      cuba_sync MCP tool. Meant to be driven by `cuba-memorys hook install`."
@@ -52,6 +58,7 @@ pub async fn run_cli(args: &[String]) -> Result<()> {
         "scope": scope,
         "conflict": conflict,
         "with_embeddings": with_embeddings,
+        "confirm": confirm,
     });
     let report = crate::handlers::sync::handle(&pool, args_json).await?;
 

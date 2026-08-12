@@ -402,7 +402,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_sync",
-            "Git-friendly export/import of the knowledge graph (v0.8). action='export' writes one JSON file per entity (with embedded observations) plus episodes/decisions/errors/relations under CUBA_SYNC_DIR (default ./.cuba-memorys/). 'import' merges files back via INSERT...ON CONFLICT DO NOTHING (idempotent). 'diff' compares disk vs DB. 'status' lists not-yet-imported manifests. Embeddings are omitted by default (set with_embeddings=true to include the binary blob).",
+            "Git-friendly export/import of the knowledge graph. action='export' writes one JSON file per entity (observations embedded) plus episodes, errors, relations, projects and tombstones under CUBA_SYNC_DIR (default ./.cuba-memorys/). 'import' applies the bundle: deletions travel as tombstones and are applied before inserts, rows the database would reject are refused before the transaction opens rather than aborting it halfway, and importance/access_count/strength are merged as the maximum of both machines so neither side loses what it learned. 'diff' compares disk vs DB. 'status' lists not-yet-imported manifests. Embeddings are omitted by default; when included, a bundle whose model or dimension does not match this machine is refused rather than silently filling the index with vectors from another space.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -410,7 +410,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "dir": {"type": "string", "description": "Directory override (default $CUBA_SYNC_DIR or ./.cuba-memorys/)"},
                     "scope": {"type": "string", "enum": ["project", "all"], "description": "Export scope: only the active project (default) or all data"},
                     "with_embeddings": {"type": "boolean", "description": "Include the embeddings.bin.zst blob on export (default false)"},
-                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "Import conflict policy. merge and skip are the SAME thing today — both keep whatever is already here and drop the incoming row, reporting how many diverged. overwrite takes the incoming version. Neither is a real merge yet: the bundle carries no per-row clock to compare."},
+                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "How to resolve a row that exists on both sides. merge and skip behave identically for CONTENT — whatever is already here wins and the incoming text is dropped, with the diverging ids reported. overwrite takes the incoming text and pushes the replaced version into previous_versions, so nothing is lost either way. Counters are not content: entity importance and access_count, and relation strength, merge as the maximum under both policies."},
                     "confirm": {"type": "boolean", "description": "Required when a bundle's tombstones would delete more than 10% of this machine's observations, and at least 25 rows. Below that it is not needed — a guard that trips on ordinary curation is one everybody learns to pass through. A bundle that deletes a large share of your memory is either a mistake or a peer worth distrusting, and this is what stands between that and a remote wipe."}
                 },
                 "required": ["action"]

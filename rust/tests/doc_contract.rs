@@ -20,8 +20,12 @@ fn counts_claimed(text: &str) -> BTreeSet<usize> {
         if !word.starts_with("tools") {
             continue;
         }
-        if let Some(n) = i.checked_sub(1).and_then(|j| number(words[j])) {
-            found.insert(n);
+        for back in 1..=2 {
+            let Some(j) = i.checked_sub(back) else { break };
+            if let Some(n) = number(words[j]) {
+                found.insert(n);
+                break;
+            }
         }
         if words.get(i + 1).is_some_and(|w| *w == "of")
             && let Some(n) = words.get(i + 2).and_then(|w| number(w))
@@ -62,7 +66,9 @@ fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
                  and {lean} in lean. Three different numbers were in circulation at once — the \
                  README said 28 in one place and 30 in two others while the cuba_tools \
                  description shipped to every model said 29 — because each was written by hand \
-                 at a different time. This assertion is the only thing that makes adding a tool \
+                 at a different time. It looks two words back, not one: the header says «28 MCP \
+                 tools», and a scan that only checked the word touching «tools» found «MCP» and \
+                 waved the number through. This assertion is the only thing that makes adding a tool \
                  and forgetting a document impossible."
             );
         }

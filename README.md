@@ -121,7 +121,7 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 | `red` | shared managed Postgres (set `DATABASE_URL` with `sslmode=require`) | + provenance per node, real-time sync between machines | none |
 | `completo` | whatever `DATABASE_URL` implies | **+ reranker (GPU if present) + `cuba_docs`** | `cuba_docs` |
 
-**Two machines, one memory.** Point both at the same managed Postgres (Neon or Supabase free tier both have pgvector and fit the 36 MB corpus many times over), give each a name with `CUBA_NODE_NAME`, and `CUBA_MODE=red`. What one writes, the other reads; every memory records which machine it came from (`origin_node`). Do **not** expose your own Postgres port to the internet — use a managed provider's TLS, or a private network like [Tailscale](https://tailscale.com).
+**Two machines, one memory.** Point both at the same managed Postgres (Neon or Supabase free tier both have pgvector and fit the 36 MB corpus many times over), give each a name with `CUBA_NODE_NAME`, and `CUBA_MODE=red`. What one writes, the other reads; every memory records which machine it came from (`origin_node`). Without a shared database, `cuba_sync` does the same job through a git repository — see [Sync between machines](#sync-between-machines-through-git). Do **not** expose your own Postgres port to the internet — use a managed provider's TLS, or a private network like [Tailscale](https://tailscale.com).
 
 **Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
 
@@ -189,11 +189,41 @@ Two things it will not do. It will not **confirm** a claim on weak evidence: ent
 
 The out-of-distribution gate rejects queries the corpus cannot answer. The threshold is **not** a magic constant: Ledoit-Wolf covariance shrinkage plus a conformal quantile, calibrated against your own corpus with `cuba-memorys calibrate --dataset <questions.jsonl> --apply` and persisted (the dataset is required — without it the command refuses). (The theoretical χ² threshold rejected **100% of answerable queries.** Distribution-free calibration is not a nicety here.)
 
+### Sync between machines, through git
+
+`CUBA_MODE=red` puts two machines on one database. `cuba_sync` is the other route, for machines that never see each other: the graph is written out as JSON you can commit, and read back on the other side.
+
+```bash
+cuba-memorys sync export            # write the bundle under .cuba-memorys/
+cuba-memorys sync import            # read one back in
+cuba-memorys sync diff              # entities on disk vs entities in the database
+cuba-memorys sync status            # which bundles this machine has already imported
+cuba-memorys hook install           # export after every commit, import after every checkout
+```
+
+The same four actions are `cuba_sync action=export|import|diff|status`. A bundle is one JSON file per entity with its observations inside, plus `episodes/YYYY-MM/`, `errors/`, `decisions/`, `relations.json`, `projects.json`, `tombstones.json` and a `manifest.json` — the active project and anything not bound to a project, unless you pass `--scope all`. Embeddings stay out unless you ask for them (`--with-embeddings`): they are most of the bytes and they can be recomputed. A bundle imports once, and the manifest hash covers the contents of every file in it — so an unchanged bundle is skipped, and a hand-edited entity file is a new bundle rather than a silent no-op.
+
+**A deletion travels now, and stops where it would take something with it.** Deleting a row records a tombstone, and the receiving side deletes exactly the ids that were named. Before this, a delete was not slow to arrive — it was undone: the peer still had the row, exported it, and it came back on the next round trip. The **entity** tombstone is the dangerous one, because deleting an entity cascades to everything hanging off it. It is applied only when this machine has no observations or episodes under that entity that the sender never named; otherwise it is withheld and reported in `tombstones_withheld`. A tombstone for an entity with three children there must not take three hundred here.
+
+**And a bundle cannot quietly wipe you.** If the tombstones in it would delete at least 25 rows *and* more than 10% of the observations on this machine, the import refuses and asks for `confirm=true`. A remote wipe and a large legitimate cleanup look identical; the only difference is whether you meant it. The floor matters as much as the ratio: on a database with a single observation a pure percentage demanded confirmation to delete that one, and a guard that trips on ordinary curation is one everybody learns to pass `confirm=true` through — and then it guards nothing.
+
+**`conflict=merge` does not merge content, and now says so.** `merge` and `skip` are one policy: rows that are missing here arrive, and where a row already exists with different content, the one that was here first wins and the incoming text is dropped. What changed is the silence — the import counts those rows and reports them as `diverged`, with their ids and a note saying what it did. `conflict=overwrite` takes the incoming version and **keeps the one it replaced** in `previous_versions` (the newest 20 are kept), and clears the embedding when the content changed, so a row stops being retrievable by a meaning it no longer carries.
+
+**Counters do merge, under either policy.** `importance` and `access_count` on an entity, and `strength` on a relation, are not values one side copies from the other: each machine grows its own, from its own reinforcement and its own traversals. The higher of the two wins, which is idempotent — importing the same bundle twice inflates nothing. (Summing would be more faithful to "both machines counted", and would double on a re-import, so it loses to a rule that cannot corrupt the number.)
+
+**Which machine is which.** Each installation generates a uuid in its own database on first migration — one row, stable across restarts, unique by construction — and the manifest carries it, so a bundle can say which machine produced it. `CUBA_NODE_NAME` keeps meaning what it always meant: a human-readable label stored in `origin_node`. It is not the identity and could not be one, because two machines both called `pop-os` is the likeliest outcome there is.
+
+**The clock ticks for what a peer needs, and stays still for local noise.** An observation's `version` advances when its content, type, trust, evidence level or tags actually change, and for nothing else. Decay moves `importance` and `last_accessed`; `reembed` replaces vectors. If either woke the clock, every export would ship a graph that had not changed and the two machines would never stop talking to each other about nothing. Rewriting a row with the same content does not tick it either, so an idempotent re-import does not invent a conflict out of agreement.
+
+**Older bundles still import.** The format is `SCHEMA_VERSION` 2: `version`, `updated_at`, `origin_node`, `previous_versions`, `evidence`, `verification` and `trust` travel now, because a conflict rule that compares clocks needs the clock to be in the file. Bundles written before that still import — every new field defaults, and a v1 observation lands as `asserted`, which is the honest reading of a file that never claimed anything stronger.
+
+Anything in an incoming bundle that looks like a credential is stored `quarantined` instead of trusted — withheld from `cuba_faro` and `cuba_expediente` until you promote it with `cuba_eco` — because an import reads JSON out of a repository anyone with push access can write to.
+
 ### And it tells you when it is broken
 
 ```
 $ cuba-memorys doctor
-[  ok  ] migrations           33 aplicadas, ninguna dirty
+[  ok  ] migrations           49 aplicadas, ninguna dirty
 [  ok  ] embedding_dim        runtime 1024-d == columna vector(1024)
 [  ok  ] runtime_role         'cuba_app' sin superuser — RLS y audit efectivos
 [ warn ] binary_freshness     4 proceso(s) MCP corren un binario más viejo que el de disco
@@ -205,7 +235,7 @@ This exists because the failure mode of a hybrid search engine is not a crash �
 
 ## The CLI: your memory without an LLM in the middle
 
-Nineteen commands. `cuba-memorys --help` lists them all.
+Twenty-two commands. `cuba-memorys --help` lists them all.
 
 | | |
 |---|---|
@@ -218,6 +248,7 @@ Nineteen commands. `cuba-memorys --help` lists them all.
 | `calibrate` | Recompute the abstention threshold from your corpus |
 | `link` | Auto-link entities by NPMI co-occurrence |
 | **`dedupe`** | Entities that are the same thing under different names — see below |
+| **`sync`** · `hook` | Write the graph out as committable JSON and read it back on another machine — see [Sync between machines](#sync-between-machines-through-git). `hook install` wires it to git |
 | `skills <dir>` | Export procedures as Claude Code Skills |
 | `eval` | Retrieval benchmark — nDCG@10 with confidence intervals, MRR, recall, token cost |
 | `setup` | Wire this into your MCP clients; `setup check` audits them |
@@ -248,7 +279,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 
 **Cognition** — `cuba_reflexion` (gap detection) · `cuba_hipotesis` (abductive inference) · `cuba_contradiccion` (semantic conflicts) · `cuba_juez` (LLM judge) · `cuba_centinela` (prospective triggers) · `cuba_calibrar` (Bayesian calibration, source credibility)
 
-**Maintenance** — `cuba_zafra` (decay, prune, merge, PageRank, Leiden communities) · `cuba_eco` (RLHF feedback) · `cuba_vigia` (health, drift, centrality) · `cuba_forget` (GDPR erasure) · `cuba_archivo` (CFR-21 hash-chain audit log) · `cuba_pizarra` (working memory) · `cuba_sync` (git-friendly export/import)
+**Maintenance** — `cuba_zafra` (decay, prune, merge, PageRank, Leiden communities) · `cuba_eco` (RLHF feedback) · `cuba_vigia` (health, drift, centrality) · `cuba_forget` (GDPR erasure) · `cuba_archivo` (CFR-21 hash-chain audit log) · `cuba_pizarra` (working memory) · `cuba_sync` ([git-friendly export/import between machines](#sync-between-machines-through-git), with propagated deletions and a remote-wipe guard)
 
 **Meta** — `cuba_tools` (discover) · `cuba_call` (invoke)
 
@@ -259,7 +290,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | Variable | Default | What it does |
 |---|---|---|
 | `CUBA_MODE` | `local` | `local` / `red` (shared cloud DB) / `completo` (everything + GPU). A preset for the rest. |
-| `CUBA_NODE_NAME` | hostname | Names this machine in `origin_node` — which computer wrote each memory |
+| `CUBA_NODE_NAME` | `$HOSTNAME` / `$COMPUTERNAME` | A human-readable label for this machine, written into `origin_node`. The fallback is `$HOSTNAME`, which a shell does not export to child processes, so on Linux `origin_node` stays empty unless you set this. It is **not** this installation's identity: that is a uuid generated in its own database, because two machines can easily choose the same name |
 | `DATABASE_URL` | auto (Docker) | PostgreSQL connection. Set it (external + TLS) for `red` mode. |
 | `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | auto (`~/.cache`) | Semantic embeddings. `cuba-memorys models` sets these up for you. |
 | `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the stronger Spanish model |
