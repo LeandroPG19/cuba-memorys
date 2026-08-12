@@ -263,7 +263,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `DATABASE_URL` | auto (Docker) | PostgreSQL connection. Set it (external + TLS) for `red` mode. |
 | `ONNX_MODEL_PATH` + `ORT_DYLIB_PATH` | auto (`~/.cache`) | Semantic embeddings. `cuba-memorys models` sets these up for you. |
 | `CUBA_EMBED_MODEL` · `CUBA_EMBEDDING_DIM` · `CUBA_POOLING` | `multilingual-e5-small` · `384` · `mean` | Set to `bge-m3` · `1024` · `cls` for the stronger Spanish model |
-| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 30, 73% smaller catalogue, nothing lost |
+| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 28, 71% smaller catalogue, nothing lost |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
@@ -439,7 +439,7 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 |---|---|
 | **`compact` by default** | **−30% tokens, nDCG +0.0090** (paired 95% CI [+0.0024, +0.0166], n=191). The earlier "exactly 0.0000" was measured with a harness that let the 5000-token response budget truncate the ranking before scoring it: verbose lost its tail, compact did not. The old "−40%" came from the broken benchmark. |
 | **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
-| **`lean` tool profile** | 8 tools of 30, −73% catalogue, zero functions lost. |
+| **`lean` tool profile** | 8 tools of 28, −71% catalogue, zero functions lost. |
 | **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |
 | **The benchmark itself** | 221 queries (was 10), relevance by document **id**, bootstrap confidence intervals, and the **minimum detectable effect** printed beside every result — so nobody reads a 3-point difference as a finding again. |
 

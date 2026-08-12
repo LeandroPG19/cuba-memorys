@@ -12,7 +12,7 @@
 
 **Persistent memory for AI agents** — Complete Rust rewrite of the Cuba-Memorys MCP server. Knowledge graph with neuroscience-inspired algorithms: exponential decay, Hebbian learning with BCM metaplasticity, Leiden community detection, hybrid search (RRF + pgvector), and anti-hallucination grounding.
 
-13 tools · 7.6MB binary · Sub-millisecond handlers · Zero tech debt · Audited GO
+28 tools · 7.6MB binary · Sub-millisecond handlers · Zero tech debt · Audited GO
 
 ---
 
@@ -34,7 +34,7 @@ cargo build --release
 # Run tests (40 unit + 11 smoke)
 cargo test
 
-# Run E2E tests against real DB (55 tests, all 13 tools)
+# Run E2E tests against real DB (55 tests, all 28 tools)
 python3 tests/e2e_all_tools.py
 ```
 
@@ -137,7 +137,7 @@ rust/
 │   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
 └── tests/
     ├── smoke_test.rs        # 11 smoke tests (no DB required)
-    └── e2e_all_tools.py     # 55 E2E tests (all 13 tools vs real DB)
+    └── e2e_all_tools.py     # 55 E2E tests (all 28 tools vs real DB)
 ```
 
 ---
