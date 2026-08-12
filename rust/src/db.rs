@@ -420,6 +420,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_database_behind_the_binary_is_refused_instead_of_dying_mid_import() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL required");
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
