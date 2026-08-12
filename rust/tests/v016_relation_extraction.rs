@@ -5,6 +5,25 @@ fn unique_name(prefix: &str) -> String {
     format!("{}_{}", prefix, &Uuid::new_v4().to_string()[..8])
 }
 
+const RELATION_TEST_LOCK: i64 = 0x0CBA_A0D1_7106_0016;
+
+async fn exclusive(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin the serialising transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(RELATION_TEST_LOCK)
+        .execute(&mut *tx)
+        .await
+        .expect(
+            "both tests in this file share one database, and one of them asserts a global \
+                 count while the other creates relations. Without serialising them the count is \
+                 whatever the interleaving happened to be",
+        );
+    tx
+}
+
 #[tokio::test]
 #[ignore]
 async fn auto_extract_relations_land_as_inferred_edges() {
@@ -13,6 +32,8 @@ async fn auto_extract_relations_land_as_inferred_edges() {
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("connect to test database");
+
+    let _serialised = exclusive(&pool).await;
 
     let a = unique_name("relext_a");
     let b = unique_name("relext_b");
@@ -95,6 +116,8 @@ async fn a_reply_with_no_relations_writes_nothing() {
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("connect to test database");
+
+    let _serialised = exclusive(&pool).await;
 
     let before: (i64,) = sqlx::query_as("SELECT count(*) FROM brain_relations")
         .fetch_one(&pool)
