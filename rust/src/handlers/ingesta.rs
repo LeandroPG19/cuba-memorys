@@ -35,16 +35,22 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or("");
     let prompt = build_extraction_prompt(text, hint);
 
-    let Some((reply, backend)) = extraction_reply(&prompt).await else {
-        return Ok(serde_json::json!({
-            "action": "auto_extract",
-            "extracted": 0,
-            "added": 0,
-            "degraded": true,
-            "note": "no LLM reachable: the client advertises no MCP sampling capability and no \
-                     local CLI was found on PATH. Install the Claude Code CLI (or set \
-                     CUBA_JUEZ_CLI), or use action='parse' for a heuristic paragraph split."
-        }));
+    let (reply, backend) = match extraction_reply(&prompt).await {
+        Ok(pair) => pair,
+        Err(why) => {
+            return Ok(serde_json::json!({
+                "action": "auto_extract",
+                "extracted": 0,
+                "added": 0,
+                "degraded": true,
+                "reason": match why {
+                    NoExtraction::NoBackend => "no_backend",
+                    NoExtraction::Failed(_) => "backend_failed",
+                    NoExtraction::OutOfBudget(_, _) => "out_of_budget",
+                },
+                "note": why.note()
+            }));
+        }
     };
 
     let (items, relations) = parse_extraction_reply(&reply);
@@ -141,30 +147,59 @@ pub fn relation_scan_budget() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-async fn extraction_reply(prompt: &str) -> Option<(String, &'static str)> {
+pub enum NoExtraction {
+    NoBackend,
+    Failed(&'static str),
+    OutOfBudget(&'static str, u64),
+}
+
+impl NoExtraction {
+    fn note(&self) -> String {
+        match self {
+            Self::NoBackend => "no LLM reachable: the client advertises no MCP sampling \
+                 capability and no local CLI was found on PATH. Install the Claude Code CLI \
+                 (or set CUBA_JUEZ_CLI), or use action='parse' for a heuristic paragraph split."
+                .to_string(),
+            Self::Failed(backend) => format!(
+                "the {backend} backend was found and reachable, but the call failed. This is \
+                 not a missing CLI — installing one will not help. The error is in the log for \
+                 this request; action='parse' still works as a heuristic split."
+            ),
+            Self::OutOfBudget(backend, secs) => format!(
+                "the {backend} backend answered too slowly and ran past its {secs}s budget. \
+                 Nothing is wrong with the install: the model was slow for this text. Retry, \
+                 shorten the text, raise the handler timeout, or use action='parse'."
+            ),
+        }
+    }
+}
+
+async fn extraction_reply(prompt: &str) -> Result<(String, &'static str), NoExtraction> {
     extraction_reply_within(prompt, extraction_budget()).await
 }
 
 async fn extraction_reply_within(
     prompt: &str,
     budget: std::time::Duration,
-) -> Option<(String, &'static str)> {
+) -> Result<(String, &'static str), NoExtraction> {
     if crate::protocol::client_supports_sampling() {
         match crate::protocol::request_sampling_max(prompt, EXTRACTION_MAX_TOKENS).await {
-            Ok(reply) => return Some((reply, "mcp_sampling")),
+            Ok(reply) => return Ok((reply, "mcp_sampling")),
             Err(why) => {
                 tracing::warn!(error = %why, "MCP sampling failed, falling back to a local LLM CLI")
             }
         }
     }
 
-    let backend = crate::cognitive::judge::resolve_offline_llm_within(Some(budget))?;
+    let Some(backend) = crate::cognitive::judge::resolve_offline_llm_within(Some(budget)) else {
+        return Err(NoExtraction::NoBackend);
+    };
     let name = backend.backend_name();
     match tokio::time::timeout(budget, backend.run_prompt(prompt)).await {
-        Ok(Ok(raw)) => Some((crate::cognitive::judge::unwrap_cli_reply(&raw), name)),
+        Ok(Ok(raw)) => Ok((crate::cognitive::judge::unwrap_cli_reply(&raw), name)),
         Ok(Err(why)) => {
             tracing::warn!(error = %why, backend = name, "LLM extraction failed");
-            None
+            Err(NoExtraction::Failed(name))
         }
         Err(_) => {
             tracing::warn!(
@@ -172,7 +207,7 @@ async fn extraction_reply_within(
                 budget_secs = budget.as_secs(),
                 "LLM extraction ran out of its time budget"
             );
-            None
+            Err(NoExtraction::OutOfBudget(name, budget.as_secs()))
         }
     }
 }
@@ -443,7 +478,7 @@ pub async fn scan_entity_relations(pool: &PgPool, entity_id: uuid::Uuid) -> Resu
         &known.into_iter().map(|(n,)| n).collect::<Vec<_>>(),
     );
 
-    let Some((reply, _)) = extraction_reply_within(&prompt, relation_scan_budget()).await else {
+    let Ok((reply, _)) = extraction_reply_within(&prompt, relation_scan_budget()).await else {
         anyhow::bail!("no LLM reachable for the relation scan");
     };
 
