@@ -571,6 +571,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     let mut tx = pool.begin().await?;
     let mut inserted = 0u32;
+    let mut diverged: Vec<Uuid> = Vec::new();
     let mut quarantined = 0u32;
     let mut quarantine_reasons: HashMap<&'static str, u32> = HashMap::new();
 
@@ -665,6 +666,19 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 if let Some(pattern) = reason.filter(|_| r.rows_affected() > 0) {
                     quarantined += 1;
                     *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+                }
+                if !overwrite && r.rows_affected() == 0 {
+                    let same: Option<bool> = sqlx::query_scalar(
+                        "SELECT content = $2 FROM brain_observations WHERE id = $1",
+                    )
+                    .bind(obs.id)
+                    .bind(&obs.content)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .flatten();
+                    if same == Some(false) {
+                        diverged.push(obs.id);
+                    }
                 }
             }
         }
@@ -866,10 +880,30 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         )
     });
 
+    let divergence_note = (!diverged.is_empty()).then(|| {
+        format!(
+            "{} observations already existed here with different content and were LEFT \
+             UNCHANGED. conflict=merge is not a merge: it inserts what is missing and keeps \
+             whatever was here first, so a correction made on the other machine after this \
+             row was created does not arrive. Until per-row causality lands, the choices are \
+             conflict=overwrite — which takes the incoming version and discards this one — or \
+             reconciling these by hand. Ids: {}",
+            diverged.len(),
+            diverged
+                .iter()
+                .take(20)
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+
     Ok(serde_json::json!({
         "action": "import",
         "manifest_hash": manifest.manifest_hash,
         "rows_inserted": inserted,
+        "diverged": diverged.len(),
+        "divergence_note": divergence_note,
         "embeddings_restored": embeddings_restored,
         "quarantined": quarantined,
         "quarantine_reasons": quarantine_reasons,
