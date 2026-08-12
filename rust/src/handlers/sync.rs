@@ -154,6 +154,10 @@ fn embedding_record_size(dim: usize) -> Option<usize> {
     dim.checked_mul(4)?.checked_add(16)
 }
 
+fn resolve(remapped: &HashMap<Uuid, Uuid>, id: Uuid) -> Uuid {
+    remapped.get(&id).copied().unwrap_or(id)
+}
+
 fn trust_for_imported(content: &str) -> (&'static str, Option<&'static str>) {
     match crate::redact::looks_like_secret(content) {
         Some(pattern) => (crate::core::trust::QUARANTINED, Some(pattern)),
@@ -591,6 +595,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
 
     let mut inserted = 0u32;
     let mut diverged: Vec<Uuid> = Vec::new();
+    let mut remapped: HashMap<Uuid, Uuid> = HashMap::new();
     let mut quarantined = 0u32;
     let mut quarantine_reasons: HashMap<&'static str, u32> = HashMap::new();
 
@@ -625,6 +630,18 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 continue;
             }
             let file: EntityFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+            let local: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM brain_entities WHERE name = $1")
+                    .bind(&file.name)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let entity_id = match local {
+                Some(existing) if existing != file.id => {
+                    remapped.insert(file.id, existing);
+                    existing
+                }
+                _ => file.id,
+            };
             let r = sqlx::query(&format!(
                 "INSERT INTO brain_entities (id, name, entity_type, importance, access_count, project_id, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -637,7 +654,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                     "NOTHING"
                 }
             ))
-            .bind(file.id)
+            .bind(entity_id)
             .bind(&file.name)
             .bind(&file.entity_type)
             .bind(file.importance)
@@ -668,7 +685,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                     }
                 ))
                 .bind(obs.id)
-                .bind(file.id)
+                .bind(entity_id)
                 .bind(&obs.content)
                 .bind(&obs.observation_type)
                 .bind(&obs.source)
@@ -738,7 +755,7 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                     }
                 ))
                 .bind(f.id)
-                .bind(f.entity_id)
+                .bind(resolve(&remapped, f.entity_id))
                 .bind(&f.content)
                 .bind(&f.actors)
                 .bind(&f.artifacts)
@@ -822,8 +839,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 }
             ))
             .bind(rel.id)
-            .bind(rel.from_entity)
-            .bind(rel.to_entity)
+            .bind(resolve(&remapped, rel.from_entity))
+            .bind(resolve(&remapped, rel.to_entity))
             .bind(&rel.relation_type)
             .bind(rel.strength)
             .bind(rel.bidirectional)
