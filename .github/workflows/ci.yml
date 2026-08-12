@@ -149,3 +149,68 @@ jobs:
           CUBA_BINARY_PATH: ./target/release/cuba-memorys
           CUBA_JUDGE: heuristic
         run: python tests/e2e_all_tools.py
+
+  # The publish matrix builds five targets with three different feature sets, and
+  # until now nothing compiled any of them until a `v*` tag was already pushed. The
+  # v0.20.0 release found out the hard way: aarch64-linux, both macOS targets and
+  # musl all built, and x86_64-pc-windows-msvc failed in `Build (cargo)`, after the
+  # tag existed. Windows carries the largest feature set (docs,cuda,directml) and
+  # directml is compiled nowhere else, so it is the one most likely to break and the
+  # last one to find out.
+  #
+  # cargo check, not build: it catches the compile errors that broke that release
+  # without paying for codegen and linking on five runners for every push.
+  release-matrix:
+    name: Compiles as released — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: docs,cuda
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            features: docs
+            cross_cc: gcc-aarch64-linux-gnu
+          - os: macos-14
+            target: x86_64-apple-darwin
+            features: docs
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            features: docs
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: docs,cuda,directml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # A build script compiles C for the target, so `cargo check --target` needs a
+      # cross C compiler even though it never links the binary. Measured locally:
+      # without this, aarch64 dies on `cc-rs: failed to find tool
+      # "aarch64-linux-gnu-gcc"` — a toolchain failure wearing a compile error's
+      # clothes, which is worse than no check because nobody trusts a job that cries
+      # wolf. macOS and Windows runners already ship a native toolchain for their own
+      # targets.
+      - name: Cross C toolchain
+        if: matrix.cross_cc != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.cross_cc }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-${{ matrix.target }}-check-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-check-
+
+      - name: cargo check (release features for this target)
+        working-directory: rust
+        run: cargo check --release --features ${{ matrix.features }} --target ${{ matrix.target }}
