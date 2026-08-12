@@ -153,13 +153,15 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_eco",
-            "RLHF feedback: positive boosts importance (Oja's rule), negative decreases, correct updates content. Also the quarantine gate: 'pending' lists memories withheld from search because they came from untrusted text, 'promote' makes one retrievable, 'quarantine' withdraws one.",
+            "RLHF feedback: positive boosts importance (Oja's rule), negative decreases, correct updates content. Also the quarantine gate: 'pending' lists memories withheld from search because they came from untrusted text, 'promote' makes one retrievable, 'quarantine' withdraws one. The gate covers observations, episodes and errors — pick which with 'kind'.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["positive", "negative", "correct", "promote", "quarantine", "pending"], "description": "Feedback type, or a quarantine transition: promote/quarantine flip one observation's retrievability; pending lists what is currently withheld."},
+                    "action": {"type": "string", "enum": ["positive", "negative", "correct", "promote", "quarantine", "pending"], "description": "Feedback type, or a quarantine transition: promote/quarantine flip one memory's retrievability; pending lists everything currently withheld, in three lists (quarantined, quarantined_episodes, quarantined_errors), each row tagged with its kind."},
+                    "kind": {"type": "string", "enum": ["observation", "episode", "error"], "description": "Which table promote/quarantine acts on. Default 'observation'. An import quarantines whatever carried a credential, and cuba_sync writes episodes and errors too: without the matching kind those rows would stay stored and permanently unreachable. Ignored by positive/negative/correct, and by pending, which always returns all three."},
                     "entity_name": {"type": "string", "description": "Target entity"},
                     "observation_id": {"type": "string", "description": "Target observation UUID"},
+                    "id": {"type": "string", "description": "Target UUID for promote/quarantine when kind is episode or error. For kind=observation use observation_id."},
                     "correction": {"type": "string", "description": "New content (for correct action)"},
                     "limit": {"type": "integer", "description": "Max rows for the 'pending' listing (default 20, max 200)"},
                     "allow_secret": {"type": "boolean", "description": "A correction is refused when it carries what looks like a live credential (token, password field, credentials in a URL) — it overwrites stored content, so without this gate it is a way past the one cuba_cronica applies on the way in. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
@@ -517,7 +519,7 @@ fn meta_tool_defs() -> Vec<Value> {
     vec![
         tool_def(
             "cuba_tools",
-            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 29 tools; \
+            "Find cuba-memorys tools and load their schemas ON DEMAND. The server exposes 28 tools; \
              under CUBA_TOOL_PROFILE=lean only the everyday core is pre-loaded and the rest live here. \
              Search by capability ('audit', 'decay', 'contradiction', 'session'), then call what you \
              find with cuba_call. detail='names' is cheapest, 'full' returns the exact argument schema.",
