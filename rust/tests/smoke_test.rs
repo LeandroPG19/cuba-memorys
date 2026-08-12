@@ -292,7 +292,7 @@ fn a_session_setting_is_never_applied_to_a_pooled_connection() {
                 continue;
             }
             let window = lines[i..(i + 6).min(lines.len())].join("\n");
-            if !window.contains("&mut *tx") {
+            if !window.contains("*tx") {
                 offenders.push(format!("{}:{}", path.display(), i + 1));
             }
         }
@@ -306,7 +306,11 @@ fn a_session_setting_is_never_applied_to_a_pooled_connection() {
          carried `SET LOCAL hnsw.ef_search = 200` on a pool for exactly that reason: measured \
          in another transaction the setting reads back empty, the .ok() swallowed any \
          complaint, and EXPLAIN showed a Seq Scan anyway. A knob that cannot move is worse \
-         than no knob, because it reads as tuned. Offenders: {offenders:?}"
+         than no knob, because it reads as tuned. The window looks for `*tx` rather than \
+         `&mut *tx` because a helper that takes the transaction by reference writes \
+         `&mut **tx`, and a detector that only knew one spelling would have flagged correct \
+         code — which teaches people to widen the exception instead of the check. \
+         Offenders: {offenders:?}"
     );
 }
 
