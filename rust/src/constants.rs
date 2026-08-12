@@ -410,7 +410,8 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "dir": {"type": "string", "description": "Directory override (default $CUBA_SYNC_DIR or ./.cuba-memorys/)"},
                     "scope": {"type": "string", "enum": ["project", "all"], "description": "Export scope: only the active project (default) or all data"},
                     "with_embeddings": {"type": "boolean", "description": "Include the embeddings.bin.zst blob on export (default false)"},
-                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "Import conflict policy (default merge)"}
+                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "Import conflict policy. merge and skip are the SAME thing today — both keep whatever is already here and drop the incoming row, reporting how many diverged. overwrite takes the incoming version. Neither is a real merge yet: the bundle carries no per-row clock to compare."},
+                    "confirm": {"type": "boolean", "description": "Required when a bundle's tombstones would delete more than 10% of this machine's observations, and at least 25 rows. Below that it is not needed — a guard that trips on ordinary curation is one everybody learns to pass through. A bundle that deletes a large share of your memory is either a mistake or a peer worth distrusting, and this is what stands between that and a remote wipe."}
                 },
                 "required": ["action"]
             }),

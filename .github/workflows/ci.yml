@@ -137,7 +137,7 @@ jobs:
                      --test v021_audit_append_under_app_role --test v021_audit_downgrade \
                      --test v021_import_quarantine_all_kinds \
                      --test v022_merge_reports_what_it_drops --test v022_sync_takes_a_lock \
-                     --test v022_same_name_different_id --test v022_bundle_is_validated_first \
+                     --test v022_same_name_different_id --test v022_bundle_is_validated_first --test v023_tombstones \
                      --test v016_quarantine --test v016_relation_extraction \
                      --test v017_codegraph_hardening \
                      -- --ignored --nocapture

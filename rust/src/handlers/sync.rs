@@ -30,7 +30,13 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
 
     match action {
         "export" => export(pool, dir_arg, scope, with_embeddings).await,
-        "import" => import(pool, dir_arg, conflict).await,
+        "import" => {
+            let confirm = args
+                .get("confirm")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            import(pool, dir_arg, conflict, confirm).await
+        }
         "diff" => diff(pool, dir_arg).await,
         "status" => status(pool, dir_arg).await,
         _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status"),
@@ -497,6 +503,32 @@ async fn export(
         &mut digest,
     )?;
 
+    type TombstoneRow = (String, Uuid, chrono::DateTime<Utc>, Option<String>);
+    let tombstones: Vec<TombstoneRow> = sqlx::query_as(
+        "SELECT table_name, row_id, deleted_at, origin_node FROM brain_tombstones
+         ORDER BY deleted_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    let tombstone_rows: Vec<Value> = tombstones
+        .into_iter()
+        .map(|(table_name, row_id, deleted_at, origin_node)| {
+            serde_json::json!({
+                "table_name": table_name,
+                "row_id": row_id,
+                "deleted_at": deleted_at,
+                "origin_node": origin_node,
+            })
+        })
+        .collect();
+    let tombstone_count = tombstone_rows.len() as u32;
+    write_bundle_file(
+        &root,
+        &root.join("tombstones.json"),
+        &serde_json::to_vec_pretty(&tombstone_rows)?,
+        &mut digest,
+    )?;
+
     if with_embeddings && !emb_blob.is_empty() {
         let compressed = crate::sync::compressor::compress(&emb_blob)?;
         let blob_path = root.join("embeddings.bin.zst");
@@ -541,6 +573,7 @@ async fn export(
     Ok(serde_json::json!({
         "action": "export",
         "dir": root.display().to_string(),
+        "tombstones": tombstone_count,
         "manifest_hash": manifest.manifest_hash,
         "counts": counts,
         "with_embeddings": with_embeddings,
@@ -569,6 +602,134 @@ pub const OBSERVATION_SOURCES: [&str; 5] = [
 ];
 
 pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
+
+const TOMBSTONED_TABLES: [&str; 6] = [
+    "brain_entities",
+    "brain_observations",
+    "brain_episodes",
+    "brain_errors",
+    "brain_relations",
+    "brain_projects",
+];
+
+const TOMBSTONE_ALARM_RATIO: f64 = 0.10;
+const TOMBSTONE_ALARM_FLOOR: i64 = 25;
+
+#[derive(Default)]
+struct Applied {
+    deleted: HashMap<String, u32>,
+    withheld: Vec<String>,
+    buried: HashSet<Uuid>,
+}
+
+async fn apply_tombstones(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    root: &Path,
+    confirm: bool,
+) -> Result<Applied> {
+    let path = root.join("tombstones.json");
+    let mut applied = Applied::default();
+    if !path.exists() {
+        return Ok(applied);
+    }
+    let rows: Vec<Value> = serde_json::from_slice(&std::fs::read(&path)?)
+        .with_context(|| format!("parse {}", path.display()))?;
+    if rows.is_empty() {
+        return Ok(applied);
+    }
+
+    let mut by_table: HashMap<String, Vec<Uuid>> = HashMap::new();
+    for row in &rows {
+        let (Some(table), Some(id)) = (
+            row.get("table_name").and_then(Value::as_str),
+            row.get("row_id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok()),
+        ) else {
+            continue;
+        };
+        if !TOMBSTONED_TABLES.contains(&table) {
+            anyhow::bail!(
+                "tombstones.json names table {table:?}, which this build does not delete from. \
+                 A tombstone is a licence to destroy rows; honouring one for a table nobody \
+                 vetted is how a sync turns into a wipe."
+            );
+        }
+        applied.buried.insert(id);
+        by_table.entry(table.to_string()).or_default().push(id);
+    }
+
+    let mut would_delete = 0i64;
+    for (table, ids) in &by_table {
+        let present: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE id = ANY($1)"))
+                .bind(ids)
+                .fetch_one(&mut **tx)
+                .await?;
+        would_delete += present;
+    }
+    if would_delete > 0 && !confirm {
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM brain_observations")
+            .fetch_one(&mut **tx)
+            .await?;
+        let ratio = would_delete as f64 / (total.max(1)) as f64;
+        if would_delete >= TOMBSTONE_ALARM_FLOOR && ratio > TOMBSTONE_ALARM_RATIO {
+            anyhow::bail!(
+                "refusing to apply {would_delete} deletions, which is {:.0}% of the \
+                 {total} observations on this machine. A bundle that deletes a tenth of your \
+                 memory is either a mistake or a peer you should not be trusting — a remote \
+                 wipe looks exactly like this. Re-run with confirm=true if you meant it. \
+                 (Below {TOMBSTONE_ALARM_FLOOR} rows this never fires: a guard that trips on \
+                 ordinary curation is one everybody learns to pass confirm=true through, and \
+                 then it guards nothing.)",
+                ratio * 100.0
+            );
+        }
+    }
+
+    for (table, ids) in by_table.iter().filter(|(t, _)| *t != "brain_entities") {
+        let done = sqlx::query(&format!("DELETE FROM {table} WHERE id = ANY($1)"))
+            .bind(ids)
+            .execute(&mut **tx)
+            .await?;
+        if done.rows_affected() > 0 {
+            applied
+                .deleted
+                .insert(table.clone(), done.rows_affected() as u32);
+        }
+    }
+
+    if let Some(ids) = by_table.get("brain_entities") {
+        for id in ids {
+            let children: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM brain_observations WHERE entity_id = $1)
+                      + (SELECT count(*) FROM brain_episodes WHERE entity_id = $1)",
+            )
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if children > 0 {
+                applied.withheld.push(format!(
+                    "brain_entities {id}: {children} row(s) here were never named by the \
+                     sender, and deleting the entity would cascade them away"
+                ));
+                continue;
+            }
+            let done = sqlx::query("DELETE FROM brain_entities WHERE id = $1")
+                .bind(id)
+                .execute(&mut **tx)
+                .await?;
+            if done.rows_affected() > 0 {
+                *applied
+                    .deleted
+                    .entry("brain_entities".to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    Ok(applied)
+}
 
 async fn validate_bundle(pool: &PgPool, root: &Path) -> Result<()> {
     let mut offences: Vec<String> = Vec::new();
@@ -686,7 +847,12 @@ async fn validate_bundle(pool: &PgPool, root: &Path) -> Result<()> {
     )
 }
 
-async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<Value> {
+async fn import(
+    pool: &PgPool,
+    dir_arg: Option<&str>,
+    conflict: &str,
+    confirm: bool,
+) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
     let manifest_path = root.join("manifest.json");
     if !manifest_path.exists() {
@@ -718,6 +884,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         .execute(&mut *tx)
         .await
         .context("taking the sync lock")?;
+
+    let tombstones = apply_tombstones(&mut tx, &root, confirm).await?;
 
     let already: Option<(i32,)> =
         sqlx::query_as("SELECT rows_inserted FROM brain_sync_state WHERE manifest_hash = $1")
@@ -770,6 +938,9 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
                 continue;
             }
             let file: EntityFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if tombstones.buried.contains(&file.id) {
+                continue;
+            }
             let local: Option<Uuid> =
                 sqlx::query_scalar("SELECT id FROM brain_entities WHERE name = $1")
                     .bind(&file.name)
@@ -806,6 +977,9 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
             inserted += r.rows_affected() as u32;
 
             for obs in &file.observations {
+                if tombstones.buried.contains(&obs.id) {
+                    continue;
+                }
                 let (trust, reason) = trust_for_imported(&obs.content);
                 let r = sqlx::query(&format!(
                     "INSERT INTO brain_observations
@@ -1079,6 +1253,8 @@ async fn import(pool: &PgPool, dir_arg: Option<&str>, conflict: &str) -> Result<
         "manifest_hash": manifest.manifest_hash,
         "rows_inserted": inserted,
         "diverged": diverged.len(),
+        "tombstones_applied": tombstones.deleted,
+        "tombstones_withheld": tombstones.withheld,
         "divergence_note": divergence_note,
         "embeddings_restored": embeddings_restored,
         "quarantined": quarantined,
