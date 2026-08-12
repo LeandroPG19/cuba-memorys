@@ -211,6 +211,19 @@ pub fn create_lazy_pool(database_url: &str) -> PgPool {
     pool_options().connect_lazy_with(options)
 }
 
+static NODE_ID: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+
+pub async fn node_id(pool: &PgPool) -> Result<uuid::Uuid> {
+    if let Some(id) = NODE_ID.get() {
+        return Ok(*id);
+    }
+    let id: uuid::Uuid = sqlx::query_scalar("SELECT node_id FROM brain_node_identity")
+        .fetch_one(pool)
+        .await
+        .context("brain_node_identity holds exactly one row, created by migration 0046")?;
+    Ok(*NODE_ID.get_or_init(|| id))
+}
+
 pub async fn init_schema(pool: &PgPool) -> Result<()> {
     let skip = std::env::var("CUBA_SKIP_MIGRATIONS")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))

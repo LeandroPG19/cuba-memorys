@@ -554,6 +554,7 @@ async fn export(
         counts: counts.clone(),
         with_embeddings,
         embedding_dim: emb_dim,
+        node_id: Some(crate::db::node_id(pool).await?),
     };
     std::fs::write(
         root.join("manifest.json"),

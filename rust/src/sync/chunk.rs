@@ -17,6 +17,8 @@ pub struct Manifest {
     pub with_embeddings: bool,
     #[serde(default)]
     pub embedding_dim: Option<usize>,
+    #[serde(default)]
+    pub node_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
