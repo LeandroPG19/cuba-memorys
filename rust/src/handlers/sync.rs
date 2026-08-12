@@ -171,6 +171,28 @@ fn trust_for_imported(content: &str) -> (&'static str, Option<&'static str>) {
     }
 }
 
+#[derive(sqlx::FromRow)]
+struct ExportedObservation {
+    id: Uuid,
+    content: String,
+    observation_type: String,
+    source: String,
+    importance: f64,
+    tags: Vec<String>,
+    project_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    created_at: chrono::DateTime<Utc>,
+    embedding_model: Option<String>,
+    updated_at: chrono::DateTime<Utc>,
+    version: i32,
+    previous_versions: Value,
+    origin_node: Option<String>,
+    evidence: String,
+    verification: Option<String>,
+    verified_at: Option<chrono::DateTime<Utc>>,
+    trust: String,
+}
+
 async fn export(
     pool: &PgPool,
     dir_arg: Option<&str>,
@@ -248,42 +270,38 @@ async fn export(
     let mut entity_paths: HashSet<PathBuf> = HashSet::new();
 
     for (id, name, entity_type, importance, access_count, p_id, created_at) in entity_rows {
-        let observations: Vec<ObservationRow> = sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                String,
-                String,
-                String,
-                f64,
-                Vec<String>,
-                Option<Uuid>,
-                Option<Uuid>,
-                chrono::DateTime<Utc>,
-                Option<String>,
-            ),
-        >(
-            "SELECT id, content, observation_type, source, importance::float8, tags,
-                    project_id, session_id, created_at, embedding_model
+        let observations: Vec<ObservationRow> = sqlx::query_as::<_, ExportedObservation>(
+            "SELECT id, content, observation_type, source, importance::float8 AS importance, tags,
+                    project_id, session_id, created_at, embedding_model,
+                    updated_at, version, previous_versions, origin_node,
+                    evidence, verification, verified_at, trust
              FROM brain_observations
-             WHERE entity_id = $1 AND observation_type != 'superseded'
+             WHERE entity_id = $1
              ORDER BY created_at",
         )
         .bind(id)
         .fetch_all(pool)
         .await?
         .into_iter()
-        .map(|t| ObservationRow {
-            id: t.0,
-            content: t.1,
-            observation_type: t.2,
-            source: t.3,
-            importance: t.4,
-            tags: t.5,
-            project_id: t.6,
-            session_id: t.7,
-            created_at: t.8,
-            embedding_model: t.9,
+        .map(|r| ObservationRow {
+            id: r.id,
+            content: r.content,
+            observation_type: r.observation_type,
+            source: r.source,
+            importance: r.importance,
+            tags: r.tags,
+            project_id: r.project_id,
+            session_id: r.session_id,
+            created_at: r.created_at,
+            embedding_model: r.embedding_model,
+            updated_at: Some(r.updated_at),
+            version: Some(r.version),
+            previous_versions: Some(r.previous_versions),
+            origin_node: r.origin_node,
+            evidence: Some(r.evidence),
+            verification: r.verification,
+            verified_at: r.verified_at,
+            trust: Some(r.trust),
         })
         .collect();
         obs_count += observations.len() as u32;
@@ -988,8 +1006,13 @@ async fn import(
                 let r = sqlx::query(&format!(
                     "INSERT INTO brain_observations
                         (id, entity_id, content, observation_type, source, importance,
-                         tags, session_id, project_id, embedding_model, created_at, trust)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                         tags, session_id, project_id, embedding_model, created_at, trust,
+                         updated_at, version, previous_versions, origin_node,
+                         evidence, verification, verified_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                             COALESCE($13, NOW()), COALESCE($14, 1),
+                             COALESCE($15, '[]'::jsonb), $16,
+                             COALESCE($17, 'asserted'), $18, $19)
                      ON CONFLICT (id) DO {}",
                     if overwrite {
                         "UPDATE SET \
@@ -1029,6 +1052,13 @@ async fn import(
                 .bind(&obs.embedding_model)
                 .bind(obs.created_at)
                 .bind(trust)
+                .bind(obs.updated_at)
+                .bind(obs.version)
+                .bind(&obs.previous_versions)
+                .bind(&obs.origin_node)
+                .bind(&obs.evidence)
+                .bind(&obs.verification)
+                .bind(obs.verified_at)
                 .execute(&mut *tx)
                 .await?;
                 inserted += r.rows_affected() as u32;

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub const MAX_EMBEDDING_DIM: usize = 16_000;
 
@@ -50,7 +51,7 @@ pub struct EntityFile {
     pub observations: Vec<ObservationRow>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ObservationRow {
     pub id: Uuid,
     pub content: String,
@@ -62,6 +63,22 @@ pub struct ObservationRow {
     pub session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub version: Option<i32>,
+    #[serde(default)]
+    pub previous_versions: Option<Value>,
+    #[serde(default)]
+    pub origin_node: Option<String>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub verification: Option<String>,
+    #[serde(default)]
+    pub verified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub trust: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

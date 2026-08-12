@@ -534,6 +534,7 @@ mod tests {
             session_id: None,
             created_at: Utc::now(),
             embedding_model: None,
+            ..Default::default()
         }
     }
 
