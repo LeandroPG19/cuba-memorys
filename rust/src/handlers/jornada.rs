@@ -76,6 +76,19 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 response["triggered_reminders"] = serde_json::json!(triggered);
             }
 
+            let notices = crate::handlers::sync::pending_notices(pool)
+                .await
+                .unwrap_or_default();
+            if !notices.is_empty() {
+                response["peer_notices"] = serde_json::json!(notices);
+                response["peer_notices_note"] = serde_json::json!(
+                    "the other machine says it learned something you do not have. Nothing of \
+                     it is in this database: a peer can only ring the bell. Take it with \
+                     cuba_sync action=pull against that node and import what comes back, or \
+                     ignore it — the notice closes itself when a bundle with its hash lands."
+                );
+            }
+
             Ok(response)
         }
         "end" => {

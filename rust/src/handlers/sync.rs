@@ -56,7 +56,8 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .unwrap_or(true);
             pull(pool, offset, limit, vectors).await
         }
-        _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status/pull"),
+        "notify" => notify(pool, &args).await,
+        _ => anyhow::bail!("Invalid action: {action}. Use export/import/diff/status/pull/notify"),
     }
 }
 
@@ -714,6 +715,96 @@ pub const OBSERVATION_SOURCES: [&str; 5] = [
 pub const RELATION_PROVENANCES: [&str; 3] = ["extracted", "inferred", "predicted"];
 
 const PULL_PAGE_BYTES: usize = 3 * 1024 * 1024;
+
+const MAX_NOTICE_CHARS: usize = 2000;
+
+async fn notify(pool: &PgPool, args: &Value) -> Result<Value> {
+    let summary = args
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "notify needs a summary: what the other machine learned, in the words the model \
+                 there would use. A bell with no message tells the local model to pull and \
+                 nothing about whether it should"
+            )
+        })?;
+    if summary.chars().count() > MAX_NOTICE_CHARS {
+        anyhow::bail!(
+            "a notice is a signal, not a payload: {MAX_NOTICE_CHARS} characters at most, and \
+             this one is {}. The memory travels through pull, which is validated and \
+             quarantined; the notice is only there to say it is worth pulling",
+            summary.chars().count()
+        );
+    }
+    if let Some(pattern) = crate::redact::looks_like_secret(summary) {
+        anyhow::bail!(
+            "refusing a peer notice that carries what looks like a {pattern}. Every other \
+             free-text entry rejects credentials at the door and this one arrives over the \
+             network from another machine, which makes it the last place to make an exception"
+        );
+    }
+
+    let node_id = args
+        .get("node_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let node_name = args.get("node_name").and_then(Value::as_str);
+    let manifest_hash = args.get("manifest_hash").and_then(Value::as_str);
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO brain_peer_notices (node_id, node_name, summary, manifest_hash)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(node_id)
+    .bind(node_name)
+    .bind(summary)
+    .bind(manifest_hash)
+    .fetch_one(pool)
+    .await
+    .context("recording the peer notice")?;
+
+    Ok(serde_json::json!({
+        "action": "notify",
+        "id": id,
+        "recorded": true,
+        "note": "the local model sees this the next time it opens a session or asks cuba_sync \
+                 for status. Nothing here entered the graph: a peer rings the bell, it does not \
+                 decide what this database remembers."
+    }))
+}
+
+type NoticeRow = (
+    Uuid,
+    Option<String>,
+    String,
+    Option<String>,
+    chrono::DateTime<Utc>,
+);
+
+pub async fn pending_notices(pool: &PgPool) -> Result<Vec<Value>> {
+    let rows: Vec<NoticeRow> = sqlx::query_as(
+        "SELECT id, node_name, summary, manifest_hash, created_at
+             FROM brain_peer_notices WHERE resolved_at IS NULL
+             ORDER BY created_at DESC LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, node_name, summary, manifest_hash, created_at)| {
+            serde_json::json!({
+                "id": id,
+                "from": node_name,
+                "summary": summary,
+                "manifest_hash": manifest_hash,
+                "at": created_at,
+            })
+        })
+        .collect())
+}
 
 fn bundle_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
@@ -1675,6 +1766,16 @@ async fn import(
 
     tx.commit().await?;
 
+    let notices_closed = sqlx::query(
+        "UPDATE brain_peer_notices SET resolved_at = NOW()
+         WHERE resolved_at IS NULL AND manifest_hash = $1",
+    )
+    .bind(&on_disk)
+    .execute(pool)
+    .await
+    .map(|r| r.rows_affected())
+    .unwrap_or(0);
+
     let quarantine_note = (quarantined > 0).then(|| {
         format!(
             "{quarantined} imported rows look like they carry a credential and were written \
@@ -1716,6 +1817,7 @@ async fn import(
         "quarantined": quarantined,
         "quarantine_reasons": quarantine_reasons,
         "quarantine_note": quarantine_note,
+        "peer_notices_closed": notices_closed,
         "from": root.display().to_string(),
     }))
 }
@@ -1807,12 +1909,15 @@ async fn status(pool: &PgPool, dir_arg: Option<&str>) -> Result<Value> {
         None => false,
     };
 
+    let notices = pending_notices(pool).await.unwrap_or_default();
+
     Ok(serde_json::json!({
         "action": "status",
         "dir": root.display().to_string(),
         "current_manifest": on_disk,
         "pending_import": pending,
         "recent_imports": imported_json,
+        "peer_notices": notices,
     }))
 }
 
