@@ -22,8 +22,58 @@ permissions:
 
 # ── 1. Build native binaries ─────────────────────────────────────────────────
 jobs:
+  # A tag published whatever compiled. Nothing checked that the commit it points at
+  # had ever passed its tests — the release pipeline runs no tests of its own, so
+  # between `git tag` and npm there was no point at which a red suite could stop
+  # anything. Tagging the wrong commit, or tagging before CI finished, shipped it.
+  ci-was-green:
+    name: CI was green on this commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: The tagged commit must have a passing CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Waiting rather than failing outright: tagging straight after a push is
+          # normal, and CI takes ~15 min. Refusing a tag that arrives two minutes
+          # early would teach everyone to dispatch the workflow manually instead.
+          deadline=$(( SECONDS + 2700 ))
+          while :; do
+            runs=$(gh run list --repo "$REPO" --workflow=ci.yml --commit="$SHA" \
+                     --json status,conclusion,databaseId --limit 20)
+            done_runs=$(echo "$runs" | jq '[.[] | select(.status == "completed")]')
+            if [ "$(echo "$done_runs" | jq 'length')" -gt 0 ]; then
+              if [ "$(echo "$done_runs" | jq '[.[] | select(.conclusion == "success")] | length')" -gt 0 ]; then
+                echo "OK  CI passed on $SHA"
+                exit 0
+              fi
+              echo "REFUSING TO PUBLISH: CI ran on $SHA and did not pass." >&2
+              echo "$done_runs" | jq -r '.[] | "  run \(.databaseId): \(.conclusion)"' >&2
+              echo "" >&2
+              echo "The release pipeline runs no tests of its own, so this is the only" >&2
+              echo "thing standing between a red suite and npm, PyPI and five binaries." >&2
+              echo "Fix main, move the tag, and push it again." >&2
+              exit 1
+            fi
+            if [ "$(echo "$runs" | jq 'length')" -eq 0 ]; then
+              echo "REFUSING TO PUBLISH: no CI run exists for $SHA." >&2
+              echo "A tag on a commit CI never saw is a release nothing verified." >&2
+              exit 1
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "REFUSING TO PUBLISH: CI on $SHA is still running after 45 minutes." >&2
+              exit 1
+            fi
+            echo "CI still running on $SHA — waiting 60s"
+            sleep 60
+          done
+
   build-binaries:
     name: Binary — ${{ matrix.target }}
+    needs: ci-was-green
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
