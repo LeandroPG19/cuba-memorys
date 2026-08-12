@@ -631,14 +631,23 @@ fn recompute_digest(root: &Path, project_id: Option<Uuid>) -> Result<String> {
     Ok(digest.finish(project_id))
 }
 
-const TOMBSTONED_TABLES: [&str; 6] = [
-    "brain_entities",
-    "brain_observations",
-    "brain_episodes",
-    "brain_errors",
-    "brain_relations",
-    "brain_projects",
+pub const TOMBSTONED_TABLES: [(&str, &str); 8] = [
+    ("brain_entities", "id"),
+    ("brain_observations", "id"),
+    ("brain_episodes", "id"),
+    ("brain_errors", "id"),
+    ("brain_relations", "id"),
+    ("brain_projects", "id"),
+    ("brain_procedures", "id"),
+    ("brain_facts", "fact_id"),
 ];
+
+fn tombstone_key(table: &str) -> Option<&'static str> {
+    TOMBSTONED_TABLES
+        .iter()
+        .find(|(t, _)| *t == table)
+        .map(|(_, k)| *k)
+}
 
 const TOMBSTONE_ALARM_RATIO: f64 = 0.10;
 const TOMBSTONE_ALARM_FLOOR: i64 = 25;
@@ -676,7 +685,7 @@ async fn apply_tombstones(
         ) else {
             continue;
         };
-        if !TOMBSTONED_TABLES.contains(&table) {
+        if tombstone_key(table).is_none() {
             anyhow::bail!(
                 "tombstones.json names table {table:?}, which this build does not delete from. \
                  A tombstone is a licence to destroy rows; honouring one for a table nobody \
@@ -716,7 +725,8 @@ async fn apply_tombstones(
     }
 
     for (table, ids) in by_table.iter().filter(|(t, _)| *t != "brain_entities") {
-        let done = sqlx::query(&format!("DELETE FROM {table} WHERE id = ANY($1)"))
+        let key = tombstone_key(table).expect("checked above");
+        let done = sqlx::query(&format!("DELETE FROM {table} WHERE {key} = ANY($1)"))
             .bind(ids)
             .execute(&mut **tx)
             .await?;
