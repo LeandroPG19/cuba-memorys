@@ -318,6 +318,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_IDLE_SHUTDOWN_SECS` | `0` (off) | Exit after this long with no request from any client. Pairs with a systemd `.socket` unit so the next call brings the daemon back — see [Footprint](#footprint) |
 | `CUBA_WARM_RERANKER` | off | Load the cross-encoder at startup instead of on its first batch. Off, a cold start costs 0,027 s instead of 11 s and holds no VRAM until something actually reranks |
 | `CUBA_HTTP_ADDR` · `CUBA_HTTP_TOKEN` | `127.0.0.1:8787` · unset | Address for `serve`, and the bearer token it requires. A token is mandatory to bind anything but loopback |
+| `CUBA_PEER_TOKEN` | unset | A second bearer token for another machine that syncs with this one. It reaches only the sync verbs — never `cuba_forget`, `cuba_zafra prune` or `cuba_sync import` — so a peer can read what this node knows and cannot write or delete a single row. Must differ from `CUBA_HTTP_TOKEN`, which is also the tunnel's; `serve` refuses to start if they match |
 | `CUBA_HANDSHAKE_TIMEOUT_SECS` | `60` | stdio exits if no MCP handshake arrives, instead of holding the models for a client that gave up. `0` disables |
 | `CUBA_HANDLER_TIMEOUT_SECS` | `30` | Ceiling on one tool call. It is also the budget the LLM extraction inside `cuba_ingesta` gets, at 60% of this value — raising it lets extraction think longer |
 | `CUBA_DOCS` | **off** | `1` enables `cuba_docs`, the only tool that leaves your machine. Unset, it is not even advertised. |

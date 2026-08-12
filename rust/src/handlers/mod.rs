@@ -36,6 +36,27 @@ pub mod zafra;
 pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Value> {
     let start = std::time::Instant::now();
 
+    if crate::session::current_scope() == crate::session::Scope::Peer {
+        let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+        let permitted = crate::session::PEER_VERBS
+            .iter()
+            .any(|(tool, verb)| *tool == tool_name && *verb == action);
+        if !permitted {
+            let allowed: Vec<String> = crate::session::PEER_VERBS
+                .iter()
+                .map(|(tool, verb)| format!("{tool} action={verb}"))
+                .collect();
+            tracing::warn!(tool = %tool_name, action = %action, "peer token refused");
+            anyhow::bail!(
+                "a peer token may call {} and nothing else; {tool_name} action={action:?} is \
+                 refused. This check lives in dispatch on purpose: cuba_call reaches every \
+                 handler through the same function, so an allow-list enforced anywhere above it \
+                 would let a peer ask for cuba_forget by name inside a permitted envelope.",
+                allowed.join(", ")
+            );
+        }
+    }
+
     let dispatch_result: Result<Value> = async {
         match tool_name {
             "cuba_alma" => alma::handle(pool, args).await,

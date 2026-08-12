@@ -15,6 +15,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::protocol::{self, JsonRpcRequest};
+use crate::session::Scope;
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8787";
 
@@ -29,6 +30,7 @@ const REAP_INTERVAL: Duration = Duration::from_secs(3600);
 struct AppState {
     pool: PgPool,
     token: Option<Arc<String>>,
+    peer_token: Option<Arc<String>>,
     started: Instant,
     served: Arc<AtomicU64>,
     seen: Arc<std::sync::RwLock<std::collections::HashMap<String, Instant>>>,
@@ -76,6 +78,24 @@ fn auth_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn peer_token() -> Option<String> {
+    std::env::var("CUBA_PEER_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
+fn ensure_tokens_differ() -> Result<()> {
+    match (auth_token(), peer_token()) {
+        (Some(admin), Some(peer)) if admin == peer => anyhow::bail!(
+            "CUBA_PEER_TOKEN is the same string as CUBA_HTTP_TOKEN, so the restricted token \
+             is not restricted: it matches the admin arm first and gets all 28 tools. The \
+             point of a peer token is that handing it to the other machine — and to the \
+             Cloudflare tunnel, which uses CUBA_HTTP_TOKEN — are different acts"
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn ensure_loopback(addr: &SocketAddr) -> Result<()> {
     if addr.ip().is_loopback() || auth_token().is_some() {
         return Ok(());
@@ -104,6 +124,7 @@ pub async fn serve(addr: &str) -> Result<()> {
         .parse()
         .with_context(|| format!("invalid listen address: {addr}"))?;
     ensure_loopback(&addr)?;
+    ensure_tokens_differ()?;
 
     crate::session::enable_daemon_mode();
 
@@ -130,6 +151,7 @@ pub async fn serve(addr: &str) -> Result<()> {
     let state = AppState {
         pool,
         token: auth_token().map(Arc::new),
+        peer_token: peer_token().map(Arc::new),
         started: Instant::now(),
         served: Arc::new(AtomicU64::new(0)),
         seen: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
@@ -334,22 +356,33 @@ fn client_key(headers: &HeaderMap, payload: &Value) -> String {
     "anonymous".to_string()
 }
 
-fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(expected) = state.token.as_ref() else {
-        return true;
-    };
-    let presented = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-
+fn same_secret(presented: &str, expected: &str) -> bool {
     let a = presented.as_bytes();
     let b = expected.as_bytes();
     if a.len() != b.len() {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn authorized(state: &AppState, headers: &HeaderMap) -> Option<Scope> {
+    let presented = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+
+    if let Some(peer) = state.peer_token.as_ref()
+        && same_secret(presented, peer)
+    {
+        return Some(Scope::Peer);
+    }
+
+    match state.token.as_ref() {
+        None => Some(Scope::Full),
+        Some(expected) if same_secret(presented, expected) => Some(Scope::Full),
+        Some(_) => None,
+    }
 }
 
 fn request_deadline() -> Duration {
@@ -381,13 +414,13 @@ fn error_envelope(id: Value, code: i64, message: impl Into<String>) -> Value {
 }
 
 async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if !authorized(&state, &headers) {
+    let Some(scope) = authorized(&state, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(error_envelope(Value::Null, -32001, "invalid bearer token")),
         )
             .into_response();
-    }
+    };
 
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -423,7 +456,7 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         let mut responses: Vec<Value> = Vec::with_capacity(items.len());
         for item in items {
             state.served.fetch_add(1, Ordering::Relaxed);
-            if let Some(reply) = dispatch_one(&state, &key, item).await {
+            if let Some(reply) = dispatch_one(&state, &key, scope, item).await {
                 responses.push(reply);
             }
         }
@@ -459,7 +492,7 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
     }
 }
 
-async fn dispatch_one(state: &AppState, key: &str, item: Value) -> Option<Value> {
+async fn dispatch_one(state: &AppState, key: &str, scope: Scope, item: Value) -> Option<Value> {
     let id = item.get("id").cloned().unwrap_or(Value::Null);
 
     let request: JsonRpcRequest = match serde_json::from_value(item) {
@@ -475,7 +508,7 @@ async fn dispatch_one(state: &AppState, key: &str, item: Value) -> Option<Value>
     let method = request.method.clone();
 
     let work = crate::session::with_client(key.to_string(), async move {
-        protocol::handle_request(&pool, request).await
+        crate::session::with_scope(scope, protocol::handle_request(&pool, request)).await
     });
 
     let outcome = match std::panic::AssertUnwindSafe(work).catch_unwind().await {
@@ -522,7 +555,7 @@ async fn health(State(state): State<AppState>, headers: HeaderMap) -> Response {
         "database": if db_ok { "up" } else { "unreachable" },
     });
 
-    if authorized(&state, &headers) {
+    if authorized(&state, &headers) == Some(Scope::Full) {
         let clients: Vec<String> = state
             .seen
             .read()
@@ -716,28 +749,35 @@ mod tests {
 
     #[tokio::test]
     async fn token_comparison_rejects_wrong_and_short_tokens() {
-        let state = AppState {
-            pool: crate::db::create_lazy_pool("postgres://unused/unused"),
-            token: Some(Arc::new("s3cret".to_string())),
-            started: Instant::now(),
-            served: Arc::new(AtomicU64::new(0)),
-            seen: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            last_activity: Arc::new(Mutex::new(Instant::now())),
-        };
+        let mut state = state_with_clients(Some("s3cret"), &[]);
 
-        assert!(authorized(
-            &state,
-            &headers_with("authorization", "Bearer s3cret")
-        ));
-        assert!(!authorized(
-            &state,
-            &headers_with("authorization", "Bearer s3cre")
-        ));
-        assert!(!authorized(
-            &state,
-            &headers_with("authorization", "Bearer wrongg")
-        ));
-        assert!(!authorized(&state, &HeaderMap::new()));
+        assert_eq!(
+            authorized(&state, &headers_with("authorization", "Bearer s3cret")),
+            Some(Scope::Full)
+        );
+        assert_eq!(
+            authorized(&state, &headers_with("authorization", "Bearer s3cre")),
+            None
+        );
+        assert_eq!(
+            authorized(&state, &headers_with("authorization", "Bearer wrongg")),
+            None
+        );
+        assert_eq!(authorized(&state, &HeaderMap::new()), None);
+
+        state.peer_token = Some(Arc::new("p33r".to_string()));
+        assert_eq!(
+            authorized(&state, &headers_with("authorization", "Bearer p33r")),
+            Some(Scope::Peer),
+            "the peer arm is checked first, and it has to be: matching the admin token first \
+             and falling through would hand a peer the full surface the moment somebody set \
+             both variables to the same string"
+        );
+        assert_eq!(
+            authorized(&state, &headers_with("authorization", "Bearer s3cret")),
+            Some(Scope::Full),
+            "and adding a peer token must not demote the admin one"
+        );
     }
 
     fn state_with_clients(token: Option<&str>, clients: &[&str]) -> AppState {
@@ -747,6 +787,7 @@ mod tests {
         AppState {
             pool: crate::db::create_lazy_pool("postgres://unused/unused"),
             token: token.map(|t| Arc::new(t.to_string())),
+            peer_token: None,
             started: Instant::now(),
             served: Arc::new(AtomicU64::new(0)),
             seen: Arc::new(std::sync::RwLock::new(seen)),

@@ -19,6 +19,26 @@ static DAEMON: AtomicBool = AtomicBool::new(false);
 
 tokio::task_local! {
     static CLIENT: String;
+    static SCOPE: Scope;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Full,
+    Peer,
+}
+
+pub const PEER_VERBS: [(&str, &str); 1] = [("cuba_sync", "status")];
+
+pub fn current_scope() -> Scope {
+    SCOPE.try_with(|s| *s).unwrap_or(Scope::Full)
+}
+
+pub async fn with_scope<F, R>(scope: Scope, fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    SCOPE.scope(scope, fut).await
 }
 
 #[cfg(test)]

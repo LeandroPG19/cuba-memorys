@@ -166,6 +166,34 @@ fn audit_chain_check(keyed: bool, rows: i64) -> Check {
     )
 }
 
+fn peer_token_check(admin: Option<&str>, peer: Option<&str>) -> Check {
+    match (admin, peer) {
+        (_, None) => Check::ok(
+            "peer_token",
+            "CUBA_PEER_TOKEN sin fijar — no hay par que pueda llamar a este demonio".to_string(),
+        ),
+        (Some(a), Some(p)) if a == p => Check::fail(
+            "peer_token",
+            "CUBA_PEER_TOKEN es la misma cadena que CUBA_HTTP_TOKEN".to_string(),
+            "así el token restringido no restringe nada: casa primero con la rama de admin y \
+             se lleva las 28 herramientas, cuba_forget incluida. Y es el mismo que va por el \
+             túnel de Cloudflare. Poné dos cadenas distintas; el demonio ya se niega a \
+             arrancar con esta configuración.",
+        ),
+        (_, Some(_)) => Check::ok(
+            "peer_token",
+            format!(
+                "CUBA_PEER_TOKEN fijado y distinto — el par solo puede llamar a {}",
+                crate::session::PEER_VERBS
+                    .iter()
+                    .map(|(t, v)| format!("{t} action={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+    }
+}
+
 fn rbac_check(principals: i64) -> Check {
     if principals > 0 {
         return Check::ok(
@@ -622,6 +650,11 @@ pub async fn run_checks_with(pool: &PgPool, url: &str, deep: bool) -> Vec<Check>
         }
         Err(e) => checks.push(Check::warn("runtime_role", format!("no verificable: {e}"), "revisar permisos")),
     }
+
+    checks.push(peer_token_check(
+        std::env::var("CUBA_HTTP_TOKEN").ok().as_deref(),
+        std::env::var("CUBA_PEER_TOKEN").ok().as_deref(),
+    ));
 
     match sqlx::query(
         "SELECT (SELECT count(*) FROM brain_observations)::bigint AS obs,
