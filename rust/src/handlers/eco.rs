@@ -412,14 +412,20 @@ async fn correct(pool: &PgPool, observation_id: Option<&str>, args: &Value) -> R
 
     let result = sqlx::query(
         "UPDATE brain_observations SET
-            previous_versions = previous_versions || jsonb_build_array(
-                jsonb_build_object('content', content, 'version', version, 'corrected_at', NOW()::text)
+            previous_versions = brain_append_version(
+                previous_versions,
+                jsonb_build_array(jsonb_build_object(
+                    'content', content, 'version', version,
+                    'origin_node', origin_node, 'corrected_at', NOW()::text
+                ))
             ),
             content = $2,
             version = version + 1,
+            embedding = NULL,
+            embedding_half = NULL,
             last_accessed = NOW(),
             updated_at = NOW()
-         WHERE id = $1"
+         WHERE id = $1",
     )
     .bind(obs_id)
     .bind(correction)

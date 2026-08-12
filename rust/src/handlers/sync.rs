@@ -989,12 +989,26 @@ async fn import(
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                      ON CONFLICT (id) DO {}",
                     if overwrite {
-                        "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
+                        "UPDATE SET \
+                         previous_versions = brain_append_version( \
+                             brain_observations.previous_versions, \
+                             jsonb_build_array(jsonb_build_object( \
+                                 'content', brain_observations.content, \
+                                 'version', brain_observations.version, \
+                                 'origin_node', brain_observations.origin_node, \
+                                 'superseded_at', NOW()::text)) \
+                         ), \
+                         entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
                          observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
                          importance = EXCLUDED.importance, tags = EXCLUDED.tags, \
                          session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
                          embedding_model = EXCLUDED.embedding_model, \
-                         created_at = EXCLUDED.created_at, trust = EXCLUDED.trust"
+                         created_at = EXCLUDED.created_at, trust = EXCLUDED.trust, \
+                         embedding = CASE WHEN brain_observations.content IS DISTINCT FROM \
+                             EXCLUDED.content THEN NULL ELSE brain_observations.embedding END, \
+                         embedding_half = CASE WHEN brain_observations.content IS DISTINCT FROM \
+                             EXCLUDED.content THEN NULL ELSE brain_observations.embedding_half END \
+                         WHERE brain_observations.content IS DISTINCT FROM EXCLUDED.content"
                     } else {
                         "NOTHING"
                     }
