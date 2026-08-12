@@ -783,11 +783,13 @@ async fn apply_tombstones(
 
     let mut would_delete = 0i64;
     for (table, ids) in &by_table {
-        let present: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE id = ANY($1)"))
-                .bind(ids)
-                .fetch_one(&mut **tx)
-                .await?;
+        let key = tombstone_key(table).expect("checked above");
+        let present: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE {key} = ANY($1)"
+        ))
+        .bind(ids)
+        .fetch_one(&mut **tx)
+        .await?;
         would_delete += present;
     }
     if would_delete > 0 && !confirm {
