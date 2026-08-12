@@ -78,7 +78,7 @@ provision_gate_db() {
   fi
   local peer_tables
   peer_tables="$(docker exec cuba-memorys-db psql -U cuba -d "$PEER_DB" -Atc \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema=\'public\'")"
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"
   if ((peer_tables < 20)); then
     echo "FAIL: could not migrate the second node's database (only $peer_tables tables)." >&2
     echo "      The two-node test would then skip, and a skipped test that reports green is" >&2

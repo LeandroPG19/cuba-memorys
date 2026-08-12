@@ -1532,10 +1532,19 @@ async fn import(
     let projects_path = root.join("projects.json");
     if projects_path.exists() {
         let projects: Vec<ProjectRow> = serde_json::from_slice(&std::fs::read(projects_path)?)?;
-        for p in projects {
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let batch: Vec<Value> = projects
+            .iter()
+            .filter(|p| seen.insert(p.id))
+            .map(|p| serde_json::json!({"id": p.id, "name": p.name, "created_at": p.created_at}))
+            .collect();
+
+        if !batch.is_empty() {
             let r = sqlx::query(&format!(
                 "INSERT INTO brain_projects (id, name, created_at)
-                 VALUES ($1, $2, $3)
+                 SELECT u.id, u.name, u.created_at
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, name text, created_at timestamptz)
                  ON CONFLICT (id) DO {}",
                 if overwrite {
                     "UPDATE SET name = EXCLUDED.name, created_at = EXCLUDED.created_at"
@@ -1543,9 +1552,7 @@ async fn import(
                     "NOTHING"
                 }
             ))
-            .bind(p.id)
-            .bind(&p.name)
-            .bind(p.created_at)
+            .bind(Value::Array(batch))
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
@@ -1554,6 +1561,7 @@ async fn import(
 
     let entities_dir = root.join("entities");
     if entities_dir.exists() {
+        let mut files: Vec<EntityFile> = Vec::new();
         for entry in std::fs::read_dir(entities_dir)? {
             let path = entry?.path();
             if path.extension().is_none_or(|e| e != "json") {
@@ -1563,21 +1571,50 @@ async fn import(
             if tombstones.buried.contains(&file.id) {
                 continue;
             }
-            let local: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM brain_entities WHERE name = $1")
-                    .bind(&file.name)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let entity_id = match local {
-                Some(existing) if existing != file.id => {
-                    remapped.insert(file.id, existing);
-                    existing
+            files.push(file);
+        }
+
+        let names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        let existing: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT id, name FROM brain_entities WHERE name = ANY($1)")
+                .bind(&names)
+                .fetch_all(&mut *tx)
+                .await?;
+        let by_name: HashMap<String, Uuid> = existing.into_iter().map(|(id, n)| (n, id)).collect();
+
+        let mut entity_rows: Vec<Value> = Vec::with_capacity(files.len());
+        let mut seen_entities: HashSet<Uuid> = HashSet::new();
+        for file in &files {
+            let entity_id = match by_name.get(&file.name) {
+                Some(existing) if *existing != file.id => {
+                    remapped.insert(file.id, *existing);
+                    *existing
                 }
                 _ => file.id,
             };
+            if !seen_entities.insert(entity_id) {
+                continue;
+            }
+            entity_rows.push(serde_json::json!({
+                "id": entity_id,
+                "name": file.name,
+                "entity_type": file.entity_type,
+                "importance": file.importance,
+                "access_count": file.access_count,
+                "project_id": file.project_id,
+                "created_at": file.created_at,
+            }));
+        }
+
+        if !entity_rows.is_empty() {
             let r = sqlx::query(&format!(
-                "INSERT INTO brain_entities (id, name, entity_type, importance, access_count, project_id, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "INSERT INTO brain_entities
+                    (id, name, entity_type, importance, access_count, project_id, created_at)
+                 SELECT u.id, u.name, u.entity_type, u.importance, u.access_count,
+                        u.project_id, u.created_at
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, name text, entity_type text, importance float8,
+                     access_count int, project_id uuid, created_at timestamptz)
                  ON CONFLICT (id) DO {}",
                 if overwrite {
                     "UPDATE SET name = EXCLUDED.name, entity_type = EXCLUDED.entity_type, \
@@ -1590,97 +1627,121 @@ async fn import(
                      access_count = GREATEST(brain_entities.access_count, EXCLUDED.access_count)"
                 }
             ))
-            .bind(entity_id)
-            .bind(&file.name)
-            .bind(&file.entity_type)
-            .bind(file.importance)
-            .bind(file.access_count)
-            .bind(file.project_id)
-            .bind(file.created_at)
+            .bind(Value::Array(entity_rows))
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
+        }
 
+        let mut obs_rows: Vec<Value> = Vec::new();
+        let mut reasons: HashMap<Uuid, &'static str> = HashMap::new();
+        let mut seen_obs: HashSet<Uuid> = HashSet::new();
+        for file in &files {
+            let entity_id = resolve(&remapped, file.id);
             for obs in &file.observations {
-                if tombstones.buried.contains(&obs.id) {
+                if tombstones.buried.contains(&obs.id) || !seen_obs.insert(obs.id) {
                     continue;
                 }
                 let (trust, reason) = trust_for_imported(&obs.content);
-                let r = sqlx::query(&format!(
-                    "INSERT INTO brain_observations
-                        (id, entity_id, content, observation_type, source, importance,
-                         tags, session_id, project_id, embedding_model, created_at, trust,
-                         updated_at, version, previous_versions, origin_node,
-                         evidence, verification, verified_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                             COALESCE($13, NOW()), COALESCE($14, 1),
-                             COALESCE($15, '[]'::jsonb), $16,
-                             COALESCE($17, 'asserted'), $18, $19)
-                     ON CONFLICT (id) DO {}",
-                    if overwrite {
-                        "UPDATE SET \
-                         previous_versions = brain_append_version( \
-                             brain_observations.previous_versions, \
-                             jsonb_build_array(jsonb_build_object( \
-                                 'content', brain_observations.content, \
-                                 'version', brain_observations.version, \
-                                 'origin_node', brain_observations.origin_node, \
-                                 'superseded_at', NOW()::text)) \
-                         ), \
-                         entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
-                         observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
-                         importance = GREATEST(brain_observations.importance, \
-                             EXCLUDED.importance), tags = EXCLUDED.tags, \
-                         session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
-                         embedding_model = EXCLUDED.embedding_model, \
-                         created_at = EXCLUDED.created_at, trust = EXCLUDED.trust, \
-                         embedding = CASE WHEN brain_observations.content IS DISTINCT FROM \
-                             EXCLUDED.content THEN NULL ELSE brain_observations.embedding END, \
-                         embedding_half = CASE WHEN brain_observations.content IS DISTINCT FROM \
-                             EXCLUDED.content THEN NULL ELSE brain_observations.embedding_half END \
-                         WHERE brain_observations.content IS DISTINCT FROM EXCLUDED.content"
-                    } else {
-                        "NOTHING"
-                    }
-                ))
-                .bind(obs.id)
-                .bind(entity_id)
-                .bind(&obs.content)
-                .bind(&obs.observation_type)
-                .bind(&obs.source)
-                .bind(obs.importance)
-                .bind(&obs.tags)
-                .bind(obs.session_id)
-                .bind(obs.project_id)
-                .bind(&obs.embedding_model)
-                .bind(obs.created_at)
-                .bind(trust)
-                .bind(obs.updated_at)
-                .bind(obs.version)
-                .bind(&obs.previous_versions)
-                .bind(&obs.origin_node)
-                .bind(&obs.evidence)
-                .bind(&obs.verification)
-                .bind(obs.verified_at)
-                .execute(&mut *tx)
+                if let Some(pattern) = reason {
+                    reasons.insert(obs.id, pattern);
+                }
+                obs_rows.push(serde_json::json!({
+                    "id": obs.id,
+                    "entity_id": entity_id,
+                    "content": obs.content,
+                    "observation_type": obs.observation_type,
+                    "source": obs.source,
+                    "importance": obs.importance,
+                    "tags": obs.tags,
+                    "session_id": obs.session_id,
+                    "project_id": obs.project_id,
+                    "embedding_model": obs.embedding_model,
+                    "created_at": obs.created_at,
+                    "trust": trust,
+                    "updated_at": obs.updated_at,
+                    "version": obs.version,
+                    "previous_versions": obs.previous_versions,
+                    "origin_node": obs.origin_node,
+                    "evidence": obs.evidence,
+                    "verification": obs.verification,
+                    "verified_at": obs.verified_at,
+                }));
+            }
+        }
+
+        if !obs_rows.is_empty() {
+            let batch = Value::Array(obs_rows);
+
+            if !overwrite {
+                let already: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT o.id
+                     FROM jsonb_to_recordset($1::jsonb) AS u(id uuid, content text)
+                     JOIN brain_observations o ON o.id = u.id
+                     WHERE o.content IS DISTINCT FROM u.content",
+                )
+                .bind(&batch)
+                .fetch_all(&mut *tx)
                 .await?;
-                inserted += r.rows_affected() as u32;
-                if let Some(pattern) = reason.filter(|_| r.rows_affected() > 0) {
+                diverged.extend(already);
+            }
+
+            let landed: Vec<Uuid> = sqlx::query_scalar(&format!(
+                "INSERT INTO brain_observations
+                    (id, entity_id, content, observation_type, source, importance,
+                     tags, session_id, project_id, embedding_model, created_at, trust,
+                     updated_at, version, previous_versions, origin_node,
+                     evidence, verification, verified_at)
+                 SELECT u.id, u.entity_id, u.content, u.observation_type, u.source,
+                        u.importance, COALESCE(u.tags, '{{}}'), u.session_id, u.project_id,
+                        u.embedding_model, u.created_at, u.trust,
+                        COALESCE(u.updated_at, NOW()), COALESCE(u.version, 1),
+                        COALESCE(u.previous_versions, '[]'::jsonb), u.origin_node,
+                        COALESCE(u.evidence, 'asserted'), u.verification, u.verified_at
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, entity_id uuid, content text, observation_type text,
+                     source text, importance float8, tags text[], session_id uuid,
+                     project_id uuid, embedding_model text, created_at timestamptz,
+                     trust text, updated_at timestamptz, version int,
+                     previous_versions jsonb, origin_node text, evidence text,
+                     verification text, verified_at timestamptz)
+                 ON CONFLICT (id) DO {}
+                 RETURNING id",
+                if overwrite {
+                    "UPDATE SET \
+                     previous_versions = brain_append_version( \
+                         brain_observations.previous_versions, \
+                         jsonb_build_array(jsonb_build_object( \
+                             'content', brain_observations.content, \
+                             'version', brain_observations.version, \
+                             'origin_node', brain_observations.origin_node, \
+                             'superseded_at', NOW()::text)) \
+                     ), \
+                     entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
+                     observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
+                     importance = GREATEST(brain_observations.importance, \
+                         EXCLUDED.importance), tags = EXCLUDED.tags, \
+                     session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
+                     embedding_model = EXCLUDED.embedding_model, \
+                     created_at = EXCLUDED.created_at, trust = EXCLUDED.trust, \
+                     embedding = CASE WHEN brain_observations.content IS DISTINCT FROM \
+                         EXCLUDED.content THEN NULL ELSE brain_observations.embedding END, \
+                     embedding_half = CASE WHEN brain_observations.content IS DISTINCT FROM \
+                         EXCLUDED.content THEN NULL ELSE brain_observations.embedding_half END \
+                     WHERE brain_observations.content IS DISTINCT FROM EXCLUDED.content"
+                } else {
+                    "NOTHING"
+                }
+            ))
+            .bind(&batch)
+            .fetch_all(&mut *tx)
+            .await?;
+
+            inserted += landed.len() as u32;
+            for id in &landed {
+                if let Some(pattern) = reasons.get(id) {
                     quarantined += 1;
                     *quarantine_reasons.entry(pattern).or_insert(0) += 1;
-                }
-                if !overwrite && r.rows_affected() == 0 {
-                    let same: Option<bool> = sqlx::query_scalar(
-                        "SELECT content = $2 FROM brain_observations WHERE id = $1",
-                    )
-                    .bind(obs.id)
-                    .bind(&obs.content)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .flatten();
-                    if same == Some(false) {
-                        diverged.push(obs.id);
-                    }
                 }
             }
         }
@@ -1688,6 +1749,9 @@ async fn import(
 
     let episodes_root = root.join("episodes");
     if episodes_root.exists() {
+        let mut batch: Vec<Value> = Vec::new();
+        let mut reasons: HashMap<Uuid, &'static str> = HashMap::new();
+        let mut seen: HashSet<Uuid> = HashSet::new();
         for month_entry in std::fs::read_dir(episodes_root)? {
             let month = month_entry?.path();
             if !month.is_dir() {
@@ -1699,52 +1763,79 @@ async fn import(
                     continue;
                 }
                 let f: EpisodeFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+                if !seen.insert(f.id) {
+                    continue;
+                }
                 let (trust, reason) = trust_for_imported(&f.content);
                 if let Some(pattern) = reason {
+                    reasons.insert(f.id, pattern);
+                }
+                batch.push(serde_json::json!({
+                    "id": f.id,
+                    "entity_id": resolve(&remapped, f.entity_id),
+                    "content": f.content,
+                    "actors": f.actors,
+                    "artifacts": f.artifacts,
+                    "importance": f.importance,
+                    "project_id": f.project_id,
+                    "started_at": f.started_at,
+                    "ended_at": f.ended_at,
+                    "trust": trust,
+                }));
+            }
+        }
+
+        if !batch.is_empty() {
+            let landed: Vec<Uuid> = sqlx::query_scalar(&format!(
+                "INSERT INTO brain_episodes
+                    (id, entity_id, content, actors, artifacts, importance,
+                     project_id, started_at, ended_at, trust)
+                 SELECT u.id, u.entity_id, u.content, COALESCE(u.actors, '{{}}'),
+                        COALESCE(u.artifacts, '{{}}'), u.importance, u.project_id,
+                        u.started_at, u.ended_at, u.trust
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, entity_id uuid, content text, actors text[], artifacts text[],
+                     importance float8, project_id uuid, started_at timestamptz,
+                     ended_at timestamptz, trust text)
+                 ON CONFLICT (id) DO {}
+                 RETURNING id",
+                if overwrite {
+                    "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
+                     actors = EXCLUDED.actors, artifacts = EXCLUDED.artifacts, \
+                     importance = EXCLUDED.importance, project_id = EXCLUDED.project_id, \
+                     started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, \
+                     trust = EXCLUDED.trust"
+                } else {
+                    "NOTHING"
+                }
+            ))
+            .bind(Value::Array(batch))
+            .fetch_all(&mut *tx)
+            .await?;
+            inserted += landed.len() as u32;
+            for id in &landed {
+                if let Some(pattern) = reasons.get(id) {
                     quarantined += 1;
                     *quarantine_reasons.entry(pattern).or_insert(0) += 1;
                 }
-                let r = sqlx::query(&format!(
-                    "INSERT INTO brain_episodes
-                        (id, entity_id, content, actors, artifacts, importance,
-                         project_id, started_at, ended_at, trust)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                     ON CONFLICT (id) DO {}",
-                    if overwrite {
-                        "UPDATE SET entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
-                         actors = EXCLUDED.actors, artifacts = EXCLUDED.artifacts, \
-                         importance = EXCLUDED.importance, project_id = EXCLUDED.project_id, \
-                         started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, \
-                         trust = EXCLUDED.trust"
-                    } else {
-                        "NOTHING"
-                    }
-                ))
-                .bind(f.id)
-                .bind(resolve(&remapped, f.entity_id))
-                .bind(&f.content)
-                .bind(&f.actors)
-                .bind(&f.artifacts)
-                .bind(f.importance)
-                .bind(f.project_id)
-                .bind(f.started_at)
-                .bind(f.ended_at)
-                .bind(trust)
-                .execute(&mut *tx)
-                .await?;
-                inserted += r.rows_affected() as u32;
             }
         }
     }
 
     let errors_dir = root.join("errors");
     if errors_dir.exists() {
+        let mut batch: Vec<Value> = Vec::new();
+        let mut reasons: HashMap<Uuid, &'static str> = HashMap::new();
+        let mut seen: HashSet<Uuid> = HashSet::new();
         for entry in std::fs::read_dir(errors_dir)? {
             let path = entry?.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
             let e: ErrorFile = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if !seen.insert(e.id) {
+                continue;
+            }
             let searchable = format!(
                 "{}\n{}",
                 e.error_message,
@@ -1752,15 +1843,34 @@ async fn import(
             );
             let (trust, reason) = trust_for_imported(&searchable);
             if let Some(pattern) = reason {
-                quarantined += 1;
-                *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+                reasons.insert(e.id, pattern);
             }
-            let r = sqlx::query(&format!(
+            batch.push(serde_json::json!({
+                "id": e.id,
+                "error_type": e.error_type,
+                "error_message": e.error_message,
+                "solution": e.solution,
+                "resolved": e.resolved,
+                "project": e.project,
+                "project_id": e.project_id,
+                "created_at": e.created_at,
+                "trust": trust,
+            }));
+        }
+
+        if !batch.is_empty() {
+            let landed: Vec<Uuid> = sqlx::query_scalar(&format!(
                 "INSERT INTO brain_errors
                     (id, error_type, error_message, solution, resolved,
                      project, project_id, created_at, trust)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                 ON CONFLICT (id) DO {}",
+                 SELECT u.id, u.error_type, u.error_message, u.solution, u.resolved,
+                        u.project, u.project_id, u.created_at, u.trust
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, error_type text, error_message text, solution text,
+                     resolved boolean, project text, project_id uuid,
+                     created_at timestamptz, trust text)
+                 ON CONFLICT (id) DO {}
+                 RETURNING id",
                 if overwrite {
                     "UPDATE SET error_type = EXCLUDED.error_type, \
                      error_message = EXCLUDED.error_message, solution = EXCLUDED.solution, \
@@ -1771,94 +1881,112 @@ async fn import(
                     "NOTHING"
                 }
             ))
-            .bind(e.id)
-            .bind(&e.error_type)
-            .bind(&e.error_message)
-            .bind(&e.solution)
-            .bind(e.resolved)
-            .bind(&e.project)
-            .bind(e.project_id)
-            .bind(e.created_at)
-            .bind(trust)
-            .execute(&mut *tx)
+            .bind(Value::Array(batch))
+            .fetch_all(&mut *tx)
             .await?;
-            inserted += r.rows_affected() as u32;
+            inserted += landed.len() as u32;
+            for id in &landed {
+                if let Some(pattern) = reasons.get(id) {
+                    quarantined += 1;
+                    *quarantine_reasons.entry(pattern).or_insert(0) += 1;
+                }
+            }
         }
     }
 
     let facts_path = root.join("facts.json");
     if facts_path.exists() {
         let facts: Vec<FactRow> = serde_json::from_slice(&std::fs::read(&facts_path)?)?;
-        for f in facts {
-            if tombstones.buried.contains(&f.fact_id) {
-                continue;
-            }
-            let r = sqlx::query(
+        let batch: Vec<Value> = facts
+            .iter()
+            .filter(|f| !tombstones.buried.contains(&f.fact_id))
+            .map(|f| {
+                serde_json::json!({
+                    "fact_id": f.fact_id,
+                    "subject": f.subject,
+                    "predicate": f.predicate,
+                    "object": f.object,
+                    "valid_from": f.valid_from,
+                    "observed_at": f.observed_at,
+                    "valid_to": f.valid_to,
+                    "subject_entity_id": f.subject_entity_id,
+                    "project_id": f.project_id,
+                    "confidence": f.confidence,
+                    "is_current": f.is_current,
+                    "created_at": f.created_at,
+                    "layer_name": f.layer_name,
+                })
+            })
+            .collect();
+
+        if !batch.is_empty() {
+            let payload = Value::Array(batch);
+            let landed: Vec<Uuid> = sqlx::query_scalar(
                 "INSERT INTO brain_facts
                     (fact_id, subject, predicate, object, valid_from, observed_at, valid_to,
                      subject_entity_id, project_id, confidence, is_current, created_at, layer_id)
-                 SELECT $1, $2, $3, $4, $5, $6, $7,
-                        (SELECT id FROM brain_entities WHERE id = $8),
-                        (SELECT id FROM brain_projects WHERE id = $9),
-                        COALESCE($10, 0.5), COALESCE($11, TRUE), COALESCE($12, NOW()),
-                        brain_layer_by_name($13)
-                 ON CONFLICT (fact_id) DO NOTHING",
+                 SELECT u.fact_id, u.subject, u.predicate, u.object, u.valid_from, u.observed_at,
+                        u.valid_to,
+                        (SELECT id FROM brain_entities WHERE id = u.subject_entity_id),
+                        (SELECT id FROM brain_projects WHERE id = u.project_id),
+                        COALESCE(u.confidence, 0.5), COALESCE(u.is_current, TRUE),
+                        COALESCE(u.created_at, NOW()), brain_layer_by_name(u.layer_name)
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     fact_id uuid, subject text, predicate text, object text,
+                     valid_from timestamptz, observed_at timestamptz, valid_to timestamptz,
+                     subject_entity_id uuid, project_id uuid, confidence float8,
+                     is_current boolean, created_at timestamptz, layer_name text)
+                 ON CONFLICT (fact_id) DO NOTHING
+                 RETURNING fact_id",
             )
-            .bind(f.fact_id)
-            .bind(&f.subject)
-            .bind(&f.predicate)
-            .bind(&f.object)
-            .bind(f.valid_from)
-            .bind(f.observed_at)
-            .bind(f.valid_to)
-            .bind(f.subject_entity_id)
-            .bind(f.project_id)
-            .bind(f.confidence)
-            .bind(f.is_current)
-            .bind(f.created_at)
-            .bind(&f.layer_name)
-            .execute(&mut *tx)
+            .bind(&payload)
+            .fetch_all(&mut *tx)
             .await?;
-            inserted += r.rows_affected() as u32;
+            inserted += landed.len() as u32;
 
-            if r.rows_affected() > 0 && f.is_current.unwrap_or(true) {
+            let arrived: HashSet<Uuid> = landed.into_iter().collect();
+            let current: Vec<Value> = facts
+                .iter()
+                .filter(|f| arrived.contains(&f.fact_id) && f.is_current.unwrap_or(true))
+                .map(|f| {
+                    serde_json::json!({
+                        "fact_id": f.fact_id,
+                        "subject": f.subject,
+                        "predicate": f.predicate,
+                        "observed_at": f.observed_at,
+                    })
+                })
+                .collect();
+
+            if !current.is_empty() {
+                let claims = Value::Array(current);
                 let closed = sqlx::query(
-                    "UPDATE brain_facts
-                     SET is_current = FALSE, valid_to = $4
-                     WHERE subject = $1 AND predicate = $2 AND fact_id <> $3
-                       AND is_current
-                       AND observed_at <= $4",
+                    "UPDATE brain_facts f SET is_current = FALSE, valid_to = u.observed_at
+                     FROM jsonb_to_recordset($1::jsonb) AS u(
+                         fact_id uuid, subject text, predicate text, observed_at timestamptz)
+                     WHERE f.subject = u.subject AND f.predicate = u.predicate
+                       AND f.fact_id <> u.fact_id AND f.is_current
+                       AND f.observed_at <= u.observed_at",
                 )
-                .bind(&f.subject)
-                .bind(&f.predicate)
-                .bind(f.fact_id)
-                .bind(f.observed_at)
+                .bind(&claims)
                 .execute(&mut *tx)
                 .await?;
                 superseded_facts += closed.rows_affected() as u32;
 
-                let newer: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM brain_facts
-                     WHERE subject = $1 AND predicate = $2 AND fact_id <> $3
-                       AND is_current AND observed_at > $4",
+                let self_closed = sqlx::query(
+                    "UPDATE brain_facts f SET is_current = FALSE, valid_to = u.observed_at
+                     FROM jsonb_to_recordset($1::jsonb) AS u(
+                         fact_id uuid, subject text, predicate text, observed_at timestamptz)
+                     WHERE f.fact_id = u.fact_id AND f.is_current
+                       AND EXISTS (SELECT 1 FROM brain_facts n
+                                   WHERE n.subject = u.subject AND n.predicate = u.predicate
+                                     AND n.fact_id <> u.fact_id AND n.is_current
+                                     AND n.observed_at > u.observed_at)",
                 )
-                .bind(&f.subject)
-                .bind(&f.predicate)
-                .bind(f.fact_id)
-                .bind(f.observed_at)
-                .fetch_one(&mut *tx)
+                .bind(&claims)
+                .execute(&mut *tx)
                 .await?;
-                if newer > 0 {
-                    sqlx::query(
-                        "UPDATE brain_facts SET is_current = FALSE, valid_to = $2
-                         WHERE fact_id = $1",
-                    )
-                    .bind(f.fact_id)
-                    .bind(f.observed_at)
-                    .execute(&mut *tx)
-                    .await?;
-                    superseded_facts += 1;
-                }
+                superseded_facts += self_closed.rows_affected() as u32;
             }
         }
     }
@@ -1867,17 +1995,47 @@ async fn import(
     if procedures_path.exists() {
         let procedures: Vec<ProcedureRow> =
             serde_json::from_slice(&std::fs::read(&procedures_path)?)?;
-        for p in procedures {
-            if tombstones.buried.contains(&p.id) {
-                continue;
-            }
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let batch: Vec<Value> = procedures
+            .iter()
+            .filter(|p| !tombstones.buried.contains(&p.id) && seen.insert(p.id))
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "steps": p.steps,
+                    "created_at": p.created_at,
+                    "updated_at": p.updated_at,
+                    "trigger_context": p.trigger_context,
+                    "preconditions": p.preconditions,
+                    "verification": p.verification,
+                    "success_count": p.success_count,
+                    "failure_count": p.failure_count,
+                    "last_outcome": p.last_outcome,
+                    "last_used_at": p.last_used_at,
+                    "project_id": p.project_id,
+                    "embedding_model": p.embedding_model,
+                })
+            })
+            .collect();
+
+        if !batch.is_empty() {
             let r = sqlx::query(&format!(
                 "INSERT INTO brain_procedures
                     (id, name, steps, created_at, updated_at, trigger_context, preconditions,
                      verification, success_count, failure_count, last_outcome, last_used_at,
                      project_id, embedding_model)
-                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        (SELECT id FROM brain_projects WHERE id = $13), $14
+                 SELECT u.id, u.name, u.steps, u.created_at, u.updated_at, u.trigger_context,
+                        u.preconditions, u.verification, u.success_count, u.failure_count,
+                        u.last_outcome, u.last_used_at,
+                        (SELECT id FROM brain_projects WHERE id = u.project_id),
+                        u.embedding_model
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, name text, steps jsonb, created_at timestamptz,
+                     updated_at timestamptz, trigger_context text, preconditions text,
+                     verification text, success_count int, failure_count int,
+                     last_outcome text, last_used_at timestamptz, project_id uuid,
+                     embedding_model text)
                  ON CONFLICT (id) DO {}",
                 if overwrite {
                     "UPDATE SET name = EXCLUDED.name, steps = EXCLUDED.steps, \
@@ -1897,20 +2055,7 @@ async fn import(
                          EXCLUDED.failure_count)"
                 }
             ))
-            .bind(p.id)
-            .bind(&p.name)
-            .bind(&p.steps)
-            .bind(p.created_at)
-            .bind(p.updated_at)
-            .bind(&p.trigger_context)
-            .bind(&p.preconditions)
-            .bind(&p.verification)
-            .bind(p.success_count)
-            .bind(p.failure_count)
-            .bind(&p.last_outcome)
-            .bind(p.last_used_at)
-            .bind(p.project_id)
-            .bind(&p.embedding_model)
+            .bind(Value::Array(batch))
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
@@ -1920,18 +2065,24 @@ async fn import(
     let trust_path = root.join("source_trust.json");
     if trust_path.exists() {
         let trust: Vec<SourceTrustRow> = serde_json::from_slice(&std::fs::read(&trust_path)?)?;
-        for t in trust {
+        let mut seen: HashSet<String> = HashSet::new();
+        let batch: Vec<Value> = trust
+            .iter()
+            .filter(|t| seen.insert(t.source.clone()))
+            .map(|t| serde_json::json!({"source": t.source, "alpha": t.alpha, "beta": t.beta}))
+            .collect();
+
+        if !batch.is_empty() {
             let r = sqlx::query(
                 "INSERT INTO brain_source_trust (source, alpha, beta)
-                 VALUES ($1, $2, $3)
+                 SELECT u.source, u.alpha, u.beta
+                 FROM jsonb_to_recordset($1::jsonb) AS u(source text, alpha float8, beta float8)
                  ON CONFLICT (source) DO UPDATE SET
                      alpha = GREATEST(brain_source_trust.alpha, EXCLUDED.alpha),
                      beta = GREATEST(brain_source_trust.beta, EXCLUDED.beta),
                      updated_at = NOW()",
             )
-            .bind(&t.source)
-            .bind(t.alpha)
-            .bind(t.beta)
+            .bind(Value::Array(batch))
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
@@ -1941,12 +2092,38 @@ async fn import(
     let relations_path = root.join("relations.json");
     if relations_path.exists() {
         let rels: Vec<RelationRow> = serde_json::from_slice(&std::fs::read(relations_path)?)?;
-        for rel in rels {
+        let mut seen: HashSet<(Uuid, Uuid, String)> = HashSet::new();
+        let mut batch: Vec<Value> = Vec::with_capacity(rels.len());
+        for rel in &rels {
+            let from = resolve(&remapped, rel.from_entity);
+            let to = resolve(&remapped, rel.to_entity);
+            if !seen.insert((from, to, rel.relation_type.clone())) {
+                continue;
+            }
+            batch.push(serde_json::json!({
+                "id": rel.id,
+                "from_entity": from,
+                "to_entity": to,
+                "relation_type": rel.relation_type,
+                "strength": rel.strength,
+                "bidirectional": rel.bidirectional,
+                "project_id": rel.project_id,
+                "created_at": rel.created_at,
+                "provenance": rel.provenance,
+            }));
+        }
+
+        if !batch.is_empty() {
             let r = sqlx::query(&format!(
                 "INSERT INTO brain_relations
                     (id, from_entity, to_entity, relation_type, strength,
                      bidirectional, project_id, created_at, provenance)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 SELECT u.id, u.from_entity, u.to_entity, u.relation_type, u.strength,
+                        u.bidirectional, u.project_id, u.created_at, u.provenance
+                 FROM jsonb_to_recordset($1::jsonb) AS u(
+                     id uuid, from_entity uuid, to_entity uuid, relation_type text,
+                     strength float8, bidirectional boolean, project_id uuid,
+                     created_at timestamptz, provenance text)
                  ON CONFLICT (from_entity, to_entity, relation_type) DO {}",
                 if overwrite {
                     "UPDATE SET \
@@ -1958,15 +2135,7 @@ async fn import(
                      strength = GREATEST(brain_relations.strength, EXCLUDED.strength)"
                 }
             ))
-            .bind(rel.id)
-            .bind(resolve(&remapped, rel.from_entity))
-            .bind(resolve(&remapped, rel.to_entity))
-            .bind(&rel.relation_type)
-            .bind(rel.strength)
-            .bind(rel.bidirectional)
-            .bind(rel.project_id)
-            .bind(rel.created_at)
-            .bind(&rel.provenance)
+            .bind(Value::Array(batch))
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
