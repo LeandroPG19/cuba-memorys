@@ -90,7 +90,7 @@ cargo test --test integration --test v08_project_scoping --test v09_integration 
            --test v021_import_quarantine_all_kinds \
            --test v022_merge_reports_what_it_drops --test v022_sync_takes_a_lock \
            --test v022_same_name_different_id --test v022_bundle_is_validated_first --test v023_tombstones --test v023_node_identity \
-           --test v023_sync_clock --test v023_history_is_kept \
+           --test v023_sync_clock --test v023_history_is_kept --test v023_counters_merge \
            --test v016_quarantine --test v016_relation_extraction \
            --test v017_codegraph_hardening \
            -- --ignored --nocapture

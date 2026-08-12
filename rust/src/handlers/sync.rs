@@ -960,10 +960,13 @@ async fn import(
                  ON CONFLICT (id) DO {}",
                 if overwrite {
                     "UPDATE SET name = EXCLUDED.name, entity_type = EXCLUDED.entity_type, \
-                     importance = EXCLUDED.importance, access_count = EXCLUDED.access_count, \
+                     importance = GREATEST(brain_entities.importance, EXCLUDED.importance), \
+                     access_count = GREATEST(brain_entities.access_count, EXCLUDED.access_count), \
                      project_id = EXCLUDED.project_id, created_at = EXCLUDED.created_at"
                 } else {
-                    "NOTHING"
+                    "UPDATE SET \
+                     importance = GREATEST(brain_entities.importance, EXCLUDED.importance), \
+                     access_count = GREATEST(brain_entities.access_count, EXCLUDED.access_count)"
                 }
             ))
             .bind(entity_id)
@@ -1000,7 +1003,8 @@ async fn import(
                          ), \
                          entity_id = EXCLUDED.entity_id, content = EXCLUDED.content, \
                          observation_type = EXCLUDED.observation_type, source = EXCLUDED.source, \
-                         importance = EXCLUDED.importance, tags = EXCLUDED.tags, \
+                         importance = GREATEST(brain_observations.importance, \
+                             EXCLUDED.importance), tags = EXCLUDED.tags, \
                          session_id = EXCLUDED.session_id, project_id = EXCLUDED.project_id, \
                          embedding_model = EXCLUDED.embedding_model, \
                          created_at = EXCLUDED.created_at, trust = EXCLUDED.trust, \
@@ -1160,11 +1164,13 @@ async fn import(
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (from_entity, to_entity, relation_type) DO {}",
                 if overwrite {
-                    "UPDATE SET strength = EXCLUDED.strength, \
+                    "UPDATE SET \
+                     strength = GREATEST(brain_relations.strength, EXCLUDED.strength), \
                      bidirectional = EXCLUDED.bidirectional, project_id = EXCLUDED.project_id, \
                      created_at = EXCLUDED.created_at, provenance = EXCLUDED.provenance"
                 } else {
-                    "NOTHING"
+                    "UPDATE SET \
+                     strength = GREATEST(brain_relations.strength, EXCLUDED.strength)"
                 }
             ))
             .bind(rel.id)
