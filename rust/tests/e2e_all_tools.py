@@ -1068,13 +1068,138 @@ def cleanup():
         )
 
 
+def test_refused(
+    tool_name: str, action: str, request: Dict[str, Any], expect_in_message: str
+) -> None:
+    """
+    Execute a call that MUST be refused, and record a pass only when it is.
+
+    Every other test in this file treats an error as failure, which made a refusal
+    impossible to express: the suite could only ever prove that the happy path answers.
+    A refusal reaches the client as a JSON-RPC error with the reason in its message, so
+    that is what this asserts on — and it asserts on the reason, not just on failure,
+    because a tool that is broken for an unrelated reason also fails.
+    """
+    global tests_run, tests_passed, tests_failed, failed_tests
+
+    tests_run += 1
+    test_id = f"{tool_name}/{action} [refused]"
+    print(f"\n[TEST {tests_run}] {test_id}")
+
+    full_request = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": request},
+    }
+
+    response = invoke_mcp(full_request)
+    if response is None:
+        print("  FAIL: MCP invocation failed outright, which is not the same as a refusal")
+        tests_failed += 1
+        failed_tests.append(test_id)
+        return
+
+    message = ""
+    if "error" in response:
+        message = str(response["error"].get("message", ""))
+    else:
+        content = extract_tool_result(response) or ""
+        message = content
+
+    if not message or expect_in_message.lower() not in message.lower():
+        print(f"  FAIL: expected a refusal mentioning «{expect_in_message}», got: {message[:220]}")
+        tests_failed += 1
+        failed_tests.append(test_id)
+        return
+
+    print(f"  PASS: {test_id}")
+    tests_passed += 1
+
+
+def test_refusals():
+    """
+    The refusals. Each one is a door that was open until this session.
+
+    The last case is the point of the group: a gate that refuses everything is not a
+    gate, it is an outage. Prose that talks about credentials, and the explicit
+    allow_secret escape hatch, both have to keep working.
+    """
+    print("\n" + "=" * 60)
+    print("REFUSALS — calls that must be turned away")
+    print("=" * 60)
+
+    test_refused(
+        "cuba_pizarra",
+        "write with a credential",
+        {"action": "write", "content": "el token es ghp_abcdefghijklmnop", "ttl_minutes": 5},
+        "refusing to write",
+    )
+
+    test_refused(
+        "cuba_cronica",
+        "add with a credential",
+        {
+            "action": "add",
+            "entity_name": "e2e_refusals",
+            "content": "conectar con postgresql://cuba:hunter2-fake@10.0.0.1:5432/brain",
+        },
+        "refusing to write",
+    )
+
+    test_refused(
+        "cuba_eco",
+        "promote with an unknown kind",
+        {"action": "promote", "kind": "banana", "id": str(uuid.uuid4())},
+        "kind",
+    )
+
+    test_refused(
+        "cuba_sync",
+        "export outside the confined root",
+        {"action": "export", "dir": "/etc/cuba-escape"},
+        "traversal",
+    )
+
+    test_refused(
+        "cuba_archivo",
+        "an action that does not exist",
+        {"action": "definitely_not_an_action"},
+        "invalid action",
+    )
+
+    allowed = test(
+        "cuba_pizarra",
+        "write with allow_secret",
+        {
+            "action": "write",
+            "content": "rotar el token ghp_abcdefghijklmnop del despliegue",
+            "ttl_minutes": 5,
+            "allow_secret": True,
+        },
+    )
+    if allowed is None:
+        print("  NOTE: allow_secret is the documented way through; if it stops working the")
+        print("        gate has become an outage rather than a guard")
+
+    test(
+        "cuba_pizarra",
+        "write prose about credentials",
+        {
+            "action": "write",
+            "content": "hay que validar la password antes de guardarla y rotar el token de sesion",
+            "ttl_minutes": 5,
+        },
+    )
+
+
 def main():
     """Run all E2E tests."""
     global tests_run, tests_passed, tests_failed
 
     print("\n")
     print("=" * 60)
-    print("CUBA-MEMORYS E2E TEST SUITE - ALL 25 TOOLS")
+    print("CUBA-MEMORYS E2E TEST SUITE - ALL TOOLS, HAPPY PATH AND REFUSALS")
     print(f"binary:  {BINARY_PATH}")
     print(f"timeout: {CALL_TIMEOUT_SECS}s per call (CUBA_E2E_TIMEOUT_SECS)")
     print("=" * 60)
@@ -1094,6 +1219,7 @@ def main():
     test_cuba_zafra()
     test_cuba_forget()
     test_v08_v09_tools()
+    test_refusals()
 
     # Cleanup
     cleanup()
