@@ -1,4 +1,4 @@
-use cuba_memorys::handlers::archivo::{audit_key, hash_matches};
+use cuba_memorys::handlers::archivo::{ChainVerdict, HashKind, audit_key, classify_hash, ratchet};
 
 const PREV: &[u8] = b"previous";
 const ACTION: &str = "test";
@@ -35,26 +35,28 @@ fn the_key_is_resolved_from_env_then_disk_and_legacy_sha256_rows_keep_verifying(
          happened to have ~/.cache/cuba-memorys/audit_key"
     );
 
-    assert!(
-        hash_matches(
+    assert_eq!(
+        classify_hash(
             &sha256_chain(PREV, ACTION, PAYLOAD, STAMP),
             PREV,
             ACTION,
             PAYLOAD,
             STAMP
         ),
+        HashKind::Sha256,
         "without a key the chain is plain SHA-256 over prev|action|payload|timestamp; the \
          framing is spelled out here because archivo.rs exposes no public hash producer"
     );
 
-    assert!(
-        !hash_matches(
+    assert_eq!(
+        classify_hash(
             &sha256_chain(PREV, ACTION, PAYLOAD, STAMP),
             PREV,
             ACTION,
             br#"{"a":2}"#,
             STAMP
         ),
+        HashKind::Neither,
         "editing the payload of a stored row must break its hash — a verifier that accepts \
          a rewritten payload turns the append-only log into decoration"
     );
@@ -78,16 +80,18 @@ fn the_key_is_resolved_from_env_then_disk_and_legacy_sha256_rows_keep_verifying(
         "the key must be picked up from the environment"
     );
 
-    assert!(
-        hash_matches(
+    assert_eq!(
+        classify_hash(
             &sha256_chain(PREV, ACTION, PAYLOAD, STAMP),
             PREV,
             ACTION,
             PAYLOAD,
             STAMP
         ),
-        "rows written before the key was introduced must keep verifying, otherwise turning on \
-         HMAC would report the whole existing chain as tampered"
+        HashKind::Sha256,
+        "a row written before the key existed still recomputes as SHA-256 with the key set. \
+         Recognising it is right; what the ratchet decides is whether recognising it means \
+         accepting it, and that depends on where in the chain it sits"
     );
 
     unsafe { std::env::remove_var("CUBA_AUDIT_KEY") };
@@ -136,4 +140,62 @@ fn a_key_actually_produces_a_different_hash_than_no_key() {
     );
 
     unsafe { std::env::remove_var("CUBA_AUDIT_KEY") };
+}
+
+#[test]
+fn a_sha256_row_after_the_chain_is_sealed_is_a_downgrade_not_a_legacy_row() {
+    assert_eq!(
+        ratchet(HashKind::Sha256, false),
+        ChainVerdict::Unprotected,
+        "before any HMAC row appears every row predates the key, so SHA-256 is the only thing \
+         it could be. Rejecting these would report a whole honest chain as tampered the day \
+         the operator sets a key"
+    );
+
+    assert_eq!(
+        ratchet(HashKind::Sha256, true),
+        ChainVerdict::Downgraded,
+        "this is the hole the old hash_matches left open. It tried HMAC and then fell through \
+         to SHA-256 unconditionally, so with a key set an attacker with INSERT wrote rows in \
+         SHA-256 and verify called them good — the same shape as accepting a JWT with alg=none. \
+         The ratchet is what closes it: once one row has verified under the key, no later row \
+         may be plain SHA-256, and an attacker cannot plant one before that point without \
+         breaking the prev_hash link of every row after it"
+    );
+
+    assert_eq!(ratchet(HashKind::Hmac, false), ChainVerdict::Protected);
+    assert_eq!(ratchet(HashKind::Hmac, true), ChainVerdict::Protected);
+    assert_eq!(ratchet(HashKind::Neither, false), ChainVerdict::Broken);
+    assert_eq!(ratchet(HashKind::Neither, true), ChainVerdict::Broken);
+}
+
+#[test]
+fn the_ratchet_only_moves_one_way() {
+    let chain = [
+        HashKind::Sha256,
+        HashKind::Sha256,
+        HashKind::Hmac,
+        HashKind::Hmac,
+    ];
+    let mut sealed = false;
+    let mut unprotected = 0;
+    for kind in chain {
+        match ratchet(kind, sealed) {
+            ChainVerdict::Protected => sealed = true,
+            ChainVerdict::Unprotected => unprotected += 1,
+            other => panic!("an honest migration to a key must not produce {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        unprotected, 2,
+        "the two rows older than the key are accepted and counted, because a verifier that \
+         hides how many rows carry no protection is reporting a security property it does \
+         not have"
+    );
+    assert_eq!(
+        ratchet(HashKind::Sha256, sealed),
+        ChainVerdict::Downgraded,
+        "and once sealed it stays sealed for every row that follows"
+    );
 }

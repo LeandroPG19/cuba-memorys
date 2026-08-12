@@ -149,7 +149,11 @@ fn audit_chain_check(keyed: bool, rows: i64) -> Check {
     if keyed {
         return Check::ok(
             "audit_chain",
-            format!("{rows} filas encadenadas con HMAC — la clave está resuelta"),
+            format!(
+                "clave resuelta: las filas nuevas se sellan con HMAC y una SHA-256 posterior \
+                 se rechaza. De las {rows} ya escritas, `cuba_archivo verify` dice cuántas \
+                 son anteriores a la clave"
+            ),
         );
     }
     Check::warn(

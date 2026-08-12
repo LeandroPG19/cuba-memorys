@@ -86,7 +86,7 @@ provision_gate_db
 echo "=== DB integration tests (--ignored) ==="
 export DATABASE_URL="$GATE_DATABASE_URL"
 cargo test --test integration --test v08_project_scoping --test v09_integration \
-           --test v021_audit_append_under_app_role \
+           --test v021_audit_append_under_app_role --test v021_audit_downgrade \
            --test v016_quarantine --test v016_relation_extraction \
            --test v017_codegraph_hardening \
            -- --ignored --nocapture

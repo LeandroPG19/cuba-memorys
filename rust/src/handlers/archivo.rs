@@ -77,19 +77,46 @@ fn compute_hmac(
     mac.finalize().into_bytes().to_vec()
 }
 
-pub fn hash_matches(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashKind {
+    Hmac,
+    Sha256,
+    Neither,
+}
+
+pub fn classify_hash(
     stored: &[u8],
     prev_hash: &[u8],
     action: &str,
     payload: &[u8],
     created_at_iso: &str,
-) -> bool {
+) -> HashKind {
     if let Some(key) = audit_key()
         && compute_hmac(&key, prev_hash, action, payload, created_at_iso) == stored
     {
-        return true;
+        return HashKind::Hmac;
     }
-    compute_sha256(prev_hash, action, payload, created_at_iso) == stored
+    if compute_sha256(prev_hash, action, payload, created_at_iso) == stored {
+        return HashKind::Sha256;
+    }
+    HashKind::Neither
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainVerdict {
+    Protected,
+    Unprotected,
+    Downgraded,
+    Broken,
+}
+
+pub fn ratchet(kind: HashKind, sealed: bool) -> ChainVerdict {
+    match (kind, sealed) {
+        (HashKind::Hmac, _) => ChainVerdict::Protected,
+        (HashKind::Sha256, false) => ChainVerdict::Unprotected,
+        (HashKind::Sha256, true) => ChainVerdict::Downgraded,
+        (HashKind::Neither, _) => ChainVerdict::Broken,
+    }
 }
 
 async fn append(pool: &PgPool, args: &Value) -> Result<Value> {
@@ -215,6 +242,8 @@ async fn verify(pool: &PgPool, args: &Value) -> Result<Value> {
     .await?;
 
     let mut last_hash: Vec<u8> = Vec::new();
+    let mut sealed = false;
+    let mut unprotected = 0usize;
     for (id, prev_hash, action, payload, stored_hash, created_at) in &rows {
         let prev_for_check = prev_hash.clone().unwrap_or_default();
         if prev_for_check != last_hash {
@@ -226,28 +255,62 @@ async fn verify(pool: &PgPool, args: &Value) -> Result<Value> {
             }));
         }
         let payload_bytes = serde_json::to_vec(payload)?;
-        if !hash_matches(
+        let kind = classify_hash(
             stored_hash,
             &prev_for_check,
             action,
             &payload_bytes,
             &canonical_iso(*created_at),
-        ) {
-            return Ok(serde_json::json!({
-                "action": "verify",
-                "ok": false,
-                "first_break_id": id,
-                "reason": "current_hash recomputation differs (row tampered)"
-            }));
+        );
+        match ratchet(kind, sealed) {
+            ChainVerdict::Protected => sealed = true,
+            ChainVerdict::Unprotected => unprotected += 1,
+            ChainVerdict::Downgraded => {
+                return Ok(serde_json::json!({
+                    "action": "verify",
+                    "ok": false,
+                    "first_break_id": id,
+                    "reason": "row is plain SHA-256 after the chain was already sealed with a \
+                               key. A downgrade is what a forged row looks like: whoever wrote \
+                               it could compute SHA-256 but not the HMAC"
+                }));
+            }
+            ChainVerdict::Broken => {
+                let reason = if sealed {
+                    "current_hash recomputation differs (row tampered). Earlier rows verified \
+                     with this key, so the key is the right one and the row is not"
+                } else {
+                    "current_hash recomputation differs: either the row was tampered with or \
+                     CUBA_AUDIT_KEY is not the key this chain was written with. No row has \
+                     verified with the current key yet, so both remain possible"
+                };
+                return Ok(serde_json::json!({
+                    "action": "verify",
+                    "ok": false,
+                    "first_break_id": id,
+                    "reason": reason
+                }));
+            }
         }
         last_hash = stored_hash.clone();
     }
 
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "action": "verify",
         "ok": true,
         "rows_checked": rows.len(),
-    }))
+        "unprotected_rows": unprotected,
+    });
+    if unprotected > 0 {
+        out["what_this_does_not_establish"] = serde_json::json!(format!(
+            "{unprotected} of {} rows are plain SHA-256, which anyone with INSERT on \
+             brain_audit_log can reproduce. They are accepted because they predate the key, \
+             not because they are tamper-evident. Set CUBA_AUDIT_KEY to seal the chain from \
+             here on.",
+            rows.len()
+        ));
+    }
+    Ok(out)
 }
 
 async fn tail(pool: &PgPool, args: &Value) -> Result<Value> {
