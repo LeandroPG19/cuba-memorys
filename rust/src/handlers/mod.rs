@@ -107,6 +107,23 @@ pub async fn dispatch(pool: &PgPool, tool_name: &str, args: Value) -> Result<Val
     crate::observability::record_handler(tool_name, outcome, elapsed.as_secs_f64());
     tracing::info!(tool = %tool_name, elapsed_ms = %elapsed_ms, outcome = %outcome, "handler completed");
 
+    if let Err(why) = &dispatch_result {
+        let redacted = crate::redact::redact_secrets(&format!("{why:#}"));
+        let recorded = sqlx::query(
+            "INSERT INTO brain_handler_failures (tool, client, error, elapsed_ms)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(tool_name)
+        .bind(crate::session::current_client())
+        .bind(&redacted)
+        .bind(elapsed_ms.min(i32::MAX as u128) as i32)
+        .execute(pool)
+        .await;
+        if let Err(e) = recorded {
+            tracing::warn!(error = %e, "could not record the handler failure");
+        }
+    }
+
     let result = dispatch_result?;
 
     Ok(serde_json::json!({

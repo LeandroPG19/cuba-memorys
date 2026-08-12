@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod calibrate_cli;
 pub mod cli;
 pub mod codegraph;

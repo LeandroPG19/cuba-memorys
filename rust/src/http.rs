@@ -171,11 +171,14 @@ pub async fn serve_pool(addr: &str, pool: PgPool, connected: bool) -> Result<()>
         tokio::spawn(async move { shutdown_when_idle(last_activity, idle_after, notify).await });
     }
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/mcp", post(mcp_endpoint))
-        .route("/health", get(health))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(state);
+        .route("/health", get(health));
+    if panel_enabled() {
+        tracing::info!("control panel at http://{addr}/panel");
+        app = app.route("/panel", get(panel));
+    }
+    let app = app.layer(DefaultBodyLimit::max(MAX_BODY)).with_state(state);
 
     let listener = match systemd_listener() {
         Some(std_listener) => {
@@ -416,6 +419,66 @@ fn error_envelope(id: Value, code: i64, message: impl Into<String>) -> Value {
     })
 }
 
+fn panel_enabled() -> bool {
+    std::env::var("CUBA_PANEL").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn panel_allows_forwarded() -> bool {
+    std::env::var("CUBA_PANEL_PUBLIC").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn came_through_a_proxy(headers: &HeaderMap) -> bool {
+    ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"]
+        .iter()
+        .any(|h| headers.contains_key(*h))
+}
+
+async fn panel(headers: HeaderMap) -> Response {
+    if came_through_a_proxy(&headers) && !panel_allows_forwarded() {
+        return (
+            StatusCode::FORBIDDEN,
+            "This request carries a forwarding header, so it reached the daemon through a \
+             tunnel or proxy rather than from this machine. The panel drives the admin token, \
+             which can call every tool. Set CUBA_PANEL_PUBLIC=1 if you meant to publish it.\n",
+        )
+            .into_response();
+    }
+
+    let mut response = (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("panel/index.html"),
+    )
+        .into_response();
+
+    let h = response.headers_mut();
+    h.insert(
+        "content-security-policy",
+        axum::http::HeaderValue::from_static(
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+             connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; \
+             frame-ancestors 'none'",
+        ),
+    );
+    h.insert(
+        "x-frame-options",
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        "x-content-type-options",
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        "referrer-policy",
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        "cache-control",
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(scope) = authorized(&state, &headers) else {
         return (
@@ -509,6 +572,41 @@ async fn dispatch_one(state: &AppState, key: &str, scope: Scope, item: Value) ->
     let req_id = request.id.clone().unwrap_or(Value::Null);
     let pool = state.pool.clone();
     let method = request.method.clone();
+
+    if crate::admin::is_admin_method(&method) {
+        if scope != Scope::Full {
+            return Some(error_envelope(
+                req_id,
+                -32001,
+                "a peer token cannot reach the admin surface. The read-only scope exists so the \
+                 other machine cannot call cuba_forget, and admin/* would hand it the same \
+                 answers through a different door",
+            ));
+        }
+        let connected: Vec<Value> = state
+            .seen
+            .read()
+            .map(|g| {
+                g.iter()
+                    .map(|(name, last)| {
+                        serde_json::json!({
+                            "client": name,
+                            "idle_secs": last.elapsed().as_secs(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let uptime = state.started.elapsed().as_secs();
+        return Some(
+            match crate::admin::handle(&pool, &method, uptime, connected).await {
+                Ok(result) => serde_json::json!({
+                    "jsonrpc": "2.0", "id": req_id, "result": result
+                }),
+                Err(e) => error_envelope(req_id, -32603, format!("{e:#}")),
+            },
+        );
+    }
 
     let work = crate::session::with_client(key.to_string(), async move {
         crate::session::with_scope(scope, protocol::handle_request(&pool, request)).await

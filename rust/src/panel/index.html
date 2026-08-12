@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cuba-memorys · panel</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
+    --dim: #949cad; --ok: #4ade80; --warn: #fbbf24; --fail: #f87171; --accent: #7dd3fc;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #ffffff; --line: #e2e5ea; --text: #16181d;
+      --dim: #5c6470; --ok: #15803d; --warn: #a16207; --fail: #b91c1c; --accent: #0369a1;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 2;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+  .grow { flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); }
+  .dot.fail { background: var(--fail); }
+  main { padding: 20px; display: grid; gap: 16px; max-width: 1200px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  section > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600;
+  }
+  .body { padding: 14px 16px; overflow-x: auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .card .k { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .card .v { font-size: 20px; font-weight: 600; margin-top: 2px; word-break: break-word; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  input[type=password], input[type=text] {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; font: inherit; min-width: 260px;
+  }
+  .muted { color: var(--dim); }
+  .note { color: var(--dim); font-size: 12px; margin-top: 10px; }
+  .pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+           padding: 0 8px; font-size: 11px; line-height: 1.6; white-space: nowrap; }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.fail { color: var(--fail); border-color: var(--fail); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+  @media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+  .gate { max-width: 560px; margin: 60px auto; }
+  .gate p { color: var(--dim); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate" hidden>
+  <section>
+    <h2>Token</h2>
+    <div class="body">
+      <p>El panel no guarda nada: pide todo por <code>/mcp</code> con el mismo token
+         bearer que usa cualquier cliente MCP. Se queda en <code>sessionStorage</code>
+         y muere al cerrar la pestaña.</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <input id="token" type="password" placeholder="CUBA_HTTP_TOKEN" autocomplete="off">
+        <button class="primary" id="enter">Entrar</button>
+      </div>
+      <p class="note" id="gate-error"></p>
+    </div>
+  </section>
+</div>
+
+<div id="app" hidden>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>cuba-memorys</h1>
+  <span class="mono muted" id="head-version"></span>
+  <span class="grow"></span>
+  <span class="muted mono" id="head-updated"></span>
+  <button id="toggle">Pausar</button>
+  <button id="logout">Salir</button>
+</header>
+
+<main>
+  <section>
+    <h2>Estado</h2>
+    <div class="body"><div class="cards" id="status-cards"></div></div>
+  </section>
+
+  <section>
+    <h2>Problemas</h2>
+    <div class="body" id="problems"></div>
+  </section>
+
+  <section>
+    <h2>Quién está conectado</h2>
+    <div class="body two">
+      <div>
+        <table id="clients"></table>
+        <div class="note">Los clientes vistos viven en memoria y se purgan a las 24 h.</div>
+      </div>
+      <div><table id="peers"></table></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Llamadas</h2>
+    <div class="body">
+      <div class="two">
+        <table id="totals"></table>
+        <table id="recent"></table>
+      </div>
+      <div class="note" id="traffic-note"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Diagnóstico completo</h2>
+    <div class="body"><table id="checks"></table></div>
+  </section>
+</main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let timer = null, running = true, rpcId = 0;
+
+function token() { return sessionStorage.getItem("cuba_panel_token") || ""; }
+
+async function rpc(method, params) {
+  const res = await fetch("/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json", "authorization": "Bearer " + token() },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params: params || {} })
+  });
+  if (res.status === 401) { throw new Error("unauthorized"); }
+  const body = await res.json();
+  if (body.error) { throw new Error(body.error.message || "error"); }
+  return body.result;
+}
+
+async function callTool(name, args) {
+  const r = await rpc("tools/call", { name, arguments: args });
+  const text = r && r.content && r.content[0] && r.content[0].text;
+  return text ? JSON.parse(text) : r;
+}
+
+const esc = (s) => String(s === null || s === undefined ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+function ago(secs) {
+  if (secs === null || secs === undefined) return "—";
+  if (secs < 60) return secs + " s";
+  if (secs < 3600) return Math.floor(secs / 60) + " min";
+  if (secs < 86400) return Math.floor(secs / 3600) + " h";
+  return Math.floor(secs / 86400) + " d";
+}
+
+function when(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d) ? esc(iso) : d.toLocaleString();
+}
+
+function card(k, v) {
+  return '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>';
+}
+
+function table(headers, rows) {
+  if (!rows.length) return '<tr><td class="muted">Nada por aquí.</td></tr>';
+  return '<tr>' + headers.map((h) => '<th>' + esc(h) + '</th>').join('') + '</tr>' + rows.join('');
+}
+
+function renderStatus(s) {
+  $("head-version").textContent = "v" + s.version + " · " + s.address;
+  const c = s.corpus || {};
+  $("status-cards").innerHTML = [
+    card("Actividad", ago(s.uptime_secs)),
+    card("Base", s.database_size || "—"),
+    card("Migraciones", s.migrations_applied),
+    card("Herramientas", s.tools),
+    card("Observaciones", c.observations),
+    card("Entidades", c.entities),
+    card("Hechos", c.facts),
+    card("Relaciones", c.relations),
+    card("Vector", s.embedding_dim + " dim"),
+    card("Nodo", s.node_name || (s.node_id || "").slice(0, 8) || "—")
+  ].join("");
+
+  const rows = (s.checks || []).map((k) =>
+    '<tr><td><span class="pill ' + esc(k.status) + '">' + esc(k.status) + '</span></td>' +
+    '<td class="mono">' + esc(k.name) + '</td><td>' + esc(k.detail) +
+    (k.hint ? '<div class="muted">' + esc(k.hint) + '</div>' : '') + '</td></tr>');
+  $("checks").innerHTML = table(["", "Chequeo", "Detalle"], rows);
+
+  const worst = (s.checks || []).some((k) => k.status === "fail") ? "fail"
+    : (s.checks || []).some((k) => k.status === "warn") ? "warn" : "ok";
+  $("dot").className = "dot " + worst;
+}
+
+function renderProblems(p) {
+  const parts = [];
+  const checks = p.checks || [];
+  if (checks.length) {
+    parts.push('<table>' + table(["", "Chequeo", "Detalle"], checks.map((k) =>
+      '<tr><td><span class="pill ' + esc(k.status) + '">' + esc(k.status) + '</span></td>' +
+      '<td class="mono">' + esc(k.name) + '</td><td>' + esc(k.detail) + '</td></tr>')) + '</table>');
+  }
+  const conflicts = p.conflicts || [];
+  if (conflicts.length) {
+    parts.push('<h3 style="font-size:13px;margin:14px 0 6px">Conflictos de sincronización</h3><table>' +
+      table(["Aquí", "La otra máquina", ""], conflicts.map((c) =>
+        '<tr><td><pre>' + esc(c.ours) + '</pre></td><td><pre>' + esc(c.theirs) + '</pre>' +
+        (c.their_node ? '<div class="muted mono">' + esc(c.their_node) + '</div>' : '') + '</td>' +
+        '<td style="white-space:nowrap">' +
+        '<button data-resolve="' + esc(c.id) + '" data-keep="both">Guardar las dos</button> ' +
+        '<button data-resolve="' + esc(c.id) + '" data-keep="theirs">La suya</button> ' +
+        '<button data-resolve="' + esc(c.id) + '" data-keep="ours">La mía</button></td></tr>')) + '</table>');
+  }
+  const notices = p.peer_notices || [];
+  if (notices.length) {
+    parts.push('<h3 style="font-size:13px;margin:14px 0 6px">Avisos del par</h3><table>' +
+      table(["De", "Dice", "Cuándo"], notices.map((n) =>
+        '<tr><td class="mono">' + esc(n.from || "?") + '</td><td>' + esc(n.summary) +
+        '</td><td class="muted">' + when(n.at) + '</td></tr>')) + '</table>');
+  }
+  if (p.quarantined > 0 || p.unresolved_errors > 0) {
+    parts.push('<div class="cards" style="margin-top:14px">' +
+      card("En cuarentena", p.quarantined) + card("Errores abiertos", p.unresolved_errors) + '</div>');
+  }
+  $("problems").innerHTML = parts.length ? parts.join("")
+    : '<span class="muted">Nada que revisar: ningún chequeo en rojo, ningún conflicto abierto, nada en cuarentena.</span>';
+}
+
+function renderClients(c) {
+  const rows = (c.connected || []).map((x) =>
+    '<tr><td class="mono">' + esc(x.client) + '</td><td class="muted">cliente MCP</td>' +
+    '<td class="muted">hace ' + ago(x.idle_secs) + '</td></tr>')
+    .concat((c.sessions || []).map((s) =>
+      '<tr><td class="mono">' + esc(s.name || "—") + '</td>' +
+      '<td class="muted">sesión · ' + esc(s.project || "sin proyecto") + '</td>' +
+      '<td class="muted">' + when(s.started_at) + '</td></tr>'));
+  $("clients").innerHTML = table(["Quién", "Qué es", "Último contacto"], rows);
+
+  $("peers").innerHTML = table(["Par", "Última sincronización", ""],
+    (c.peers || []).map((p) =>
+      '<tr><td class="mono">' + esc(p.name) + '<div class="muted">' + esc(p.url) + '</div></td>' +
+      '<td>' + when(p.last_synced_at) +
+      (p.last_error ? '<div class="pill fail">' + esc(p.last_error.slice(0, 120)) + '</div>' : '') + '</td>' +
+      '<td><button data-fetch="' + esc(p.name) + '">Traer</button></td></tr>'));
+}
+
+function renderTraffic(t) {
+  const totals = Object.entries(t.totals || {}).sort((a, b) => b[1].calls - a[1].calls);
+  $("totals").innerHTML = table(["Herramienta", "Llamadas", "Fallos", "Media", "Máx"],
+    totals.map(([tool, v]) =>
+      '<tr><td class="mono">' + esc(tool) + '</td><td>' + v.calls + '</td>' +
+      '<td>' + (v.failures ? '<span class="pill fail">' + v.failures + '</span>' : '0') + '</td>' +
+      '<td class="muted">' + Math.round(v.total_ms / Math.max(v.calls, 1)) + ' ms</td>' +
+      '<td class="muted">' + v.slowest_ms + ' ms</td></tr>'));
+
+  const failures = (t.failures || []).map((f) =>
+    '<tr><td class="mono">' + esc(f.tool) + '</td><td><pre>' + esc(f.error.slice(0, 300)) +
+    '</pre></td><td class="muted">' + when(f.at) + '</td></tr>');
+  const recent = (t.recent || []).slice(0, 40).map((r) =>
+    '<tr><td class="mono">' + esc(r.tool) + '</td>' +
+    '<td>' + (r.outcome === "ok" ? '<span class="muted">ok</span>' : '<span class="pill fail">' + esc(r.outcome) + '</span>') + '</td>' +
+    '<td class="muted">' + r.elapsed_ms + ' ms</td></tr>');
+  $("recent").innerHTML = failures.length
+    ? table(["Herramienta", "Fallo guardado", "Cuándo"], failures)
+    : table(["Herramienta", "Resultado", "Duración"], recent);
+  $("traffic-note").textContent = t.note || "";
+}
+
+async function refresh() {
+  try {
+    const [s, c, t, p] = await Promise.all([
+      rpc("admin/status"), rpc("admin/clients"), rpc("admin/traffic"), rpc("admin/problems")
+    ]);
+    renderStatus(s); renderClients(c); renderTraffic(t); renderProblems(p);
+    $("head-updated").textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    if (String(e.message) === "unauthorized") { logout("El token no vale."); return; }
+    $("head-updated").textContent = "error: " + e.message;
+    $("dot").className = "dot fail";
+  }
+}
+
+function schedule() {
+  if (timer) clearInterval(timer);
+  if (running) timer = setInterval(refresh, 5000);
+}
+
+function logout(why) {
+  sessionStorage.removeItem("cuba_panel_token");
+  if (timer) clearInterval(timer);
+  $("app").hidden = true; $("gate").hidden = false;
+  $("gate-error").textContent = why || "";
+}
+
+document.addEventListener("click", async (ev) => {
+  const resolve = ev.target.getAttribute && ev.target.getAttribute("data-resolve");
+  if (resolve) {
+    ev.target.disabled = true;
+    try {
+      await callTool("cuba_sync", { action: "resolve", id: resolve, keep: ev.target.getAttribute("data-keep") });
+      await refresh();
+    } catch (e) { alert("No se pudo cerrar el conflicto: " + e.message); ev.target.disabled = false; }
+    return;
+  }
+  const peer = ev.target.getAttribute && ev.target.getAttribute("data-fetch");
+  if (peer) {
+    ev.target.disabled = true;
+    try {
+      const r = await callTool("cuba_sync", { action: "fetch", peer: peer });
+      alert(r.unchanged ? "El par no tiene nada nuevo." : "Traído: " + JSON.stringify(r.imported && r.imported.rows_inserted) + " filas.");
+      await refresh();
+    } catch (e) { alert("No se pudo traer del par: " + e.message); }
+    ev.target.disabled = false;
+  }
+});
+
+$("enter").addEventListener("click", async () => {
+  const value = $("token").value.trim();
+  if (!value) return;
+  sessionStorage.setItem("cuba_panel_token", value);
+  try {
+    await rpc("admin/status");
+    $("gate").hidden = true; $("app").hidden = false;
+    await refresh(); schedule();
+  } catch (e) {
+    sessionStorage.removeItem("cuba_panel_token");
+    $("gate-error").textContent = String(e.message) === "unauthorized"
+      ? "Ese token no lo acepta el demonio." : "No se pudo hablar con el demonio: " + e.message;
+  }
+});
+$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("enter").click(); });
+$("toggle").addEventListener("click", () => {
+  running = !running;
+  $("toggle").textContent = running ? "Pausar" : "Reanudar";
+  schedule();
+});
+$("logout").addEventListener("click", () => logout(""));
+
+if (token()) {
+  $("app").hidden = false;
+  refresh().then(schedule);
+} else {
+  $("gate").hidden = false;
+}
+</script>
+</body>
+</html>
