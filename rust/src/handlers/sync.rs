@@ -255,11 +255,7 @@ async fn export_into(
 ) -> Result<Value> {
     let root = root.to_path_buf();
     let mut lock = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(SYNC_LOCK)
-        .execute(&mut *lock)
-        .await
-        .context("taking the sync lock")?;
+    take_sync_lock(&mut lock).await?;
 
     let project_id = if scope == "all" {
         None
@@ -1170,6 +1166,36 @@ fn recompute_digest(root: &Path, project_id: Option<Uuid>) -> Result<String> {
     Ok(digest.finish(project_id))
 }
 
+pub const SYNC_LOCK_WAIT: &str = "10s";
+pub const SYNC_STATEMENT_BUDGET: &str = "300s";
+
+async fn take_sync_lock(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<()> {
+    sqlx::query(&format!("SET LOCAL lock_timeout = '{SYNC_LOCK_WAIT}'"))
+        .execute(&mut **tx)
+        .await
+        .context("bounding how long this sync may wait for the lock")?;
+    sqlx::query(&format!(
+        "SET LOCAL statement_timeout = '{SYNC_STATEMENT_BUDGET}'"
+    ))
+    .execute(&mut **tx)
+    .await
+    .context("bounding how long a single sync statement may run")?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_LOCK)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "another sync is holding the lock and this one waited {SYNC_LOCK_WAIT} for it. \
+                 The export writes files and prunes the ones it did not write, and the import \
+                 runs in one transaction, so the two must never overlap. Nothing was written. \
+                 Underlying: {e}"
+            )
+        })?;
+    Ok(())
+}
+
 pub const TOMBSTONED_TABLES: [(&str, &str); 8] = [
     ("brain_entities", "id"),
     ("brain_observations", "id"),
@@ -1458,11 +1484,7 @@ async fn import(
     };
 
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(SYNC_LOCK)
-        .execute(&mut *tx)
-        .await
-        .context("taking the sync lock")?;
+    take_sync_lock(&mut tx).await?;
 
     let scoped = match manifest.project_id {
         Some(pid) => {
