@@ -36,7 +36,14 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 .get("confirm")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            import(pool, dir_arg, conflict, confirm).await
+            {
+                let deletes_allowed = args
+                    .get("deletes")
+                    .and_then(Value::as_str)
+                    .map(|d| d != "withhold")
+                    .unwrap_or(true);
+                import(pool, dir_arg, conflict, confirm, deletes_allowed).await
+            }
         }
         "diff" => diff(pool, dir_arg).await,
         "status" => status(pool, dir_arg).await,
@@ -696,6 +703,7 @@ async fn export_into(
         "manifest_hash": manifest.manifest_hash,
         "counts": counts,
         "with_embeddings": with_embeddings,
+        "node_id": manifest.node_id,
         "warning": warning,
     }))
 }
@@ -911,6 +919,11 @@ async fn ask_peer(
 }
 
 async fn fetch(pool: &PgPool, args: &Value, conflict: &str, confirm: bool) -> Result<Value> {
+    let deletes_allowed = args
+        .get("deletes")
+        .and_then(Value::as_str)
+        .map(|d| d != "withhold")
+        .unwrap_or(true);
     let name = args
         .get("peer")
         .and_then(Value::as_str)
@@ -1000,7 +1013,7 @@ async fn fetch(pool: &PgPool, args: &Value, conflict: &str, confirm: bool) -> Re
     }
 
     let landed = staged["dir"].as_str().unwrap_or_default().to_string();
-    let imported = import(pool, Some(&landed), conflict, confirm).await;
+    let imported = import(pool, Some(&landed), conflict, confirm, deletes_allowed).await;
     let _ = std::fs::remove_dir_all(&landed);
     let imported = imported?;
 
@@ -1359,6 +1372,7 @@ async fn apply_tombstones(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     root: &Path,
     confirm: bool,
+    deletes_allowed: bool,
 ) -> Result<Applied> {
     let path = root.join("tombstones.json");
     let mut applied = Applied::default();
@@ -1390,6 +1404,22 @@ async fn apply_tombstones(
         }
         applied.buried.insert(id);
         by_table.entry(table.to_string()).or_default().push(id);
+    }
+
+    if !deletes_allowed {
+        let named: usize = by_table.values().map(Vec::len).sum();
+        if named > 0 {
+            applied.withheld.push(format!(
+                "{named} tombstone(s) were not applied because this caller asked for no \
+                 deletions. Below the alarm threshold a sync deletes without asking — that is \
+                 deliberate, because a guard that trips on ordinary curation is one everybody \
+                 learns to pass confirm=true through. It is the wrong default for a button, so \
+                 the control panel takes this path and a deletion stays something you ask for \
+                 on purpose"
+            ));
+        }
+        applied.buried.clear();
+        return Ok(applied);
     }
 
     let mut would_delete = 0i64;
@@ -1588,6 +1618,7 @@ async fn import(
     dir_arg: Option<&str>,
     conflict: &str,
     confirm: bool,
+    deletes_allowed: bool,
 ) -> Result<Value> {
     let root = resolve_dir(dir_arg)?;
     let manifest_path = root.join("manifest.json");
@@ -1629,7 +1660,7 @@ async fn import(
         None => false,
     };
 
-    let tombstones = apply_tombstones(&mut tx, &root, confirm).await?;
+    let tombstones = apply_tombstones(&mut tx, &root, confirm, deletes_allowed).await?;
 
     if manifest.with_embeddings {
         let local_dim = crate::embeddings::onnx::embedding_dim();
@@ -2350,16 +2381,18 @@ async fn import(
         }
     }
 
-    sqlx::query(
-        "INSERT INTO brain_sync_state (manifest_hash, project_id, rows_inserted, source_path)
-         VALUES ($1, $2, $3, $4) ON CONFLICT (manifest_hash) DO NOTHING",
-    )
-    .bind(&on_disk)
-    .bind(manifest.project_id)
-    .bind(inserted as i32)
-    .bind(root.display().to_string())
-    .execute(&mut *tx)
-    .await?;
+    if tombstones.withheld.is_empty() {
+        sqlx::query(
+            "INSERT INTO brain_sync_state (manifest_hash, project_id, rows_inserted, source_path)
+             VALUES ($1, $2, $3, $4) ON CONFLICT (manifest_hash) DO NOTHING",
+        )
+        .bind(&on_disk)
+        .bind(manifest.project_id)
+        .bind(inserted as i32)
+        .bind(root.display().to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 

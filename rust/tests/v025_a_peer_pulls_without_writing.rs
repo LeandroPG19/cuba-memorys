@@ -81,6 +81,13 @@ async fn a_peer_pull_writes_nothing_and_still_hands_over_the_whole_bundle() {
     let mut hashes: Vec<String> = Vec::new();
     loop {
         let page = pull_page(&pool, offset).await;
+        assert!(
+            page["node_id"].as_str().is_some(),
+            "every page has to name the node it came from, or the receiving side cannot tell \
+             two peers apart and cannot close a notice by origin. It was null on every page \
+             for a while: the manifest carried it to disk and export's JSON result did not, so \
+             pull was reading a key that was never set. Got: {page}"
+        );
         hashes.push(
             page["manifest_hash"]
                 .as_str()

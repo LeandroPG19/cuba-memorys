@@ -331,8 +331,11 @@ document.addEventListener("click", async (ev) => {
   if (peer) {
     ev.target.disabled = true;
     try {
-      const r = await callTool("cuba_sync", { action: "fetch", peer: peer });
-      alert(r.unchanged ? "El par no tiene nada nuevo." : "Traído: " + JSON.stringify(r.imported && r.imported.rows_inserted) + " filas.");
+      const r = await callTool("cuba_sync", { action: "fetch", peer: peer, deletes: "withhold" });
+      const held = (r.imported && r.imported.tombstones_withheld) || [];
+      alert(r.unchanged ? "El par no tiene nada nuevo."
+        : "Traído: " + ((r.imported && r.imported.rows_inserted) || 0) + " filas."
+          + (held.length ? "\n\nNo se aplicó ningún borrado: " + held.join(" ") : ""));
       await refresh();
     } catch (e) { alert("No se pudo traer del par: " + e.message); }
     ev.target.disabled = false;

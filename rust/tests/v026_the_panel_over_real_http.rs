@@ -134,7 +134,15 @@ async fn the_panel_refuses_a_request_that_arrived_through_a_tunnel() {
         "and it has to be the real page, not an error rendered with a 200"
     );
 
-    for header in ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"] {
+    assert!(
+        cuba_memorys::http::FORWARDING_HEADERS.contains(&"forwarded"),
+        "the list has to include RFC 7239 `Forwarded`, which is the standard header and the one \
+         a proxy that follows the spec sends instead of the x- ones. The first version of this \
+         check knew only three names and tested itself against exactly those three: it proved \
+         the code matched its own list, not that the list matched what proxies send"
+    );
+
+    for header in cuba_memorys::http::FORWARDING_HEADERS {
         let forwarded = client
             .get("http://127.0.0.1:18813/panel")
             .header(header, "203.0.113.7")
@@ -148,7 +156,10 @@ async fn the_panel_refuses_a_request_that_arrived_through_a_tunnel() {
              loopback too and checking the peer address proves nothing — a route registered on \
              'we are bound to loopback' would be published to the internet by a tunnel nobody \
              thought about. The forwarding header is the only thing that tells the two apart, \
-             and {header} got through"
+             and {header} got through.\n\nAnd the honest limit, which belongs next to the \
+             check rather than in a commit nobody re-reads: a raw TCP forward (ssh -L, socat) \
+             sends no header at all and cannot be caught this way. This guard stops HTTP \
+             proxies; it is not proof that a request is local"
         );
     }
 }

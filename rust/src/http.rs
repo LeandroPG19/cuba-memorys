@@ -427,19 +427,34 @@ fn panel_allows_forwarded() -> bool {
     std::env::var("CUBA_PANEL_PUBLIC").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+pub const FORWARDING_HEADERS: [&str; 9] = [
+    "forwarded",
+    "cf-connecting-ip",
+    "cf-ray",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "x-client-ip",
+    "true-client-ip",
+];
+
 fn came_through_a_proxy(headers: &HeaderMap) -> bool {
-    ["cf-connecting-ip", "x-forwarded-for", "x-real-ip"]
-        .iter()
-        .any(|h| headers.contains_key(*h))
+    FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h))
 }
 
 async fn panel(headers: HeaderMap) -> Response {
     if came_through_a_proxy(&headers) && !panel_allows_forwarded() {
         return (
             StatusCode::FORBIDDEN,
-            "This request carries a forwarding header, so it reached the daemon through a \
-             tunnel or proxy rather than from this machine. The panel drives the admin token, \
-             which can call every tool. Set CUBA_PANEL_PUBLIC=1 if you meant to publish it.\n",
+            "This request carries a forwarding header, so it reached the daemon through an \
+             HTTP proxy or tunnel rather than from this machine. The panel drives the admin \
+             token, which can call every tool. Set CUBA_PANEL_PUBLIC=1 if you meant to publish \
+             it.\n\nWhat this check can and cannot do, so nobody trusts it further than it \
+             goes: it catches HTTP proxies, which announce themselves in a header. A raw TCP \
+             forward — ssh -L, socat, ngrok tcp — adds no header at all and is indistinguishable \
+             from a local request. If the daemon is reachable that way, the bearer token is the \
+             only thing between a stranger and this page.\n",
         )
             .into_response();
     }
