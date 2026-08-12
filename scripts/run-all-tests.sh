@@ -92,7 +92,7 @@ cargo test --test integration --test v08_project_scoping --test v09_integration 
            --test v022_same_name_different_id --test v022_bundle_is_validated_first --test v023_tombstones --test v023_node_identity \
            --test v023_sync_clock --test v023_history_is_kept --test v023_counters_merge --test v023_bundle_carries_the_clock \
            --test v024_hand_edited_bundle --test v024_embedding_guard \
-           --test v024_tombstone_lists_agree \
+           --test v024_tombstone_lists_agree --test v024_facts_and_procedures_travel \
            --test v016_quarantine --test v016_relation_extraction \
            --test v017_codegraph_hardening \
            -- --ignored --nocapture

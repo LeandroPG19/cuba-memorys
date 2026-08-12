@@ -150,7 +150,7 @@ pub struct FactRow {
     pub layer_name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct ProcedureRow {
     pub id: Uuid,
     pub name: String,
@@ -177,7 +177,7 @@ pub struct ProcedureRow {
     pub embedding_model: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct SourceTrustRow {
     pub source: String,
     pub alpha: f64,

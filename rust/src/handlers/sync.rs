@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::sync::chunk::{
-    Counts, EntityFile, EpisodeFile, ErrorFile, MAX_EMBEDDING_DIM, Manifest, ObservationRow,
-    ProjectRow, RelationRow, SCHEMA_VERSION, payload_hash, payload_hash_bytes,
+    Counts, EntityFile, EpisodeFile, ErrorFile, FactRow, MAX_EMBEDDING_DIM, Manifest,
+    ObservationRow, ProcedureRow, ProjectRow, RelationRow, SCHEMA_VERSION, SourceTrustRow,
+    payload_hash, payload_hash_bytes,
 };
 use crate::sync::paths::{ensure_within, resolve_dir, slug};
 
@@ -169,6 +170,23 @@ fn trust_for_imported(content: &str) -> (&'static str, Option<&'static str>) {
         Some(pattern) => (crate::core::trust::QUARANTINED, Some(pattern)),
         None => (crate::core::trust::TRUSTED, None),
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct ExportedFact {
+    fact_id: Uuid,
+    subject: String,
+    predicate: String,
+    object: String,
+    valid_from: chrono::DateTime<Utc>,
+    observed_at: chrono::DateTime<Utc>,
+    valid_to: Option<chrono::DateTime<Utc>>,
+    subject_entity_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    confidence: Option<f64>,
+    is_current: bool,
+    created_at: chrono::DateTime<Utc>,
+    layer_name: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -485,6 +503,73 @@ async fn export(
         provenance: t.8,
     })
     .collect();
+
+    let fact_rows: Vec<FactRow> = sqlx::query_as::<_, ExportedFact>(
+        "SELECT f.fact_id, f.subject, f.predicate, f.object, f.valid_from, f.observed_at,
+                f.valid_to, f.subject_entity_id, f.project_id, f.confidence::float8 AS confidence,
+                f.is_current, f.created_at, l.layer_name::text AS layer_name
+         FROM brain_facts f
+         LEFT JOIN brain_memory_layers l ON l.layer_id = f.layer_id
+         WHERE ($1::uuid IS NULL OR f.project_id = $1 OR f.project_id IS NULL)
+         ORDER BY f.observed_at",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| FactRow {
+        fact_id: r.fact_id,
+        subject: r.subject,
+        predicate: r.predicate,
+        object: r.object,
+        valid_from: r.valid_from,
+        observed_at: r.observed_at,
+        valid_to: r.valid_to,
+        subject_entity_id: r.subject_entity_id,
+        project_id: r.project_id,
+        confidence: r.confidence,
+        is_current: Some(r.is_current),
+        created_at: Some(r.created_at),
+        layer_name: r.layer_name,
+    })
+    .collect();
+    write_bundle_file(
+        &root,
+        &root.join("facts.json"),
+        &serde_json::to_vec_pretty(&fact_rows)?,
+        &mut digest,
+    )?;
+
+    let procedure_rows: Vec<ProcedureRow> = sqlx::query_as::<_, ProcedureRow>(
+        "SELECT id, name, steps, created_at, updated_at, trigger_context, preconditions,
+                verification, success_count, failure_count, last_outcome, last_used_at,
+                project_id, embedding_model
+         FROM brain_procedures
+         WHERE ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)
+         ORDER BY created_at",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    write_bundle_file(
+        &root,
+        &root.join("procedures.json"),
+        &serde_json::to_vec_pretty(&procedure_rows)?,
+        &mut digest,
+    )?;
+
+    let trust_rows: Vec<SourceTrustRow> = sqlx::query_as::<_, SourceTrustRow>(
+        "SELECT source, alpha::float8 AS alpha, beta::float8 AS beta, updated_at
+         FROM brain_source_trust ORDER BY source",
+    )
+    .fetch_all(pool)
+    .await?;
+    write_bundle_file(
+        &root,
+        &root.join("source_trust.json"),
+        &serde_json::to_vec_pretty(&trust_rows)?,
+        &mut digest,
+    )?;
 
     let rel_count = relation_rows.len() as u32;
     write_bundle_file(
@@ -1226,6 +1311,118 @@ async fn import(
             .bind(e.project_id)
             .bind(e.created_at)
             .bind(trust)
+            .execute(&mut *tx)
+            .await?;
+            inserted += r.rows_affected() as u32;
+        }
+    }
+
+    let facts_path = root.join("facts.json");
+    if facts_path.exists() {
+        let facts: Vec<FactRow> = serde_json::from_slice(&std::fs::read(&facts_path)?)?;
+        for f in facts {
+            if tombstones.buried.contains(&f.fact_id) {
+                continue;
+            }
+            let r = sqlx::query(
+                "INSERT INTO brain_facts
+                    (fact_id, subject, predicate, object, valid_from, observed_at, valid_to,
+                     subject_entity_id, project_id, confidence, is_current, created_at, layer_id)
+                 SELECT $1, $2, $3, $4, $5, $6, $7,
+                        (SELECT id FROM brain_entities WHERE id = $8),
+                        (SELECT id FROM brain_projects WHERE id = $9),
+                        COALESCE($10, 0.5), COALESCE($11, TRUE), COALESCE($12, NOW()),
+                        brain_layer_by_name($13)
+                 ON CONFLICT (fact_id) DO NOTHING",
+            )
+            .bind(f.fact_id)
+            .bind(&f.subject)
+            .bind(&f.predicate)
+            .bind(&f.object)
+            .bind(f.valid_from)
+            .bind(f.observed_at)
+            .bind(f.valid_to)
+            .bind(f.subject_entity_id)
+            .bind(f.project_id)
+            .bind(f.confidence)
+            .bind(f.is_current)
+            .bind(f.created_at)
+            .bind(&f.layer_name)
+            .execute(&mut *tx)
+            .await?;
+            inserted += r.rows_affected() as u32;
+        }
+    }
+
+    let procedures_path = root.join("procedures.json");
+    if procedures_path.exists() {
+        let procedures: Vec<ProcedureRow> =
+            serde_json::from_slice(&std::fs::read(&procedures_path)?)?;
+        for p in procedures {
+            if tombstones.buried.contains(&p.id) {
+                continue;
+            }
+            let r = sqlx::query(&format!(
+                "INSERT INTO brain_procedures
+                    (id, name, steps, created_at, updated_at, trigger_context, preconditions,
+                     verification, success_count, failure_count, last_outcome, last_used_at,
+                     project_id, embedding_model)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        (SELECT id FROM brain_projects WHERE id = $13), $14
+                 ON CONFLICT (id) DO {}",
+                if overwrite {
+                    "UPDATE SET name = EXCLUDED.name, steps = EXCLUDED.steps, \
+                     trigger_context = EXCLUDED.trigger_context, \
+                     preconditions = EXCLUDED.preconditions, \
+                     verification = EXCLUDED.verification, \
+                     success_count = GREATEST(brain_procedures.success_count, \
+                         EXCLUDED.success_count), \
+                     failure_count = GREATEST(brain_procedures.failure_count, \
+                         EXCLUDED.failure_count), \
+                     updated_at = EXCLUDED.updated_at"
+                } else {
+                    "UPDATE SET \
+                     success_count = GREATEST(brain_procedures.success_count, \
+                         EXCLUDED.success_count), \
+                     failure_count = GREATEST(brain_procedures.failure_count, \
+                         EXCLUDED.failure_count)"
+                }
+            ))
+            .bind(p.id)
+            .bind(&p.name)
+            .bind(&p.steps)
+            .bind(p.created_at)
+            .bind(p.updated_at)
+            .bind(&p.trigger_context)
+            .bind(&p.preconditions)
+            .bind(&p.verification)
+            .bind(p.success_count)
+            .bind(p.failure_count)
+            .bind(&p.last_outcome)
+            .bind(p.last_used_at)
+            .bind(p.project_id)
+            .bind(&p.embedding_model)
+            .execute(&mut *tx)
+            .await?;
+            inserted += r.rows_affected() as u32;
+        }
+    }
+
+    let trust_path = root.join("source_trust.json");
+    if trust_path.exists() {
+        let trust: Vec<SourceTrustRow> = serde_json::from_slice(&std::fs::read(&trust_path)?)?;
+        for t in trust {
+            let r = sqlx::query(
+                "INSERT INTO brain_source_trust (source, alpha, beta)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (source) DO UPDATE SET
+                     alpha = GREATEST(brain_source_trust.alpha, EXCLUDED.alpha),
+                     beta = GREATEST(brain_source_trust.beta, EXCLUDED.beta),
+                     updated_at = NOW()",
+            )
+            .bind(&t.source)
+            .bind(t.alpha)
+            .bind(t.beta)
             .execute(&mut *tx)
             .await?;
             inserted += r.rows_affected() as u32;
