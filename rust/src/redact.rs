@@ -121,15 +121,23 @@ fn scan(s: &str) -> Scan {
         }
 
         let bare = trimmed.trim_start_matches(|c: char| !c.is_alphanumeric());
-        let provider = PROVIDER_PREFIXES
+        let embedded = PROVIDER_PREFIXES
             .iter()
-            .find(|(prefix, _)| bare.starts_with(prefix))
-            .map(|(_, pattern)| *pattern)
-            .filter(|_| bare.len() > 12);
+            .filter_map(|(prefix, pattern)| bare.find(prefix).map(|at| (at, *prefix, *pattern)))
+            .filter(|(at, prefix, _)| bare.len() - at > prefix.len() + 8)
+            .min_by_key(|(at, _, _)| *at);
+        let provider = embedded.map(|(_, _, pattern)| pattern);
         let jwt = (bare.starts_with("eyJ") && bare.matches('.').count() == 2)
             .then_some("jwt bearer token");
 
         if let Some(pattern) = provider.or(jwt) {
+            let keep = match embedded {
+                Some((at, _, _)) if at > 0 => &bare[..at],
+                _ => "",
+            };
+            let prefix_len = trimmed.len() - bare.len();
+            out.push_str(&trimmed[..prefix_len]);
+            out.push_str(keep);
             out.push_str("***");
             out.push_str(trailing);
             if hit.is_none() {
@@ -195,6 +203,26 @@ mod tests {
             redact_secrets("token ghp_abcdefghijklmnop fin"),
             "token *** fin"
         );
+        for glued in [
+            "token=ghp_abcdefghijklmnop",
+            "Authorization:ghp_abcdefghijklmnop",
+            "GITHUB_TOKEN=ghp_abcdefghijklmnop",
+            "usa-ghp_abcdefghijklmnop-aqui",
+        ] {
+            assert!(
+                !redact_secrets(glued).contains("ghp_abcdefghijklmnop"),
+                "a token glued to a word survived redaction: {glued:?}. The scan trimmed only \
+                 leading NON-alphanumeric characters, so a quote or a bracket in front was \
+                 stripped and the token found — but `token=`, `GITHUB_TOKEN=` and \
+                 `Authorization:` start with letters, and those are the shapes a credential \
+                 actually has in an env file, a header or an error message. The same scan backs \
+                 refuse_secrets, so this was also the write gate letting one through"
+            );
+            assert!(
+                looks_like_secret(glued).is_some(),
+                "and the gate that refuses writes has to see it too: {glued:?}"
+            );
+        }
         assert_eq!(redact_secrets("bearer eyJhbG.eyJzdWI.SflKxw"), "bearer ***");
         assert!(!redact_secrets("key sk-ant-api03-XXXXXXXXXXXX").contains("sk-ant"));
         assert_eq!(redact_secrets("sk-1"), "sk-1");
@@ -269,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_quoted_inside_json_is_only_visible_once_the_json_is_pretty_printed() {
+    fn a_token_inside_compact_json_is_seen_without_pretty_printing_it_first() {
         let context = serde_json::json!({"file": "deploy.rs", "header": "ghp_abcdefghijklmnop"});
 
         let pretty = serde_json::to_string_pretty(&context).expect("a Value always serialises");
@@ -282,10 +310,14 @@ mod tests {
 
         assert_eq!(
             looks_like_secret(&context.to_string()),
-            None,
-            "compact JSON is a single whitespace-free run and the scanner cannot see inside it. \
-             This is why the alarma handler pretty-prints `context` before scanning it — turning \
-             that back into to_string() would silently reopen the hole"
+            Some("github token"),
+            "compact JSON used to hide a token: the scan split on whitespace and a compact \
+             object is one unbroken run, so this asserted None and the alarma handler \
+             pretty-printed `context` specifically to work around it. Looking for the prefix \
+             INSIDE each run — the fix for `Authorization:ghp_...`, which starts with letters \
+             and so was never trimmed down to the token — closes this one for free. The \
+             pretty-printing stays because it is also what makes the offset in the refusal \
+             message point somewhere a person can find"
         );
     }
 
