@@ -183,9 +183,10 @@ async fn fetch_obs_pair(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Option<(Strin
 async fn lookup_cached(pool: &PgPool, a: Uuid, b: Uuid) -> Result<Option<Judgment>> {
     type Row = (String, f64, Option<String>, String, Option<String>);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT verdict, confidence::float8, reason, judge_backend, judge_model
-         FROM brain_judgments
-         WHERE observation_a = $1 AND observation_b = $2",
+        "SELECT j.verdict, j.confidence::float8, j.reason, j.judge_backend, j.judge_model
+         FROM brain_judgments j
+         JOIN brain_observations o ON o.id = j.observation_a
+         WHERE j.observation_a = $1 AND j.observation_b = $2",
     )
     .bind(a)
     .bind(b)
