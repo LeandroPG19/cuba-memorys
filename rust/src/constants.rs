@@ -328,7 +328,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_centinela",
-            "Prospective memory: set triggers that fire when entities are accessed, sessions start, or errors match. 'Remember to remind me about X when Y happens.'",
+            "Prospective memory: set triggers that fire when entities are accessed, sessions start, or errors match. 'Remember to remind me about X when Y happens.' Between two AI sessions on the same daemon this is also the note channel: condition_type='on_session_start' with the other session's name as entity_pattern reaches it the next time it opens, exactly once (max_fires), and carries who left it.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

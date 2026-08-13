@@ -39,6 +39,7 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let from_agent = crate::session::current_client();
 
     if entity_pattern.is_empty() {
         anyhow::bail!("entity_pattern is required");
@@ -68,14 +69,16 @@ async fn create(pool: &PgPool, args: &Value) -> Result<Value> {
         .map(|d| d.with_timezone(&chrono::Utc));
 
     let row: (uuid::Uuid,) = sqlx::query_as(
-        "INSERT INTO brain_triggers (entity_pattern, condition_type, message, max_fires, expires_at)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id"
+        "INSERT INTO brain_triggers
+            (entity_pattern, condition_type, message, max_fires, expires_at, from_agent)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(entity_pattern)
     .bind(condition_type)
     .bind(message)
     .bind(max_fires)
     .bind(expires_at)
+    .bind(from_agent.as_deref())
     .fetch_one(pool)
     .await
     .context("failed to create trigger")?;
@@ -178,9 +181,9 @@ pub async fn check_triggers(
         return Ok(vec![]);
     }
 
-    type TrigRow = (uuid::Uuid, String, String, i32, i32);
+    type TrigRow = (uuid::Uuid, String, String, i32, i32, Option<String>);
     let triggers: Vec<TrigRow> = sqlx::query_as(
-        "SELECT id, entity_pattern, message, fire_count, max_fires
+        "SELECT id, entity_pattern, message, fire_count, max_fires, from_agent
          FROM brain_triggers
          WHERE active = TRUE
            AND (expires_at IS NULL OR expires_at > NOW())
@@ -196,7 +199,7 @@ pub async fn check_triggers(
 
     let mut fired: Vec<Value> = Vec::new();
 
-    for (id, pattern, message, fire_count, max_fires) in &triggers {
+    for (id, pattern, message, fire_count, max_fires, from_agent) in &triggers {
         let new_count = fire_count + 1;
         let deactivate = *max_fires > 0 && new_count >= *max_fires;
 
@@ -215,6 +218,7 @@ pub async fn check_triggers(
             "trigger_id": id.to_string(),
             "entity_pattern": pattern,
             "message": message,
+            "from_agent": from_agent,
             "fire_count": new_count,
             "deactivated": deactivate
         }));

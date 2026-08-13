@@ -2,6 +2,7 @@ use crate::cognitive::dual_strength;
 use crate::search::cache::TtlLruCache;
 use crate::search::confidence as grounding;
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -572,7 +573,7 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         tracing::warn!(error = %e, "failed to apply Testing Effect boost");
     }
 
-    let session_boost = get_session_goals(pool).await.unwrap_or_default();
+    let (session_boost, session_started) = session_context(pool).await.unwrap_or_default();
     if !session_boost.is_empty() {
         for (_, fr) in &mut results {
             if let Some(content) = fr.data.get("content").and_then(|v| v.as_str()) {
@@ -717,6 +718,11 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
 
     annotate_evidence(pool, &mut final_results).await;
 
+    let fresh = match session_started {
+        Some(since) => written_since(pool, &final_results, since).await,
+        None => Vec::new(),
+    };
+
     let mut response = serde_json::json!({
         "mode": "hybrid",
         "query": query,
@@ -724,6 +730,16 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         "count": final_results.len(),
         "graphrag_context": graphrag_context
     });
+
+    if !fresh.is_empty() {
+        response["new_since_you_started"] = serde_json::json!(fresh);
+        response["new_since_you_started_note"] = serde_json::json!(
+            "those positions in results were written after this session opened — by another \
+             agent working the same project, or by you. Indices and not ids on purpose: one \
+             uuid costs as many tokens as a whole timestamp, and this list rides on every \
+             search."
+        );
+    }
 
     annotate_degradation(&mut response, vector_failed, bm25_failed, reranker_failed);
 
@@ -1405,22 +1421,65 @@ async fn associative_expand(
     }
 }
 
-async fn get_session_goals(pool: &PgPool) -> Result<Vec<String>> {
-    let Some(sid) = crate::session::session_id() else {
-        return Ok(Vec::new());
-    };
-    let row: Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT goals FROM brain_sessions WHERE id = $1 AND ended_at IS NULL")
-            .bind(sid)
-            .fetch_optional(pool)
-            .await?;
+type SessionContext = (Vec<String>, Option<DateTime<Utc>>);
 
-    if let Some((goals,)) = row {
-        let goals: Vec<String> = serde_json::from_value(goals).unwrap_or_default();
-        Ok(goals)
-    } else {
-        Ok(vec![])
+async fn session_context(pool: &PgPool) -> Result<SessionContext> {
+    let Some(sid) = crate::session::session_id() else {
+        return Ok((Vec::new(), None));
+    };
+    let row: Option<(serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT goals, started_at FROM brain_sessions WHERE id = $1 AND ended_at IS NULL",
+    )
+    .bind(sid)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some((goals, started_at)) => Ok((
+            serde_json::from_value(goals).unwrap_or_default(),
+            Some(started_at),
+        )),
+        None => Ok((Vec::new(), None)),
     }
+}
+
+async fn written_since(pool: &PgPool, results: &[Value], since: DateTime<Utc>) -> Vec<usize> {
+    let ids: Vec<uuid::Uuid> = results
+        .iter()
+        .filter_map(|r| r.get("id").or_else(|| r.get("i")))
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| uuid::Uuid::parse_str(s).ok())
+        .collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+
+    let fresh: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT id FROM brain_observations WHERE id = ANY($1) AND created_at > $2
+         UNION ALL
+         SELECT id FROM brain_episodes WHERE id = ANY($1) AND started_at > $2
+         UNION ALL
+         SELECT id FROM brain_entities WHERE id = ANY($1) AND created_at > $2",
+    )
+    .bind(&ids)
+    .bind(since)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    if fresh.is_empty() {
+        return Vec::new();
+    }
+
+    let fresh: std::collections::HashSet<String> =
+        fresh.into_iter().map(|(id,)| id.to_string()).collect();
+    results
+        .iter()
+        .enumerate()
+        .filter_map(|(at, r)| {
+            let id = r.get("id").or_else(|| r.get("i"))?.as_str()?;
+            fresh.contains(id).then_some(at)
+        })
+        .collect()
 }
 
 async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k: usize) -> Value {
