@@ -1,7 +1,7 @@
 use crate::db;
 use crate::handlers;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -293,6 +293,14 @@ pub async fn run_mcp() -> Result<()> {
         })
     });
 
+    let listen_handle = connected.then(|| {
+        let listen_pool = pool.clone();
+        let listen_url = database_url.clone();
+        tokio::spawn(async move {
+            sync_listener(listen_pool, listen_url).await;
+        })
+    });
+
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Value>();
     OUTBOUND
         .set(out_tx)
@@ -439,6 +447,9 @@ pub async fn run_mcp() -> Result<()> {
     if let Some(handle) = rem_handle {
         handle.abort();
     }
+    if let Some(handle) = listen_handle {
+        handle.abort();
+    }
     let _ = tokio::time::timeout(std::time::Duration::from_millis(500), writer_handle).await;
     tracing::info!("REM daemon + writer drained, shutting down");
 
@@ -541,6 +552,71 @@ pub(crate) async fn handle_request(pool: &PgPool, request: JsonRpcRequest) -> Re
         _ => {
             tracing::warn!(method = %request.method, "unknown method");
             anyhow::bail!("Unknown method: {}", request.method)
+        }
+    }
+}
+
+pub const SYNC_CLOCK_CHANNEL: &str = "brain_sync_clock";
+
+const ANNOUNCE_DEBOUNCE: Duration = Duration::from_millis(500);
+const LISTEN_RETRY_MIN: Duration = Duration::from_secs(2);
+const LISTEN_RETRY_MAX: Duration = Duration::from_secs(300);
+
+pub(crate) async fn sync_listener(pool: PgPool, url: String) {
+    let mut backoff = LISTEN_RETRY_MIN;
+    loop {
+        let deaf_since = std::time::Instant::now();
+        match listen_once(&pool, &url).await {
+            Ok(()) => backoff = LISTEN_RETRY_MIN,
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    deaf_secs = deaf_since.elapsed().as_secs(),
+                    retry_in_secs = backoff.as_secs(),
+                    "the sync listener lost its connection; NOTIFY is not durable, so whatever \
+                     was written while it was deaf will only travel on the next fetch"
+                );
+            }
+        }
+        let jitter = Duration::from_millis(u64::from(std::process::id() % 500));
+        tokio::time::sleep(backoff + jitter).await;
+        backoff = (backoff * 2).min(LISTEN_RETRY_MAX);
+    }
+}
+
+async fn listen_once(pool: &PgPool, url: &str) -> anyhow::Result<()> {
+    let mut listener = sqlx::postgres::PgListener::connect(url)
+        .await
+        .context("opening the sync listener connection")?;
+    listener
+        .listen(SYNC_CLOCK_CHANNEL)
+        .await
+        .context("subscribing to the sync clock channel")?;
+    tracing::info!(
+        channel = SYNC_CLOCK_CHANNEL,
+        "listening for local writes worth telling a peer about"
+    );
+
+    loop {
+        let first = listener
+            .recv()
+            .await
+            .context("the listener connection ended")?;
+        let mut burst = 1u32;
+        let deadline = tokio::time::Instant::now() + ANNOUNCE_DEBOUNCE;
+        loop {
+            match tokio::time::timeout_at(deadline, listener.recv()).await {
+                Ok(Ok(_)) => burst += 1,
+                Ok(Err(e)) => return Err(anyhow::anyhow!("listener ended mid-burst: {e}")),
+                Err(_) => break,
+            }
+        }
+
+        tracing::debug!(first = %first.payload(), writes = burst, "announcing to peers");
+        match crate::handlers::sync::announce_to_peers(pool).await {
+            Ok(0) => {}
+            Ok(reached) => tracing::info!(peers = reached, writes = burst, "peers told"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not tell the peers"),
         }
     }
 }

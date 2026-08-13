@@ -115,11 +115,68 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
         associative,
     };
 
-    match mode {
+    let mut response = match mode {
         "hybrid" => hybrid_search(pool, query, &search_opts).await,
         "verify" => verify_claim(pool, query, project_id).await,
         _ => anyhow::bail!("Invalid mode: {mode}. Use hybrid/verify"),
+    }?;
+
+    annotate_sync_freshness(pool, &mut response).await;
+
+    Ok(response)
+}
+
+const SYNC_STALE_AFTER_SECS: i64 = 86_400;
+
+async fn annotate_sync_freshness(pool: &PgPool, response: &mut Value) {
+    let peers: Vec<(
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = match sqlx::query_as("SELECT name, last_synced_at, last_error FROM brain_sync_peers")
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+
+    if peers.is_empty() {
+        return;
     }
+
+    let now = chrono::Utc::now();
+    let peers_json: Vec<Value> = peers
+        .into_iter()
+        .map(|(name, last_synced_at, last_error)| {
+            let age_seconds = last_synced_at.map(|t| (now - t).num_seconds().max(0));
+            let age_desc = match age_seconds {
+                Some(s) => format!("{s}s"),
+                None => "nunca".to_string(),
+            };
+
+            let mut entry = serde_json::json!({ "name": name });
+            if let Some(age) = age_seconds {
+                entry["age_seconds"] = serde_json::json!(age);
+            }
+
+            let unresolved_error = last_error.filter(|e| !e.trim().is_empty());
+            if let Some(err) = unresolved_error {
+                entry["warning"] = serde_json::json!(format!(
+                    "{name} no sincroniza hace {age_desc} y su último intento falló: {err}. \
+                     No es solo que la vista esté vieja: nada dice que vaya a ponerse al día."
+                ));
+            } else if age_seconds.is_none_or(|age| age > SYNC_STALE_AFTER_SECS) {
+                entry["warning"] = serde_json::json!(format!(
+                    "{name} lleva {age_desc} sin sincronizar: lo que esta respuesta usa de esa \
+                     máquina puede estar superado allí."
+                ));
+            }
+            entry
+        })
+        .collect();
+
+    response["sync_peers"] = serde_json::json!(peers_json);
 }
 
 fn requested_limit(args: &Value) -> i64 {

@@ -109,17 +109,27 @@ provision_gate_db
 
 echo "=== DB integration tests (--ignored) ==="
 export DATABASE_URL="$GATE_DATABASE_URL"
-cargo test --test integration --test v08_project_scoping --test v09_integration \
-           --test v021_audit_append_under_app_role --test v021_audit_downgrade \
-           --test v021_import_quarantine_all_kinds \
-           --test v022_merge_reports_what_it_drops --test v022_sync_takes_a_lock \
-           --test v022_same_name_different_id --test v022_bundle_is_validated_first --test v023_tombstones --test v023_node_identity \
-           --test v023_sync_clock --test v023_history_is_kept --test v023_counters_merge --test v023_bundle_carries_the_clock \
-           --test v024_hand_edited_bundle --test v024_embedding_guard \
-           --test v024_tombstone_lists_agree --test v024_facts_and_procedures_travel \
-           --test v016_quarantine --test v016_relation_extraction \
-           --test v017_codegraph_hardening \
-           -- --ignored --nocapture
+# Every tests/*.rs is discovered, not listed. The list used to be written by hand
+# and had drifted to 30 of 52 files: fifteen integration tests written for the
+# sync and panel work had never once run in the gate, while the gate reported
+# green over the very commits that added them. A gate whose coverage depends on
+# somebody remembering to edit it is a gate that quietly shrinks.
+RUN_ELSEWHERE=(v020_audit_update_applies v020_role_separation v020_audit_hmac
+               v020_embed_cache_key v016_chunking nli_entailment nli_cost nli_probe)
+DISCOVERED=()
+SKIPPED=()
+for file in tests/*.rs; do
+  name="$(basename "$file" .rs)"
+  if printf '%s\n' "${RUN_ELSEWHERE[@]}" | grep -qx "$name"; then
+    SKIPPED+=("$name")
+  else
+    DISCOVERED+=(--test "$name")
+  fi
+done
+echo "running ${#SKIPPED[@]} file(s) in their own sections: ${SKIPPED[*]}"
+echo "running $(( ${#DISCOVERED[@]} / 2 )) discovered test file(s)"
+cargo test "${DISCOVERED[@]}" -- --ignored --nocapture
+
 cargo test --lib -- --ignored --nocapture
 
 echo "=== admin-role tests (they rewrite roles and the audit log) ==="

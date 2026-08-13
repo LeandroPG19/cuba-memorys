@@ -918,6 +918,45 @@ async fn ask_peer(
     serde_json::from_str(text).with_context(|| format!("{endpoint} sent a body that is not JSON"))
 }
 
+pub async fn announce_to_peers(pool: &PgPool) -> Result<u32> {
+    let peers: Vec<(String, String)> = sqlx::query_as("SELECT name, url FROM brain_sync_peers")
+        .fetch_all(pool)
+        .await?;
+    if peers.is_empty() {
+        return Ok(0);
+    }
+
+    let token = peer_token_or_refuse()?;
+    let client = reqwest::Client::builder()
+        .build()
+        .context("building the peer client")?;
+    let node_id = crate::db::node_id(pool).await.ok();
+    let node_name = std::env::var("CUBA_NODE_NAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    let mut reached = 0u32;
+    for (name, url) in peers {
+        let told = ask_peer(
+            &client,
+            &url,
+            &token,
+            serde_json::json!({
+                "action": "notify",
+                "summary": "this node has memory the other side has not taken yet",
+                "node_id": node_id,
+                "node_name": node_name,
+            }),
+        )
+        .await;
+        match told {
+            Ok(_) => reached += 1,
+            Err(e) => tracing::warn!(peer = %name, error = %format!("{e:#}"), "could not announce"),
+        }
+    }
+    Ok(reached)
+}
+
 async fn fetch(pool: &PgPool, args: &Value, conflict: &str, confirm: bool) -> Result<Value> {
     let deletes_allowed = args
         .get("deletes")
@@ -1017,11 +1056,28 @@ async fn fetch(pool: &PgPool, args: &Value, conflict: &str, confirm: bool) -> Re
     let _ = std::fs::remove_dir_all(&landed);
     let imported = imported?;
 
+    let closed = match staged["node_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    {
+        Some(peer_node) => sqlx::query(
+            "UPDATE brain_peer_notices SET resolved_at = NOW()
+             WHERE resolved_at IS NULL AND node_id = $1",
+        )
+        .bind(peer_node)
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0),
+        None => 0,
+    };
+
     Ok(serde_json::json!({
         "action": "fetch",
         "peer": name,
         "url": url,
         "files_received": staged["files"],
+        "notices_closed": closed,
         "imported": imported,
     }))
 }
@@ -1037,6 +1093,7 @@ async fn drain_peer(
     let mut offset = 0u64;
     let mut files = 0usize;
     let mut hash: Option<String> = None;
+    let mut node_id: Option<String> = None;
 
     loop {
         let page = ask_peer(
@@ -1072,6 +1129,9 @@ async fn drain_peer(
             );
         }
         hash = Some(page_hash);
+        if node_id.is_none() {
+            node_id = page["node_id"].as_str().map(str::to_string);
+        }
 
         for file in page["files"]
             .as_array()
@@ -1104,6 +1164,7 @@ async fn drain_peer(
     Ok(serde_json::json!({
         "unchanged": false,
         "manifest_hash": hash,
+        "node_id": node_id,
         "files": files,
         "dir": inbox.display().to_string(),
     }))

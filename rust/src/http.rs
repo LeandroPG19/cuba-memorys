@@ -149,6 +149,10 @@ pub async fn serve_pool(addr: &str, pool: PgPool, connected: bool) -> Result<()>
     if connected {
         let rem_pool = pool.clone();
         tokio::spawn(async move { protocol::rem_daemon(rem_pool).await });
+
+        let listen_pool = pool.clone();
+        let listen_url = crate::setup::resolve_database_url().await;
+        tokio::spawn(async move { protocol::sync_listener(listen_pool, listen_url).await });
     }
 
     let state = AppState {
