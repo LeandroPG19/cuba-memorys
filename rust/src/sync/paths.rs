@@ -54,6 +54,8 @@ pub fn resolve_dir(override_arg: Option<&str>) -> Result<PathBuf> {
         .with_context(|| format!("canonicalize {path:?}"))
 }
 
+const MAX_SLUG_CHARS: usize = 120;
+
 pub fn slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -68,10 +70,10 @@ pub fn slug(name: &str) -> String {
     }
     let trimmed = out.trim_matches('-');
     if trimmed.is_empty() {
-        "entity".to_string()
-    } else {
-        trimmed.to_string()
+        return "entity".to_string();
     }
+    let capped: String = trimmed.chars().take(MAX_SLUG_CHARS).collect();
+    capped.trim_end_matches('-').to_string()
 }
 
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<()> {
@@ -117,6 +119,43 @@ fn lexical_join(root: &Path, candidate: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_name_cannot_produce_a_filename_the_kernel_refuses() {
+        let long = "Postgres ".repeat(60);
+        let out = slug(&long);
+        assert!(
+            out.chars().count() <= MAX_SLUG_CHARS,
+            "the bundle names files slug(name)-{{id8}}.json, and ext4 stops at NAME_MAX=255. \
+             An untruncated slug did not corrupt one entity: it made `cuba_sync export` fail \
+             outright with `File name too long`, so a single long name blocked the whole node \
+             from syncing until somebody renamed it. Got {} chars",
+            out.chars().count()
+        );
+        assert!(
+            !out.ends_with('-'),
+            "and cutting mid-separator would leave a trailing dash that changes the filename \
+             for no reason: {out}"
+        );
+        assert!(
+            out.starts_with("postgres"),
+            "truncating must keep the front, which is what a person recognises: {out}"
+        );
+    }
+
+    #[test]
+    fn two_long_names_that_share_a_prefix_still_get_different_files() {
+        let a = format!("{} alpha", "x".repeat(200));
+        let b = format!("{} beta", "x".repeat(200));
+        assert_eq!(
+            slug(&a),
+            slug(&b),
+            "truncation makes these collide, which is fine and expected — the filename carries \
+             an 8-hex id suffix precisely so the slug never has to be unique. This assertion \
+             exists so that anyone who later makes the slug unique knows the suffix was already \
+             doing that job"
+        );
+    }
 
     #[test]
     fn test_slug_basic() {

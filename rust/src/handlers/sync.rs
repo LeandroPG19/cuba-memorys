@@ -2166,7 +2166,7 @@ async fn import(
                     "valid_from": f.valid_from,
                     "observed_at": f.observed_at,
                     "valid_to": f.valid_to,
-                    "subject_entity_id": f.subject_entity_id,
+                    "subject_entity_id": f.subject_entity_id.map(|id| resolve(&remapped, id)),
                     "project_id": f.project_id,
                     "confidence": f.confidence,
                     "is_current": f.is_current,
