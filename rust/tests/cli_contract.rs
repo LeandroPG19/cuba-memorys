@@ -237,18 +237,60 @@ fn nothing_can_exit_a_draining_command_without_draining_first() {
          flight — the write survived, the vector did not, and nothing said so"
     );
 
-    for command in ["reembed", "rem"] {
-        let arm = main_rs
-            .split_once(&format!("Some(\"{command}\") =>"))
-            .unwrap_or_else(|| panic!("{command} arm"))
-            .1
-            .split_once("\n        }")
-            .expect("arm body")
-            .0;
-        assert!(
-            !arm.contains("std::process::exit"),
-            "`{command}` exits inside its own arm again, which is exactly how the drain got \
-             skipped. Route it through drain_then_report instead"
-        );
+    let mut walked: Vec<String> = Vec::new();
+    let mut offenders = Vec::new();
+    for arm in main_rs.split("        Some(").skip(1) {
+        let Some((head, rest)) = arm.split_once("=>") else {
+            continue;
+        };
+        let named: Vec<&str> = head
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|c| cuba_memorys::cli::COMMANDS.contains(c))
+            .collect();
+        if named.is_empty() {
+            continue;
+        }
+        let command = named.join("|");
+        let body = rest.split_once("\n        }").map_or(rest, |(b, _)| b);
+        let reaches_the_dispatcher = body.contains("handlers::")
+            || body.contains("http::serve")
+            || body.contains("protocol::run_mcp")
+            || body.contains("drain_then_report");
+        if !reaches_the_dispatcher {
+            continue;
+        }
+        walked.push(command.clone());
+        let Some(exit) = body.find("std::process::exit") else {
+            continue;
+        };
+        match body.find("drain_background_tasks()") {
+            Some(drain) if drain < exit => {}
+            _ => offenders.push(command.clone()),
+        }
     }
+
+    assert!(
+        walked.iter().any(|c| c == "serve"),
+        "the scan never reached the `serve` arm, and that is the one this check was widened \
+         for: the daemon exited on error without draining while the commit that wrote this \
+         contract claimed every command had been fixed. Walked: {walked:?}"
+    );
+    assert!(
+        walked.iter().any(|c| c.contains("save")),
+        "and it has to see the combined arm too — search|save|delete|export|dashboard live in \
+         one `Some(cmd @ (...))` pattern, which the first version of this scan could not read \
+         at all. Walked: {walked:?}"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these arms can exit without draining first: {offenders:?}. Every write queues its \
+         embedding through tasks::spawn, so an exit that skips the drain leaves the row saved \
+         and its vector never computed — the search stops finding it and nothing says so. \
+         This check used to name two commands by hand, `reembed` and `rem`, and `serve` was \
+         not one of them: the daemon exited on error without draining while the commit that \
+         wrote this contract claimed every command had been fixed. A list maintained by hand \
+         only ever covers what somebody remembered"
+    );
 }

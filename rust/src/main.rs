@@ -261,12 +261,13 @@ async fn async_main() {
                 .get(2)
                 .cloned()
                 .unwrap_or_else(cuba_memorys::http::bind_addr);
-            if let Err(e) = cuba_memorys::http::serve(&addr).await {
+            let outcome = cuba_memorys::http::serve(&addr).await;
+            drain_background_tasks().await;
+            if let Err(e) = outcome {
                 tracing::error!(error = %format!("{e:#}"), "daemon failed");
                 eprintln!("serve: {e:#}");
                 std::process::exit(1);
             }
-            drain_background_tasks().await;
             return;
         }
 

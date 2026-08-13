@@ -326,14 +326,14 @@ async fn reap_idle_clients(
     }
 }
 
-fn client_key(headers: &HeaderMap, payload: &Value) -> String {
+fn client_key(headers: &HeaderMap, payload: &Value) -> (String, bool) {
     if let Some(id) = headers
         .get("mcp-client-id")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return id.to_string();
+        return (id.to_string(), true);
     }
 
     let first = payload
@@ -351,7 +351,7 @@ fn client_key(headers: &HeaderMap, payload: &Value) -> String {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        return id.to_string();
+        return (id.to_string(), true);
     }
 
     if let Some(name) = params
@@ -360,10 +360,10 @@ fn client_key(headers: &HeaderMap, payload: &Value) -> String {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        return name.to_string();
+        return (name.to_string(), false);
     }
 
-    "anonymous".to_string()
+    ("anonymous".to_string(), false)
 }
 
 fn same_secret(presented: &str, expected: &str) -> bool {
@@ -522,7 +522,7 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         }
     };
 
-    let key = client_key(&headers, &payload);
+    let (key, declared) = client_key(&headers, &payload);
     if let Ok(mut guard) = state.seen.write() {
         guard.insert(key.clone(), Instant::now());
     }
@@ -541,7 +541,7 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         let mut responses: Vec<Value> = Vec::with_capacity(items.len());
         for item in items {
             state.served.fetch_add(1, Ordering::Relaxed);
-            if let Some(reply) = dispatch_one(&state, &key, scope, item).await {
+            if let Some(reply) = dispatch_one(&state, &key, declared, scope, item).await {
                 responses.push(reply);
             }
         }
@@ -577,7 +577,13 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
     }
 }
 
-async fn dispatch_one(state: &AppState, key: &str, scope: Scope, item: Value) -> Option<Value> {
+async fn dispatch_one(
+    state: &AppState,
+    key: &str,
+    declared: bool,
+    scope: Scope,
+    item: Value,
+) -> Option<Value> {
     let id = item.get("id").cloned().unwrap_or(Value::Null);
 
     let request: JsonRpcRequest = match serde_json::from_value(item) {
@@ -627,9 +633,16 @@ async fn dispatch_one(state: &AppState, key: &str, scope: Scope, item: Value) ->
         );
     }
 
-    let work = crate::session::with_client(key.to_string(), async move {
+    let served = async move {
         crate::session::with_scope(scope, protocol::handle_request(&pool, request)).await
-    });
+    };
+    let work = async {
+        if declared {
+            crate::session::with_client(key.to_string(), served).await
+        } else {
+            served.await
+        }
+    };
 
     let outcome = match std::panic::AssertUnwindSafe(work).catch_unwind().await {
         Ok(result) => result,
@@ -710,7 +723,7 @@ mod tests {
             "params": { "clientInfo": { "name": "claude-code" } }
         });
         let h = headers_with("mcp-client-id", "window-3");
-        assert_eq!(client_key(&h, &payload), "window-3");
+        assert_eq!(client_key(&h, &payload), ("window-3".to_string(), true));
     }
 
     #[test]
@@ -718,15 +731,27 @@ mod tests {
         let meta = serde_json::json!({
             "params": { "_meta": { "io.modelcontextprotocol/client-id": "from-meta" } }
         });
-        assert_eq!(client_key(&HeaderMap::new(), &meta), "from-meta");
+        assert_eq!(
+            client_key(&HeaderMap::new(), &meta),
+            ("from-meta".to_string(), true)
+        );
 
         let info = serde_json::json!({
             "params": { "clientInfo": { "name": "warp" } }
         });
-        assert_eq!(client_key(&HeaderMap::new(), &info), "warp");
+        assert_eq!(
+            client_key(&HeaderMap::new(), &info),
+            ("warp".to_string(), false),
+            "a name out of clientInfo is not a declared identity: every Claude Code instance \
+             sends the same one, so two of them would share a session and inherit each \
+             other's scratchpad"
+        );
 
         let bare = serde_json::json!({ "method": "ping" });
-        assert_eq!(client_key(&HeaderMap::new(), &bare), "anonymous");
+        assert_eq!(
+            client_key(&HeaderMap::new(), &bare),
+            ("anonymous".to_string(), false)
+        );
     }
 
     #[test]
@@ -735,7 +760,10 @@ mod tests {
             { "params": { "clientInfo": { "name": "first" } } },
             { "params": { "clientInfo": { "name": "second" } } },
         ]);
-        assert_eq!(client_key(&HeaderMap::new(), &batch), "first");
+        assert_eq!(
+            client_key(&HeaderMap::new(), &batch),
+            ("first".to_string(), false)
+        );
     }
 
     #[test]
@@ -744,7 +772,7 @@ mod tests {
             "params": { "clientInfo": { "name": "real-client" } }
         });
         let h = headers_with("mcp-client-id", "   ");
-        assert_eq!(client_key(&h, &payload), "real-client");
+        assert_eq!(client_key(&h, &payload), ("real-client".to_string(), false));
     }
 
     #[test]
