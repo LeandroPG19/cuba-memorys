@@ -24,6 +24,21 @@ fn write_bundle(root: &std::path::Path, relations: Value) {
     .expect("relations");
 }
 
+const SYNC_DIR_LOCK: i64 = 0x0CBA_A0D1_7106_0027;
+
+async fn own_the_sync_dir(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin the serialising transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_DIR_LOCK)
+        .execute(&mut *tx)
+        .await
+        .expect("CUBA_SYNC_DIR is process-global and this file holds two tests");
+    tx
+}
+
 #[tokio::test]
 #[ignore]
 async fn a_relation_pointing_nowhere_is_refused_before_the_database_is_touched() {
@@ -31,11 +46,11 @@ async fn a_relation_pointing_nowhere_is_refused_before_the_database_is_touched()
         std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
     let bundle = std::env::temp_dir().join(format!("cuba-valid-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&bundle).expect("a scratch bundle directory");
-    unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
-
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("connect to test database");
+    let _owns = own_the_sync_dir(&pool).await;
+    unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM brain_relations")
         .fetch_one(&pool)

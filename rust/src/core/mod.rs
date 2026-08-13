@@ -1,6 +1,4 @@
 pub mod bitemporal;
-pub mod entity_linking;
-pub mod temporal_query;
 pub mod trust;
 
 pub fn bitemporal_enabled() -> bool {

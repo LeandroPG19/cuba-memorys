@@ -378,3 +378,51 @@ fn no_mcp_path_can_claim_an_evidence_level_it_did_not_earn() {
          tree-sitter AST, which is what earns `observed`"
     );
 }
+
+#[test]
+fn every_test_that_moves_the_sync_directory_serialises_on_the_same_lock() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut offenders = Vec::new();
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(&dir)
+        .expect("tests/ is readable")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("readable");
+        if !body.contains("set_var(\"CUBA_SYNC_DIR\"") {
+            continue;
+        }
+        checked += 1;
+        let tests = body.matches("#[tokio::test]").count() + body.matches("#[test]").count();
+        if tests > 1 && !body.contains("pg_advisory_xact_lock") {
+            offenders.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+
+    assert!(
+        checked >= 8,
+        "the scan found only {checked} file(s) that move CUBA_SYNC_DIR, and there are more than \
+         that. A green result from a scan that found almost nothing proves nothing"
+    );
+    assert!(
+        offenders.is_empty(),
+        "CUBA_SYNC_DIR is one environment variable for the whole process, so two tests in the \
+         same binary running at once point the exporter at each other's directories and fail \
+         with `path traversal blocked`. Every other sync test serialises on one advisory lock; \
+         these do not: {offenders:?}. Running them with --test-threads=1 hides it, which is \
+         exactly what happened — they passed locally under that flag and went red in the gate, \
+         which does not pass it.\n\nOne test per file is exempt and that is not a loophole: \
+         cargo gives every tests/*.rs its own process, so a lone test cannot collide with \
+         itself. The moment a second one lands in the same file they share the variable"
+    );
+}

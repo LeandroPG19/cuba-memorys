@@ -6,6 +6,27 @@ fn peer_pool_env() -> String {
         .expect("CUBA_PEER_DATABASE_URL env var required: the second throwaway node")
 }
 
+const SYNC_DIR_LOCK: i64 = 0x0CBA_A0D1_7106_0027;
+
+async fn own_the_sync_dir(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin the serialising transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SYNC_DIR_LOCK)
+        .execute(&mut *tx)
+        .await
+        .expect(
+            "CUBA_SYNC_DIR is one process-wide environment variable, so two tests in this binary \
+             running at once point the exporter at each other's directories. Serialising on the \
+             same advisory lock every other sync test uses is what keeps them apart; running \
+             with --test-threads=1 hides the problem instead of fixing it, and the gate does not \
+             pass that flag",
+        );
+    tx
+}
+
 async fn pool_a() -> sqlx::PgPool {
     let url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
@@ -45,6 +66,7 @@ async fn a_fact_keeps_its_entity_link_when_the_entity_is_remapped_by_name() {
     let b = pool_b().await;
     let bundle = scratch_dir("fact-remap");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let shared_name = unique_name("shared_concept");
@@ -148,6 +170,7 @@ async fn a_full_round_trip_unions_facts_procedures_and_source_trust_on_both_side
     let b = pool_b().await;
     let bundle = scratch_dir("union");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let subj_a = unique_name("only_a_subject");
@@ -322,6 +345,7 @@ async fn a_9000_char_observation_keeps_its_text_but_not_its_chunks() {
     let b = pool_b().await;
     let bundle = scratch_dir("bigobs");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let entity_name = unique_name("bigobs_entity");
@@ -421,6 +445,7 @@ async fn breaking_content_round_trips_or_fails_loudly_never_silently() {
     let b = pool_b().await;
     let bundle = scratch_dir("breaking");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let entity_name = unique_name("breaking_entity");
@@ -591,6 +616,7 @@ async fn a_corrupted_bundle_file_leaves_the_database_untouched_and_unmarked() {
     let b = pool_b().await;
     let bundle = scratch_dir("corrupt");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let entity_name = unique_name("corrupt_entity");
@@ -719,6 +745,7 @@ async fn a_withheld_tombstone_is_retried_on_the_next_round_not_dropped() {
     let b = pool_b().await;
     let bundle = scratch_dir("tomb-retry");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let entity_name = unique_name("tomb_retry_entity");
@@ -849,6 +876,7 @@ async fn a_manually_promoted_row_stays_promoted_after_a_round_trip() {
     let b = pool_b().await;
     let bundle = scratch_dir("promote-roundtrip");
     std::fs::create_dir_all(&bundle).expect("scratch bundle dir");
+    let _owns = own_the_sync_dir(&a).await;
     unsafe { std::env::set_var("CUBA_SYNC_DIR", &bundle) };
 
     let entity_name = unique_name("promote_entity");

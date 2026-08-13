@@ -75,7 +75,7 @@ async fn read(pool: &PgPool, args: &Value) -> Result<Value> {
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, content, tag, created_at, expires_at FROM brain_wm
          WHERE expires_at > NOW()
-           AND ($1::uuid IS NULL OR session_id = $1)
+           AND session_id IS NOT DISTINCT FROM $1
            AND ($2::text IS NULL OR tag = $2)
            AND ($3::uuid IS NULL OR project_id = $3 OR project_id IS NULL)
          ORDER BY created_at DESC
@@ -114,7 +114,7 @@ async fn clear(pool: &PgPool, args: &Value) -> Result<Value> {
 
     let result = sqlx::query(
         "DELETE FROM brain_wm
-         WHERE ($1::uuid IS NULL OR session_id = $1)
+         WHERE session_id IS NOT DISTINCT FROM $1
            AND ($2::text IS NULL OR tag = $2)",
     )
     .bind(session_id)
