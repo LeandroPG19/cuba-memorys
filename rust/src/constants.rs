@@ -470,7 +470,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_juez",
-            "LLM-judge for semantically-conflicting observations (v0.8). When cosine similarity sits in the ambiguous band (0.6-0.8), heuristic detectors miss vocabulary-different conflicts (e.g. 'Postgres' vs 'MongoDB'). cuba_juez escalates a pair to a real LLM via subprocess (Claude Code CLI, $0 if you have a subscription) or — when feature 'anthropic-api' is built in — the Anthropic API directly. Verdicts are persisted in brain_judgments (UNIQUE per pair = permanent cache).",
+            "LLM-judge for semantically-conflicting observations (v0.8). When cosine similarity sits in the ambiguous band (0.6-0.8), heuristic detectors miss vocabulary-different conflicts (e.g. 'Postgres' vs 'MongoDB'). cuba_juez escalates a pair to a real LLM via subprocess (Claude Code CLI, $0 if you have a subscription). Verdicts are persisted in brain_judgments (UNIQUE per pair = permanent cache).",
             serde_json::json!({
                 "type": "object",
                 "properties": {

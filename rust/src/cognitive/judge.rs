@@ -54,8 +54,6 @@ pub fn resolve_judge() -> Box<dyn ContradictionJudge> {
         "nli" | "nli_local" | "local" => Box::new(NliJudge::new(resolve_llm_judge())),
         "mcp_sampling" | "sampling" => Box::new(MCPSamplingJudge),
         "claude_cli" | "cli" => Box::new(ClaudeCodeJudge::from_env()),
-        #[cfg(feature = "anthropic-api")]
-        "anthropic_api" | "api" => Box::new(AnthropicApiJudge::from_env()),
         "heuristic" => Box::new(HeuristicJudge),
         _ => {
             let llm = resolve_llm_judge();
@@ -83,14 +81,6 @@ pub fn resolve_offline_llm_within(
 ) -> Option<Box<dyn ContradictionJudge>> {
     if which_in_path(&env::var("CUBA_JUEZ_CLI").unwrap_or_else(|_| "claude".into())) {
         let mut judge = ClaudeCodeJudge::from_env();
-        if let Some(t) = timeout {
-            judge.timeout = t;
-        }
-        return Some(Box::new(judge));
-    }
-    #[cfg(feature = "anthropic-api")]
-    if env::var("ANTHROPIC_API_KEY").is_ok() {
-        let mut judge = AnthropicApiJudge::from_env();
         if let Some(t) = timeout {
             judge.timeout = t;
         }
@@ -181,73 +171,6 @@ impl ContradictionJudge for ClaudeCodeJudge {
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    }
-}
-
-#[cfg(feature = "anthropic-api")]
-pub struct AnthropicApiJudge {
-    pub api_key: String,
-    pub model: String,
-    pub timeout: Duration,
-}
-
-#[cfg(feature = "anthropic-api")]
-impl AnthropicApiJudge {
-    pub fn from_env() -> Self {
-        Self {
-            api_key: env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            model: env::var("CUBA_JUEZ_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string()),
-            timeout: Duration::from_secs(
-                env::var("CUBA_JUEZ_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(JUEZ_DEFAULT_TIMEOUT_SECS),
-            ),
-        }
-    }
-}
-
-#[cfg(feature = "anthropic-api")]
-#[async_trait]
-impl ContradictionJudge for AnthropicApiJudge {
-    fn backend_name(&self) -> &'static str {
-        "anthropic_api"
-    }
-    fn model_name(&self) -> Option<String> {
-        Some(self.model.clone())
-    }
-    async fn run_prompt(&self, prompt: &str) -> Result<String> {
-        if self.api_key.is_empty() {
-            anyhow::bail!("ANTHROPIC_API_KEY is empty");
-        }
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": 256,
-            "messages": [{"role": "user", "content": prompt}],
-        });
-        let client = reqwest::Client::builder()
-            .timeout(self.timeout)
-            .build()
-            .context("build reqwest client")?;
-        let resp = client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("anthropic API call")?
-            .error_for_status()
-            .context("anthropic API status")?;
-        let v: serde_json::Value = resp.json().await.context("parse anthropic JSON")?;
-        Ok(v.get("content")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-            .and_then(|first| first.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("{}")
-            .to_string())
     }
 }
 

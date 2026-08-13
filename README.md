@@ -302,7 +302,6 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_JUEZ_CLI` · `CUBA_JUEZ_MODEL` | `claude` · `claude-haiku-4-5` | The CLI the offline judge shells out to, and the model it asks for. `CUBA_JUEZ_CLI` also decides the automatic path: if that name is not on `PATH` there is no CLI judge and the choice falls through |
 | `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Budget for one judgement, CLI and API alike. Anything that does not parse as an integer leaves the default |
 | `CUBA_JUEZ_MAX_PAIRS` | `5` | Candidate pairs `cuba_juez` sends per call |
-| `ANTHROPIC_API_KEY` | unset | Only in builds with the `anthropic-api` feature: the key for the `anthropic_api` judge, and what makes it the automatic fallback when `CUBA_JUEZ_CLI` is not on `PATH` |
 | `CUBA_NLI_PATH` | `~/.cache/cuba-memorys/models-nli` | Local entailment model (`cuba-memorys models nli`) |
 | `CUBA_NLI_ESCALATE` | off | Send claims the NLI could not decide to an LLM. Buys recall, costs ~12 s each |
 | `CUBA_RERANKER_PATH` · `CUBA_RERANK_TIMEOUT_SECS` | `~/.cache/…/reranker` · `20` | Cross-encoder reranker (+93% nDCG); on CPU it falls back to RRF past the budget |
@@ -340,7 +339,6 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_REM_BACKFILL_LIMIT` | `100` | Observations without an embedding that the REM cycle backfills per pass. `0` disables the backfill; a negative value leaves the default |
 | `CUBA_SYNC_DIR` | unset → `.cuba-memorys` under the working directory | Root for `cuba_sync` export/import. It is also the confinement boundary: a `--dir` outside this root is refused, so setting it is how you sync somewhere else instead of escaping with `../` |
 | `CUBA_UNDO_DIR` | `~/.cache/cuba-memorys/undo` | Where destructive CLI commands write their undo snapshots |
-| `CUBA_METRICS_PORT` · `CUBA_METRICS_BIND` | `9090` · `127.0.0.1` | Prometheus `/metrics` listener. Only in builds with the `observability` feature; unparsable values leave the defaults |
 
 ---
 

@@ -310,10 +310,6 @@ async fn async_main() {
         }
     }
 
-    if let Err(e) = cuba_memorys::observability::init() {
-        tracing::warn!(error = %e, "observability init failed — continuing without /metrics");
-    }
-
     let shutdown = async {
         let ctrl_c = tokio::signal::ctrl_c();
         #[cfg(unix)]

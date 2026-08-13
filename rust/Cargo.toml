@@ -60,8 +60,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 url = { version = "2", optional = true }
 html2text = { version = "0.12", optional = true }
 
-metrics = { version = "0.24", optional = true }
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"], optional = true }
 
 mimalloc = "0.1"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
@@ -71,11 +69,9 @@ tree-sitter-python = "0.25.0"
 
 [features]
 default = []
-anthropic-api = []
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 docs = ["dep:url", "dep:html2text"]
-observability = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [profile.release]
 opt-level = 3
