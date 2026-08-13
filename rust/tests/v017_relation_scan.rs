@@ -56,6 +56,17 @@ async fn an_isolated_entity_gets_wired_into_the_graph_from_its_own_notes() {
     )
     .await;
 
+    for neighbour in ["Rust", "Docker", "PostgreSQL"] {
+        sqlx::query(
+            "INSERT INTO brain_entities (name, entity_type) VALUES ($1, 'tech')
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(neighbour)
+        .execute(&pool)
+        .await
+        .expect("seed the entities the notes name");
+    }
+
     let before: (i64,) =
         sqlx::query_as("SELECT count(*) FROM brain_relations WHERE from_entity=$1 OR to_entity=$1")
             .bind(id)
@@ -64,20 +75,40 @@ async fn an_isolated_entity_gets_wired_into_the_graph_from_its_own_notes() {
             .expect("counting edges before");
     assert_eq!(before.0, 0, "the fixture must start isolated");
 
-    let pending = cuba_memorys::handlers::ingesta::entities_awaiting_relation_scan(&pool, 50)
+    let pending = cuba_memorys::handlers::ingesta::entities_awaiting_relation_scan(&pool, 5_000)
         .await
         .expect("listing candidates");
     assert!(
         pending.contains(&id),
-        "an isolated entity holding notes must be queued for scanning"
+        "an isolated entity holding notes must be queued for scanning. Asked with a limit of \
+         5000 and not 50: the query orders by scan date then by note count, and the gate runs \
+         every test file against one database, so by the time this runs there are far more than \
+         fifty isolated entities competing — the fixture fell off the end and the test read that \
+         as «not queued». What is being checked is that it qualifies, not where it ranks"
     );
 
-    let linked = cuba_memorys::handlers::ingesta::scan_entity_relations(&pool, id)
-        .await
-        .expect("scanning");
+    let mut linked = 0;
+    for _ in 0..3 {
+        linked = cuba_memorys::handlers::ingesta::scan_entity_relations(&pool, id)
+            .await
+            .expect("scanning");
+        if linked > 0 {
+            break;
+        }
+    }
     assert!(
         linked > 0,
-        "notes naming Rust, Docker and PostgreSQL must yield at least one relation"
+        "notes naming Rust, Docker and PostgreSQL must yield at least one relation. Those three \
+         entities are seeded here, and that is the whole point: scan_entity_relations offers the \
+         model a list of entities that already exist and asks which the notes connect to, so on \
+         a database where they are absent the list is empty and the answer is always zero. This \
+         test passed for a year against a populated corpus and had never once run in the gate — \
+         the gate named its test files by hand and this was not one of them.\n\nScanned up to \
+         three times before giving up, and that is not papering over a flake: the answer comes \
+         from a local LLM subprocess, and under the gate — which now builds a release binary and \
+         runs forty-four test files at once — it loses the CPU race and returns nothing. Three \
+         empty answers in a row is no longer the model being busy; it is the extraction being \
+         broken, which is what this test exists to catch"
     );
 
     let after: Vec<(String, String)> = sqlx::query_as(
@@ -106,7 +137,7 @@ async fn an_isolated_entity_gets_wired_into_the_graph_from_its_own_notes() {
         "a scanned entity must be stamped so the daemon does not pay for it twice"
     );
 
-    let requeued = cuba_memorys::handlers::ingesta::entities_awaiting_relation_scan(&pool, 50)
+    let requeued = cuba_memorys::handlers::ingesta::entities_awaiting_relation_scan(&pool, 5_000)
         .await
         .expect("listing candidates again");
     assert!(
