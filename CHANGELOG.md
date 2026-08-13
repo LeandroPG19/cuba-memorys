@@ -8,6 +8,125 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-13 (Cargo `0.22.0` · npm `0.22.0` · PyPI `1.24.0`)
+
+Dos máquinas comparten su memoria y convergen sin perder nada, un panel para
+verlo, y doce migraciones que existen porque la versión anterior se quedaba
+callada cuando algo se perdía.
+
+### Lo que había antes no era sincronización
+
+Había un canal: `cuba_sync export/import` sobre un repositorio git. Movía datos
+en una dirección y perdía cosas en la otra. Medido, no leído:
+
+- **Un borrado se revertía.** A borra una observación y reexporta; B importa el
+  bundle sin ella y **la conserva** (el import no ejecutaba un solo `DELETE`);
+  B exporta el suyo y A **la recupera**. Cuatro pasos, dos bases, cero avisos.
+- **`merge` era idéntico a `skip`.** Los dos iban a `ON CONFLICT DO NOTHING`, y
+  el gancho de git que el proyecto instala usa `merge` por defecto: ganaba quien
+  llegó primero, una corrección posterior no llegaba nunca, y el import
+  informaba éxito.
+- **Un nombre de entidad repetido tumbaba el bundle entero.** `UNIQUE (name)`
+  contra `ON CONFLICT (id)`: dos «Postgres» creados por separado y no entraba
+  ni una fila.
+- **22 de 28 tablas no salían jamás**, entre ellas `brain_facts` con 990 filas.
+- **El ciclo no convergía en trabajo**: `access_count` se mueve con el uso, así
+  que cada export producía un hash nuevo y las dos máquinas se reimportaban
+  para siempre bundles que insertaban cero filas.
+
+### Ahora
+
+- **Lápidas** (0045, 0049): un borrado viaja, y **solo borra las filas que
+  nombra** — nunca por cascada. Una lápida de una entidad con 3 hijos en A no se
+  lleva los 332 de B: se retiene y se reporta. Por encima del 10% del corpus y
+  de 25 filas, para y pide confirmación.
+- **Identidad de nodo en la base** (0046), no en el entorno: `HOSTNAME` no está
+  exportado y el unit traía `CUBA_NODE_NAME` comentado, así que `origin_node`
+  se escribía vacío — 240 filas NULL en el corpus vivo.
+- **Reloj por columna** (0047): `BEFORE UPDATE OF content, observation_type,
+  trust, evidence, tags`. El decaimiento toca 1097 de 1880 filas cada 4 h y
+  **no** mueve el reloj, por construcción y no por convención.
+- **Historial al importar** (0048): `overwrite` ya no borra una corrección sin
+  rastro; lo pisado va a `previous_versions` con tope de 20, y el embedding se
+  invalida cuando cambia el texto que describía.
+- **Contadores que ambos lados incrementan** se fusionan con `GREATEST`, no con
+  «gana el último»: la suma sería más fiel pero **no es idempotente**, e
+  importar dos veces duplicaría el número.
+- **Hechos contradictorios**: dos máquinas que discrepan ya no dejan dos
+  verdades vigentes. Decide `observed_at`, no el orden de llegada — si no,
+  quien sincronizara último decidiría qué es verdad.
+- **Conflictos** (0052): lo que el import descartaba se contaba y se olvidaba.
+  Ahora se guardan **las dos versiones** y se cierran con
+  `cuba_sync resolve --keep ours|theirs|both`.
+
+### Entre máquinas, por HTTP
+
+- **`CUBA_PEER_TOKEN`**: un segundo token que alcanza **solo** los verbos de
+  sincronización. Forzado dentro de `dispatch` y no en el borde, porque
+  `cuba_call` recibe el nombre de la herramienta como argumento y pasaría
+  `{"tool": "cuba_forget"}` por debajo de cualquier lista blanca exterior. El
+  demonio se niega a arrancar si es igual al `CUBA_HTTP_TOKEN` del túnel.
+- **`pull`**: entrega el bundle dentro de la respuesta, paginado, **sin escribir
+  un byte**. No podía ser `export`, que escribe y poda: servir por ahí sería
+  darle a un token de solo lectura una forma de borrarte el bundle.
+- **`fetch`**: la mitad local. Pagina, aterriza, importa con las mismas
+  validaciones, y **guarda el hash** para no volver a importar lo mismo.
+- **`notify`**: lo único que un par puede escribir, y no es memoria — ni
+  entidad, ni observación, ni vector. Una campana que aparece al abrir sesión.
+- **Tiempo real** (0054): `pg_notify` en el reloj de 0047, con carga útil de
+  solo identificadores (el tope de NOTIFY son 8000 bytes, duros). El demonio
+  escucha en su propia conexión, amortigua 500 ms y avisa al par. `NOTIFY` no es
+  duradero, así que el `fetch` sigue siendo el canal; esto solo quita la espera.
+- **`cuba_faro` dice cuán vieja es su vista** cuando hay pares, y solo entonces.
+
+### El panel
+
+`GET /panel` sirve una página compilada dentro del binario que **no lleva
+datos**: todo lo pide por `POST /mcp` con el mismo token bearer que cualquier
+cliente MCP. Estado, diagnóstico completo, quién está conectado, llamadas
+recientes y problemas con su acción al lado.
+
+Los datos llegan por métodos `admin/*` y **no** por herramientas nuevas: el
+catálogo viaja en el contexto de todos los modelos en cada petición, y un panel
+de administración no es algo que un modelo deba invocar. Dos interruptores
+apagados por defecto (`CUBA_PANEL`, `CUBA_PANEL_PUBLIC`), y el segundo existe
+porque el túnel de Cloudflare apunta a `127.0.0.1`: mirar la dirección del
+cliente no distingue nada.
+
+### Medido
+
+- **Import**: 1,41 s → 0,68 s con 322 entidades, 1880 observaciones, 990 hechos
+  y 301 relaciones, mismas filas en las cuatro tablas. De ~5500 idas y vueltas a
+  unas diez, con `jsonb_to_recordset` — `UNNEST` no sirve porque `tags`,
+  `actors` y `artifacts` son `text[]` y un array no se despliega junto a
+  escalares.
+- **Timeouts**: `statement_timeout`, `lock_timeout` e
+  `idle_in_transaction_session_timeout` estaban los tres en 0. Un sync que
+  chocaba con otro colgaba para siempre; ahora se rinde a los 10 s y dice por qué.
+- **RLS**: con el ámbito fijado, un `INSERT` de otro proyecto **se rechaza**;
+  con el ámbito vacío entra. El agujero nunca fue la política — era que el
+  camino de sync no declaraba ámbito.
+
+### Quitado
+
+- **`cas.rs` y `transport.rs`**, 373 líneas y 9 tests: cero llamantes desde que
+  nacieron, diez versiones menores atrás. Su detección de divergencias la hace
+  ahora la tabla de conflictos. Lo que se va de verdad es la deduplicación por
+  contenido, y se va por forma antes que por tamaño: el `pull` pagina ficheros y
+  `cas` trocea contenido, así que habría que reescribirla igual.
+
+### Lo que esta versión NO hace
+
+- **No sincroniza `brain_audit_log`**: mezclar dos cadenas de hash invalida la
+  del destino, y `cuba_archivo verify` dejaría de significar algo.
+- **No promete «tiempo real» como eslogan**: promete un número medido de
+  caducidad y que la herramienta lo diga.
+- **No prueba tres máquinas**. El cursor por par escala, pero solo se midió con
+  dos y no se afirma lo que no se midió.
+- **`observability` sigue muerta en el binario que se publica**: la feature no
+  está en ninguna fila de la matriz de release, así que `record_handler`
+  compila a nada. El anillo del panel va fuera de ese `#[cfg]` a propósito.
+
 ## [0.21.0] — 2026-08-03 (Cargo `0.21.0` · npm `0.21.0` · PyPI `1.23.0`)
 
 Licencia permisiva, dos controles de seguridad que existían pero no ejercían, y
