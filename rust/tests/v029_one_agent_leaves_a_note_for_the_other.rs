@@ -9,6 +9,26 @@ async fn call(pool: &sqlx::PgPool, tool: &str, args: Value) -> Value {
     serde_json::from_str(text).expect("json")
 }
 
+const TRIGGERS_LOCK: i64 = 0x0CBA_A0D1_7106_0029;
+
+async fn own_the_trigger_table(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("begin the serialising transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(TRIGGERS_LOCK)
+        .execute(&mut *tx)
+        .await
+        .expect(
+            "the cap is global across on_session_start rows, so the test that fills it has to \
+             own the table while it does — otherwise its DELETE takes the note the sibling test \
+             just left, which is what turned this file red in the gate and never locally, where \
+             it was run one thread at a time",
+        );
+    tx
+}
+
 #[tokio::test]
 #[ignore]
 async fn a_note_left_for_another_agent_arrives_when_it_opens_its_session() {
@@ -17,6 +37,7 @@ async fn a_note_left_for_another_agent_arrives_when_it_opens_its_session() {
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("connect to test database");
+    let _owns = own_the_trigger_table(&pool).await;
 
     let marker = format!("recado_{}", &Uuid::new_v4().to_string()[..8]);
 
@@ -97,6 +118,7 @@ async fn the_notes_cannot_grow_without_end() {
     let pool = cuba_memorys::db::create_pool(&url)
         .await
         .expect("connect to test database");
+    let _owns = own_the_trigger_table(&pool).await;
     sqlx::query("DELETE FROM brain_triggers WHERE condition_type = 'on_session_start'")
         .execute(&pool)
         .await
