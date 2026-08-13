@@ -216,8 +216,17 @@ fn test_importance_priors() {
     assert!(importance_prior("context", 0.0) >= 0.1);
 }
 
+static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn own_the_environment() -> std::sync::MutexGuard<'static, ()> {
+    ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn model_tag_follows_the_environment() {
+    let _env = own_the_environment();
     unsafe { std::env::remove_var("CUBA_EMBED_MODEL") };
     assert_eq!(
         cuba_memorys::embeddings::onnx::current_model(),
@@ -380,7 +389,7 @@ fn no_mcp_path_can_claim_an_evidence_level_it_did_not_earn() {
 }
 
 #[test]
-fn every_test_that_moves_the_sync_directory_serialises_on_the_same_lock() {
+fn every_test_that_moves_a_process_wide_variable_serialises() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut offenders = Vec::new();
     let mut checked = 0;
@@ -394,12 +403,17 @@ fn every_test_that_moves_the_sync_directory_serialises_on_the_same_lock() {
             continue;
         }
         let body = std::fs::read_to_string(&path).expect("readable");
-        if !body.contains("set_var(\"CUBA_SYNC_DIR\"") {
+        if !body.contains("std::env::set_var(\"CUBA_") {
             continue;
         }
         checked += 1;
         let tests = body.matches("#[tokio::test]").count() + body.matches("#[test]").count();
-        if tests > 1 && !body.contains("pg_advisory_xact_lock") {
+        let taken = body.matches("pg_advisory_xact_lock").count()
+            + body.matches("ENV_GUARD.lock()").count()
+            + body.matches("own_the_environment()").count()
+            + body.matches("own_the_sync_dir(").count()
+            + body.matches("own_the_process(").count();
+        if tests > 1 && taken == 0 {
             offenders.push(
                 path.file_name()
                     .unwrap_or_default()
@@ -416,10 +430,17 @@ fn every_test_that_moves_the_sync_directory_serialises_on_the_same_lock() {
     );
     assert!(
         offenders.is_empty(),
-        "CUBA_SYNC_DIR is one environment variable for the whole process, so two tests in the \
-         same binary running at once point the exporter at each other's directories and fail \
-         with `path traversal blocked`. Every other sync test serialises on one advisory lock; \
-         these do not: {offenders:?}. Running them with --test-threads=1 hides it, which is \
+        "An environment variable belongs to the whole process, so two tests in the same binary \
+         setting one at once read each other's value. It has bitten twice: CUBA_SYNC_DIR made \
+         the exporter fail with `path traversal blocked`, and CUBA_PANEL made a test that \
+         asserts the panel is NOT served get a 200, because a sibling test had switched it on \
+         a millisecond earlier. Neither is flaky code — both are one variable with two owners. \
+         Serialise on an advisory lock (for something shared beyond the process, like a \
+         directory) or a static Mutex (for the environment, which is per-process). \
+         Offenders: {offenders:?}.\n\nIt counts guards TAKEN, not declared, and that is not \
+         pedantry: the first version of this check looked for the declaration, so a sabotage \
+         that deleted every `.lock()` and left the `static` line passed green. A guard nobody \
+         takes is a comment. Running them with --test-threads=1 hides it, which is \
          exactly what happened — they passed locally under that flag and went red in the gate, \
          which does not pass it.\n\nOne test per file is exempt and that is not a loophole: \
          cargo gives every tests/*.rs its own process, so a lone test cannot collide with \

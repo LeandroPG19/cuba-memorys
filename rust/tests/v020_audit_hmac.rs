@@ -18,8 +18,17 @@ fn sha256_chain(prev: &[u8], action: &str, payload: &[u8], stamp: &str) -> Vec<u
     h.finalize().to_vec()
 }
 
+static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn own_the_environment() -> std::sync::MutexGuard<'static, ()> {
+    ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn the_key_is_resolved_from_env_then_disk_and_legacy_sha256_rows_keep_verifying() {
+    let _env = own_the_environment();
     let home = std::env::temp_dir().join(format!("cuba-audit-hmac-{}", std::process::id()));
     let key_file = home.join(".cache/cuba-memorys/audit_key");
     std::fs::create_dir_all(key_file.parent().expect("the key path has a parent"))
@@ -118,6 +127,7 @@ fn the_key_is_resolved_from_env_then_disk_and_legacy_sha256_rows_keep_verifying(
 
 #[test]
 fn a_key_actually_produces_a_different_hash_than_no_key() {
+    let _env = own_the_environment();
     use cuba_memorys::handlers::archivo::compute_hash;
 
     const PREV: &[u8] = b"\x01\x02\x03";
@@ -144,6 +154,7 @@ fn a_key_actually_produces_a_different_hash_than_no_key() {
 
 #[test]
 fn a_sha256_row_after_the_chain_is_sealed_is_a_downgrade_not_a_legacy_row() {
+    let _env = own_the_environment();
     assert_eq!(
         ratchet(HashKind::Sha256, false),
         ChainVerdict::Unprotected,
@@ -171,6 +182,7 @@ fn a_sha256_row_after_the_chain_is_sealed_is_a_downgrade_not_a_legacy_row() {
 
 #[test]
 fn the_ratchet_only_moves_one_way() {
+    let _env = own_the_environment();
     let chain = [
         HashKind::Sha256,
         HashKind::Sha256,

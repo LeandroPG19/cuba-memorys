@@ -1,5 +1,14 @@
+static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn own_the_environment() -> std::sync::MutexGuard<'static, ()> {
+    ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn fixed_shape_defaults_to_the_gpu_answer_and_is_overridable() {
+    let _env = own_the_environment();
     unsafe { std::env::remove_var("CUBA_RERANK_FIXED_SHAPE") };
     assert_eq!(
         cuba_memorys::search::rerank::fixed_shape(),
@@ -19,6 +28,7 @@ fn fixed_shape_defaults_to_the_gpu_answer_and_is_overridable() {
 
 #[test]
 fn is_configured_reports_whether_a_model_is_on_disk_without_loading_it() {
+    let _env = own_the_environment();
     let missing = std::env::temp_dir().join("cuba-no-reranker-here");
     unsafe { std::env::set_var("CUBA_RERANKER_PATH", &missing) };
     assert!(

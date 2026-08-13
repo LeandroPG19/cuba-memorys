@@ -3,6 +3,8 @@ use serde_json::json;
 const ADMIN: &str = "panel-admin-token";
 const PEER: &str = "panel-peer-token";
 
+static ENV_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn daemon(port: u16, panel: bool, public: bool) -> sqlx::PgPool {
     let url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL env var required for integration tests");
@@ -50,6 +52,7 @@ async fn rpc(port: u16, token: &str, method: &str) -> (u16, serde_json::Value) {
 #[tokio::test]
 #[ignore]
 async fn a_peer_token_cannot_open_the_admin_surface() {
+    let _env = ENV_GUARD.lock().await;
     let _pool = daemon(18811, true, false).await;
 
     for method in cuba_memorys::admin::METHODS {
@@ -84,6 +87,7 @@ async fn a_peer_token_cannot_open_the_admin_surface() {
 #[tokio::test]
 #[ignore]
 async fn the_panel_route_stays_shut_unless_it_is_switched_on() {
+    let _env = ENV_GUARD.lock().await;
     let _pool = daemon(18812, false, false).await;
     let client = reqwest::Client::new();
 
@@ -115,6 +119,7 @@ async fn the_panel_route_stays_shut_unless_it_is_switched_on() {
 #[tokio::test]
 #[ignore]
 async fn the_panel_refuses_a_request_that_arrived_through_a_tunnel() {
+    let _env = ENV_GUARD.lock().await;
     let _pool = daemon(18813, true, false).await;
     let client = reqwest::Client::new();
 
