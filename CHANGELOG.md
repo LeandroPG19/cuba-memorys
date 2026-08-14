@@ -8,6 +8,136 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-08-13 (Cargo `0.23.0` · npm `0.23.0` · PyPI `1.25.0`)
+
+Cuatro auditorías adversarias contra la 0.22.0, corridas horas después de
+publicarla. Encontraron una pérdida de datos, tres fugas de contenido **entre
+proyectos**, un demonio que tira trabajo al morir, dos agentes que podían
+compartir sesión, y una puerta que elegía qué mirar.
+
+### La 0.22.0 salió con un bug de pérdida de datos
+
+Al importar, si el nombre de una entidad ya existía aquí con otro identificador,
+el remapeo se aplicaba a las observaciones, a los episodios y a los dos extremos
+de cada relación — **y no a los hechos**. El hecho sobrevive como texto y se lee
+bien; lo que pierde es `subject_entity_id`, que es justo para lo que esa columna
+existe: buscar hechos por entidad, `find_similar_entities`, recorrer el grafo.
+
+Silencioso, y solo visible si después vas a buscar hechos por entidad.
+
+### Un proyecto podía leer el texto de otro, por tres caminos
+
+Antes de nada: **con la instalación por defecto RLS está inerte**. `.env.example`
+conecta como `cuba`, que es `SUPERUSER` con `bypassrls`. Esto muerde a quien
+corrió `create-app-role.sql` y conecta como `cuba_app`, que es el modo
+recomendado y el que empuja `doctor`. Quien mida «cero filas filtradas» como
+`cuba` no ha medido nada.
+
+- **Los resúmenes de compactación eran la peor, y no necesitaban ninguna
+  sincronización.** El servidor listaba los últimos veinte de **todos** los
+  proyectos como recursos MCP —repartiendo sus identificadores— y luego servía
+  `summary_md` con `WHERE id = $1` y nada más. `summary_md` es el registro
+  destilado de una sesión entera.
+- **`brain_sync_conflicts` guarda texto de observaciones literal** y no tenía
+  política, así que `cuba_sync conflicts` devolvía exactamente lo que la política
+  de `brain_observations` negaba por la puerta principal.
+- **La caché del juez contestaba antes de que nadie comprobara nada**: buscaba
+  por dos identificadores y devolvía el razonamiento del modelo sobre ambas
+  observaciones; la lectura protegida por RLS corría **después**.
+
+Migración 0055: los tres, más cuatro tablas de contenido que ya filtraban en
+código (`brain_procedures`, `brain_wm`, `brain_observation_chunks`,
+`brain_embedding_stats`) y que ahora también lo hacen por debajo.
+
+**Lo que a propósito NO lleva política**, escrito dentro de la migración:
+`brain_audit_log` no puede —su cadena de hash es lineal sobre todas las filas, y
+esconder una hace que `cuba_archivo verify` **denuncie manipulación donde no la
+hay**—; `brain_peer_notices` la escribe un par remoto sin proyecto aquí; y el
+único lector de `brain_handler_failures` corre con el ámbito vacío.
+
+### Una credencial pegada a una palabra pasaba la puerta de escritura
+
+El escáner parte por espacios, quita los caracteres **no alfanuméricos** del
+principio y mira si lo que queda empieza por el prefijo. `"ghp_..."` se cazaba;
+`Authorization:ghp_...` no, porque empieza por letra y no se recorta nada. Y ese
+mismo escáner es el que sostiene `refuse_secrets`: **no era solo el redactor
+dejando salir una credencial, era la puerta dejándola entrar**.
+
+Ahora busca el prefijo dentro de cada tramo, lo que cierra gratis un segundo
+agujero que un test documentaba como límite conocido: el JSON compacto.
+
+### Dos IA en el mismo proyecto
+
+Ya funcionaba lo básico —misma base, lo que una escribe la otra lo ve en la
+consulta siguiente—. Faltaba que se enteraran sin ahogarse:
+
+- **`cuba_faro` marca qué resultados son nuevos** desde que abriste sesión, con
+  un array de índices: **11 tokens**. La forma obvia —`created_at` en cada fila—
+  cuesta 230 medidos con el mismo `cl100k_base` que usa el presupuesto, en la
+  herramienta más llamada del servidor. Un UUID cuesta lo mismo que una fecha, así
+  que listarlos habría sido igual de caro. **Sin sesión no aparece el campo**, ni
+  vacío: ese es el caso mayoritario y tiene que costar cero.
+- **El punto de referencia no costó ni una consulta**: la que lee los objetivos de
+  la sesión ya corría en cada búsqueda, y ahora trae también `started_at`.
+- **El canal de recados ya existía**: `cuba_centinela` con `on_session_start`
+  guarda el mensaje, `jornada start` lo entrega y `max_fires` lo cierra solo.
+  Cero herramienta nueva, **cero tokens de catálogo**. La 0056 le añade lo único
+  que le faltaba: de quién viene, y un tope.
+- **Dos clientes sin `Mcp-Client-Id` compartían sesión.** Toda instancia de Claude
+  Code manda el mismo `clientInfo.name`, así que caían en la misma clave y
+  heredaban la sesión de la otra — pizarra incluida. Una identidad adivinada ya no
+  registra sesión: perderla es honesto, heredar la ajena no.
+- **Y la pizarra se fugaba**: un agente sin sesión **leía y borraba** la memoria de
+  trabajo de los demás. El filtro dejaba pasar todo con `session_id` nulo, así que
+  `clear` sin etiqueta era `DELETE FROM brain_wm` entero.
+
+### El demonio tiraba trabajo al morir
+
+`serve` salía con `exit(1)` **sin drenar**; la rama stdio sí drenaba. Lo que se
+pierde es el embedding que cada escritura encola: la fila guardada, el vector
+nunca calculado, la búsqueda dejando de encontrarla. El contrato que debía
+impedirlo nombraba dos comandos a mano y `serve` no era uno.
+
+### La puerta elegía qué mirar
+
+Enumeraba **30 de 52** ficheros de test a mano, y los quince de integración
+escritos para la sincronización y el panel **nunca habían corrido en ella** —
+mientras informaba en verde sobre los commits que los añadían. Ahora descubre
+`tests/*.rs`: **44 ficheros**.
+
+Eso destapó de inmediato un test que nunca había corrido y no podía pasar: pedía
+50 candidatos y daba por hecho que el suyo entraba, afirmaba una relación con
+entidades que no creaba, y sobre todo **dependía de lo que contestara un LLM
+local**, que bajo la puerta pierde la carrera por la CPU. Reintenta tres veces,
+porque una aserción inestable en una puerta enseña a reintentarla.
+
+### Quitado
+
+- **`observability` y `anthropic-api`**: ninguna aparecía en la matriz de release,
+  así que en todo binario publicado `record_handler` compilaba a nada, el
+  exportador de Prometheus no existía y `ANTHROPIC_API_KEY` no hacía nada —
+  mientras el README documentaba `CUBA_METRICS_PORT` como si funcionara. El panel
+  ya da lo que daban, por el mismo endpoint autenticado y sin un segundo puerto
+  que restringir.
+- **219 líneas más sin un solo llamante**: `temporal_query`, `entity_linking`,
+  `mi_tagging`. Con `cas.rs` van **592 borradas** en dos versiones.
+
+### Y tres carreras entre tests, que son la misma forma
+
+Una variable de proceso con dos dueños. `CUBA_SYNC_DIR` hacía fallar al
+exportador; `CUBA_PANEL` hacía que un test que afirma que el panel **no** se
+sirve recibiera un 200. Un contrato lo vigila ahora, y cuenta guardias
+**tomados**, no declarados: la primera versión miraba la declaración y un
+sabotaje que borró todos los `.lock()` pasó en verde.
+
+### Lo que esta versión NO arregla
+
+**8 de las 12 migraciones de la 0.22 abortan si se reaplican** (17 sentencias:
+`ADD CONSTRAINT` y `CREATE TRIGGER`, que no admiten `IF NOT EXISTS`). Arreglarlo
+exige editarlas, y eso rompe el checksum de sqlx en toda base que ya las tiene.
+Solo muerde en reparación manual o restauración sin `_sqlx_migrations`, y falla
+ruidosamente. Queda anotado.
+
 ## [0.22.0] — 2026-08-13 (Cargo `0.22.0` · npm `0.22.0` · PyPI `1.24.0`)
 
 Dos máquinas comparten su memoria y convergen sin perder nada, un panel para
