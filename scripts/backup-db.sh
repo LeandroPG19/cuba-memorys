@@ -40,6 +40,12 @@ for t in "${COUNTED_TABLES[@]}"; do
   LIVE_ROWS[$t]="$(run_psql "SELECT COUNT(*) FROM $t" 2>/dev/null || echo -1)"
 done
 
+# The container's pg_dump is used because the host's is usually older than the
+# server (16 against 18.3 here), and pg_dump refuses to dump a newer server.
+# The cost: if this docker exec is interrupted, pg_dump is orphaned and adopted
+# by the postmaster, and an adopted child exiting non-zero makes the postmaster
+# restart the whole cluster. Measured 2026-08-14 — recovery is automatic and
+# nothing was lost, but do not kill a running backup.
 if in_container; then
   echo "Using pg_dump from container cuba-memorys-db (PG18)."
   docker exec cuba-memorys-db pg_dump -U cuba -d brain \

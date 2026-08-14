@@ -188,6 +188,10 @@ fn env_names_read_in(body: &str) -> BTreeSet<String> {
         }
     }
 
+    if body.contains("from_default_env(") {
+        names.insert("RUST_LOG".to_string());
+    }
+
     names
 }
 
@@ -337,5 +341,90 @@ fn a_credential_compiled_into_the_binary_is_disclosed_in_security_md() {
          credentials are compiled in, then passed three times in a row without ever running its \
          body because SECURITY.md never contained the phrase it was looking for. Undisclosed: \
          {undisclosed:?}"
+    );
+}
+
+fn variables_offered_in_env_example() -> BTreeSet<String> {
+    read(".env.example")
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .trim_start_matches('#')
+                .trim()
+                .split('=')
+                .next()
+        })
+        .filter(|word| looks_like_an_env_name(word))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn every_variable_offered_in_env_example_is_one_something_still_reads() {
+    let offered = variables_offered_in_env_example();
+    assert!(
+        offered.len() >= 12,
+        "the parser found {} variables in .env.example and the file lists more than a dozen. A \
+         green result from a parser that found almost nothing proves nothing",
+        offered.len()
+    );
+
+    let read_by_code = env_names_the_code_reads();
+    let mut read_by_scripts = String::new();
+    for entry in std::fs::read_dir(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts"),
+    )
+    .expect("scripts/ is readable")
+    .flatten()
+    {
+        read_by_scripts.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+    }
+    read_by_scripts.push_str(&read("docker-compose.yml"));
+
+    let dead: Vec<&String> = offered
+        .iter()
+        .filter(|name| {
+            !read_by_code.contains_key(*name) && !read_by_scripts.contains(name.as_str())
+        })
+        .collect();
+
+    assert!(
+        dead.is_empty(),
+        ".env.example is what an operator copies to .env, so every line in it is a promise that \
+         setting the variable changes something. These are read by nothing: the code that used \
+         them is gone and the offer stayed. It happened with ANTHROPIC_API_KEY, which survived \
+         the deletion of the anthropic-api feature in 0.23.0 because the sibling contract only \
+         checks the other direction — that what the code reads is documented — and a variable \
+         nothing reads is invisible to it. Dead: {dead:?}"
+    );
+}
+
+#[test]
+fn the_gate_does_not_run_its_provisioning_inside_the_database_container() {
+    let gate = read("scripts/run-all-tests.sh");
+    let offenders: Vec<&str> = gate
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter(|line| !line.contains(">&2"))
+        .filter(|line| {
+            line.contains("docker exec")
+                && ["psql", "pg_dump", "pg_restore", "pg_isready"]
+                    .iter()
+                    .any(|tool| line.contains(tool))
+        })
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "a process started inside the postgres container is adopted by the postmaster the moment \
+         its docker exec is interrupted, and when an adopted child exits non-zero the postmaster \
+         reads it as a crashed backend and restarts the whole cluster. Measured on 2026-08-14 \
+         against a throwaway pg18: an orphan exiting 2 produced `untracked child process exited \
+         with exit code 2` followed by `terminating any other active server processes` and a full \
+         recovery; the same orphan exiting 0 produced only a log line. That is what took the live \
+         brain database into recovery mid-gate. The gate reaches the server over TCP with the \
+         host's psql instead, which cannot be adopted by anything. Offending lines: {offenders:#?}"
     );
 }

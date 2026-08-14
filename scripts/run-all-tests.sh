@@ -33,12 +33,22 @@ GATE_DB="${GATE_DB:-brain_gate}"
 GATE_DATABASE_URL="${LIVE_DATABASE_URL%/*}/$GATE_DB"
 PEER_DB="${PEER_DB:-brain_gate_peer}"
 PEER_DATABASE_URL="${LIVE_DATABASE_URL%/*}/$PEER_DB"
+ADMIN_DATABASE_URL="${LIVE_DATABASE_URL%/*}/postgres"
 export CUBA_PEER_DATABASE_URL="$PEER_DATABASE_URL"
+
+if ! command -v psql >/dev/null; then
+  echo "FAIL: psql is not on PATH, and the gate needs it to provision its throwaway databases." >&2
+  echo "      It used to reach the server with 'docker exec <container> psql', which makes psql" >&2
+  echo "      a child of the postmaster: when that psql exits non-zero the postmaster reads it" >&2
+  echo "      as a crashed backend and restarts the whole cluster, taking the live brain" >&2
+  echo "      database into recovery with it. Measured on 2026-08-14. Install postgresql-client." >&2
+  exit 1
+fi
 
 cd "$RUST_DIR"
 
 provision_gate_db() {
-  docker exec cuba-memorys-db psql -U cuba -d postgres -q \
+  psql "$ADMIN_DATABASE_URL" -q \
     -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" \
     -c "CREATE DATABASE $GATE_DB" >/dev/null
   DATABASE_URL="$GATE_DATABASE_URL" CUBA_APP_ROLE=0 ONNX_MODEL_PATH="" \
@@ -51,7 +61,7 @@ provision_gate_db() {
       }
   fi
   local dim
-  dim="$(docker exec cuba-memorys-db psql -U cuba -d "$GATE_DB" -Atc \
+  dim="$(psql "$GATE_DATABASE_URL" -Atc \
     "SELECT atttypmod FROM pg_attribute WHERE attrelid='brain_observations'::regclass AND attname='embedding'")"
   if [[ "$dim" != "$CUBA_EMBEDDING_DIM" ]]; then
     echo "FAIL: throwaway database is vector($dim) but the model produces $CUBA_EMBEDDING_DIM." >&2
@@ -59,7 +69,7 @@ provision_gate_db() {
     exit 1
   fi
   local tables
-  tables="$(docker exec cuba-memorys-db psql -U cuba -d "$GATE_DB" -Atc \
+  tables="$(psql "$GATE_DATABASE_URL" -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"
   if ((tables < 20)); then
     echo "FAIL: could not migrate the throwaway database (only $tables tables)." >&2
@@ -67,7 +77,7 @@ provision_gate_db() {
   fi
   echo "OK  throwaway database $GATE_DB ready ($tables tables, vector($dim))"
 
-  docker exec cuba-memorys-db psql -U cuba -d postgres -q \
+  psql "$ADMIN_DATABASE_URL" -q \
     -c "DROP DATABASE IF EXISTS $PEER_DB WITH (FORCE)" \
     -c "CREATE DATABASE $PEER_DB" >/dev/null
   DATABASE_URL="$PEER_DATABASE_URL" CUBA_APP_ROLE=0 ONNX_MODEL_PATH="" \
@@ -77,7 +87,7 @@ provision_gate_db() {
       "$CUBA_EMBEDDING_DIM" >/dev/null 2>&1 || true
   fi
   local peer_tables
-  peer_tables="$(docker exec cuba-memorys-db psql -U cuba -d "$PEER_DB" -Atc \
+  peer_tables="$(psql "$PEER_DATABASE_URL" -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")"
   if ((peer_tables < 20)); then
     echo "FAIL: could not migrate the second node's database (only $peer_tables tables)." >&2
@@ -89,7 +99,7 @@ provision_gate_db() {
 }
 
 drop_gate_db() {
-  docker exec cuba-memorys-db psql -U cuba -d postgres -q \
+  psql "$ADMIN_DATABASE_URL" -q \
     -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" \
     -c "DROP DATABASE IF EXISTS $PEER_DB WITH (FORCE)" >/dev/null 2>&1 || true
 }
