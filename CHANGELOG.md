@@ -130,6 +130,44 @@ sirve recibiera un 200. Un contrato lo vigila ahora, y cuenta guardias
 **tomados**, no declarados: la primera versión miraba la declaración y un
 sabotaje que borró todos los `.lock()` pasó en verde.
 
+### Y la puerta podía tumbar la base viva
+
+Descubierto corriendo la puerta de esta misma versión: abortó con código 2 **sin
+un solo test en rojo**, y la base `brain` pasó por recovery.
+
+Provisionaba sus bases desechables con `docker exec cuba-memorys-db psql`. Lo
+que dispara el reinicio **no** es que ese proceso salga con código distinto de
+cero —medido: `docker exec <c> false` no provoca nada—, sino que **quede
+huérfano**: entonces lo adopta el postmaster, y un hijo adoptado que muere mal se
+lee como un backend caído. Pasa en cuanto el `docker exec` se interrumpe: matar
+la puerta, reiniciar la máquina, un `trap EXIT` solapado con la corrida
+siguiente.
+
+Medido contra un pg18 desechable: huérfano con salida 2 → `untracked child
+process ... exited with exit code 2`, `terminating any other active server
+processes` y recovery completo; el mismo huérfano con salida 0 → una línea de
+log y nada más.
+
+Ahora llega por TCP con el `psql` del anfitrión, que nada puede adoptar, y se
+niega a arrancar con el motivo escrito si no lo encuentra. De paso deja de estar
+atada al nombre del contenedor: con `docker exec` fijo, apuntar `DATABASE_URL` a
+otro sitio provisionaba el servidor equivocado.
+
+`backup-db.sh` y `restore-db.sh` **no se pueden mover**: el `pg_dump` del
+anfitrión suele ser más viejo que el servidor (16.14 contra 18.3) y se niega a
+volcarlo. El riesgo queda escrito donde alguien lo lee — no matar un backup en
+marcha.
+
+### Dos documentos que prometían lo que nadie cumple
+
+- `.env.example` seguía ofreciendo `ANTHROPIC_API_KEY` después de que esta misma
+  versión borrara la feature que la leía. El contrato solo vigilaba una
+  dirección —que lo que el código lee esté documentado— y una variable que nadie
+  lee le es invisible. La dirección inversa es ahora otro contrato.
+- Cerrarla destapó que **`RUST_LOG` no estaba documentada en ningún sitio**: la
+  lee `EnvFilter::try_from_default_env()`, así que el escáner que busca
+  `env::var` nunca la vio, y el lector que la buscaba en el README tampoco.
+
 ### Lo que esta versión NO arregla
 
 **8 de las 12 migraciones de la 0.22 abortan si se reaplican** (17 sentencias:
