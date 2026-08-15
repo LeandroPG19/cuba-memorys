@@ -239,17 +239,17 @@ struct SearchOpts<'a> {
 
 fn annotate_degradation(
     response: &mut Value,
-    vector_failed: bool,
+    vector_failure: Option<&str>,
     bm25_failed: bool,
     reranker_failed: bool,
 ) {
-    if vector_failed {
+    if let Some(reason) = vector_failure {
+        let reason = crate::redact::redact_secrets(reason);
         response["degraded"] = serde_json::json!(true);
-        response["degraded_reason"] = serde_json::json!(
-            "La búsqueda vectorial falló: estos resultados son SOLO léxicos y el recall \
-             está degradado. Causa habitual: la dimensión del embedding no coincide con la \
-             de la columna. Diagnosticá con `cuba-memorys doctor`."
-        );
+        response["degraded_reason"] = serde_json::json!(format!(
+            "La búsqueda vectorial no se ejecutó: estos resultados son SOLO léxicos y el \
+             recall está degradado. Causa: {reason}. Diagnosticá con `cuba-memorys doctor`."
+        ));
     }
     if bm25_failed {
         response["bm25_degraded"] = serde_json::json!(true);
@@ -363,16 +363,14 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         );
     }
 
-    let vector_failed = match &vector_results {
-        Ok(_) => false,
+    let vector_failure: Option<String> = match &vector_results {
+        Ok(_) => None,
         Err(e) => {
             tracing::error!(
                 error = %e,
-                "VECTOR SEARCH FAILED — hybrid retrieval degraded to lexical only. \
-                 Run `cuba-memorys doctor`: this is usually the embedding dimension \
-                 disagreeing with the column."
+                "VECTOR SEARCH FAILED — hybrid retrieval degraded to lexical only."
             );
-            true
+            Some(e.to_string())
         }
     };
 
@@ -741,7 +739,12 @@ async fn hybrid_search(pool: &PgPool, query: &str, opts: &SearchOpts<'_>) -> Res
         );
     }
 
-    annotate_degradation(&mut response, vector_failed, bm25_failed, reranker_failed);
+    annotate_degradation(
+        &mut response,
+        vector_failure.as_deref(),
+        bm25_failed,
+        reranker_failed,
+    );
 
     Ok(response)
 }
@@ -1196,16 +1199,15 @@ async fn vector_search(
     project_id: Option<uuid::Uuid>,
 ) -> Result<Vec<Value>> {
     if !crate::embeddings::onnx::is_model_loaded() {
-        return Ok(vec![]);
+        anyhow::bail!(
+            "no hay modelo de embeddings cargado (ONNX_MODEL_PATH ausente o sin librería de \
+             ONNX Runtime); la búsqueda vectorial no puede ejecutarse"
+        );
     }
 
-    let embedding = match crate::embeddings::onnx::embed(query).await {
-        Ok(emb) => emb,
-        Err(e) => {
-            tracing::warn!(error = %e, "ONNX embed failed in vector_search — degrading");
-            return Ok(vec![]);
-        }
-    };
+    let embedding = crate::embeddings::onnx::embed(query)
+        .await
+        .context("ONNX embed failed in vector_search")?;
 
     let observations: Vec<(uuid::Uuid, String, String, f64, f64)> = sqlx::query_as(
         "WITH direct AS (
@@ -1483,48 +1485,79 @@ async fn written_since(pool: &PgPool, results: &[Value], since: DateTime<Utc>) -
 }
 
 async fn enrich_graphrag(pool: &PgPool, results: &[(String, FusedResult)], top_k: usize) -> Value {
-    let mut context: Vec<Value> = Vec::new();
-
-    for (_, fr) in results.iter().take(top_k) {
-        let entity_name = fr
+    let mut entity_names: Vec<String> = Vec::new();
+    for (_, fr) in results {
+        let Some(name) = fr
             .data
             .get("entity_name")
             .or_else(|| fr.data.get("name"))
-            .and_then(|v: &Value| v.as_str());
-
-        if let Some(name) = entity_name {
-            let neighbors: Vec<(String, String, f64)> = match sqlx::query_as(
-                "WITH src AS (SELECT id FROM brain_entities WHERE name = $1 LIMIT 1)
-                 SELECT e.name, r.relation_type, e.importance::float8
-                 FROM brain_relations r
-                 JOIN src ON r.from_entity = src.id OR r.to_entity = src.id
-                 JOIN brain_entities e ON e.id = CASE
-                     WHEN r.from_entity = src.id THEN r.to_entity
-                     ELSE r.from_entity
-                 END
-                 ORDER BY r.strength DESC
-                 LIMIT 5",
-            )
-            .bind(name)
-            .fetch_all(pool)
-            .await
-            {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            if !neighbors.is_empty() {
-                let neighbor_list: Vec<Value> = neighbors.iter().map(|(n, rel, imp)| {
-                    serde_json::json!({"name": n, "relation": rel, "importance": imp})
-                }).collect();
-
-                context.push(serde_json::json!({
-                    "entity": name,
-                    "neighbors": neighbor_list
-                }));
-            }
+            .and_then(|v: &Value| v.as_str())
+        else {
+            continue;
+        };
+        if entity_names.iter().any(|n| n == name) {
+            continue;
+        }
+        entity_names.push(name.to_string());
+        if entity_names.len() == top_k {
+            break;
         }
     }
+
+    if entity_names.is_empty() {
+        return serde_json::json!([]);
+    }
+
+    let rows: Vec<(String, String, String, f64)> = match sqlx::query_as(
+        "WITH src AS (SELECT id, name FROM brain_entities WHERE name = ANY($1)),
+              ranked AS (
+                  SELECT src.name AS source, e.name AS neighbor, r.relation_type,
+                         e.importance::float8 AS importance,
+                         ROW_NUMBER() OVER (
+                             PARTITION BY src.name ORDER BY r.strength DESC
+                         ) AS rn
+                  FROM brain_relations r
+                  JOIN src ON r.from_entity = src.id OR r.to_entity = src.id
+                  JOIN brain_entities e ON e.id = CASE
+                      WHEN r.from_entity = src.id THEN r.to_entity
+                      ELSE r.from_entity
+                  END
+              )
+         SELECT source, neighbor, relation_type, importance FROM ranked WHERE rn <= 5",
+    )
+    .bind(&entity_names)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                entities = ?entity_names,
+                "graphrag neighbours query failed — the response will carry an empty context,                  which reads exactly like these entities having no neighbours"
+            );
+            return serde_json::json!([]);
+        }
+    };
+
+    let mut by_entity: HashMap<String, Vec<Value>> = HashMap::new();
+    for (source, neighbor, relation_type, importance) in rows {
+        by_entity
+            .entry(source)
+            .or_default()
+            .push(serde_json::json!({
+                "name": neighbor, "relation": relation_type, "importance": importance
+            }));
+    }
+
+    let context: Vec<Value> = entity_names
+        .into_iter()
+        .filter_map(|name| {
+            by_entity
+                .remove(&name)
+                .map(|neighbors| serde_json::json!({"entity": name, "neighbors": neighbors}))
+        })
+        .collect();
 
     serde_json::json!(context)
 }
@@ -1663,7 +1696,7 @@ mod tests {
     #[test]
     fn every_branch_that_silently_degrades_says_so_in_the_response() {
         let mut clean = serde_json::json!({"results": []});
-        annotate_degradation(&mut clean, false, false, false);
+        annotate_degradation(&mut clean, None, false, false);
         assert_eq!(
             clean,
             serde_json::json!({"results": []}),
@@ -1671,9 +1704,9 @@ mod tests {
         );
 
         for (vector, bm25, rerank, key) in [
-            (true, false, false, "degraded"),
-            (false, true, false, "bm25_degraded"),
-            (false, false, true, "reranker_degraded"),
+            (Some("no model loaded"), false, false, "degraded"),
+            (None, true, false, "bm25_degraded"),
+            (None, false, true, "reranker_degraded"),
         ] {
             let mut response = serde_json::json!({"results": []});
             annotate_degradation(&mut response, vector, bm25, rerank);

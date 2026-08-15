@@ -201,11 +201,17 @@ fn resolve(remapped: &HashMap<Uuid, Uuid>, id: Uuid) -> Uuid {
     remapped.get(&id).copied().unwrap_or(id)
 }
 
-fn trust_for_imported(content: &str) -> (&'static str, Option<&'static str>) {
-    match crate::redact::looks_like_secret(content) {
-        Some(pattern) => (crate::core::trust::QUARANTINED, Some(pattern)),
-        None => (crate::core::trust::TRUSTED, None),
+fn trust_for_imported(
+    content: &str,
+    declared: Option<&str>,
+) -> (&'static str, Option<&'static str>) {
+    if let Some(pattern) = crate::redact::looks_like_secret(content) {
+        return (crate::core::trust::QUARANTINED, Some(pattern));
     }
+    if declared == Some(crate::core::trust::QUARANTINED) {
+        return (crate::core::trust::QUARANTINED, None);
+    }
+    (crate::core::trust::TRUSTED, None)
 }
 
 #[derive(sqlx::FromRow)]
@@ -1887,7 +1893,7 @@ async fn import(
                 if tombstones.buried.contains(&obs.id) || !seen_obs.insert(obs.id) {
                     continue;
                 }
-                let (trust, reason) = trust_for_imported(&obs.content);
+                let (trust, reason) = trust_for_imported(&obs.content, obs.trust.as_deref());
                 if let Some(pattern) = reason {
                     reasons.insert(obs.id, pattern);
                 }
@@ -2023,7 +2029,7 @@ async fn import(
                 if !seen.insert(f.id) {
                     continue;
                 }
-                let (trust, reason) = trust_for_imported(&f.content);
+                let (trust, reason) = trust_for_imported(&f.content, None);
                 if let Some(pattern) = reason {
                     reasons.insert(f.id, pattern);
                 }
@@ -2098,7 +2104,7 @@ async fn import(
                 e.error_message,
                 e.solution.as_deref().unwrap_or("")
             );
-            let (trust, reason) = trust_for_imported(&searchable);
+            let (trust, reason) = trust_for_imported(&searchable, None);
             if let Some(pattern) = reason {
                 reasons.insert(e.id, pattern);
             }
@@ -2868,7 +2874,7 @@ mod tests {
 
     #[test]
     fn an_imported_observation_that_carries_a_credential_is_quarantined_instead_of_dropped() {
-        let (trust, reason) = trust_for_imported("el deploy usa ghp_abcdefghijklmnop");
+        let (trust, reason) = trust_for_imported("el deploy usa ghp_abcdefghijklmnop", None);
         assert_eq!(
             trust,
             crate::core::trust::QUARANTINED,
@@ -2882,7 +2888,7 @@ mod tests {
              to promote it"
         );
 
-        let (trust, reason) = trust_for_imported("el bug era que la password no se validaba");
+        let (trust, reason) = trust_for_imported("el bug era que la password no se validaba", None);
         assert_eq!(
             trust,
             crate::core::trust::TRUSTED,
@@ -2890,5 +2896,42 @@ mod tests {
              content of an import behind a review queue"
         );
         assert_eq!(reason, None);
+    }
+}
+
+#[cfg(test)]
+mod quarantine_travels_tests {
+    use super::trust_for_imported;
+
+    #[test]
+    fn a_quarantined_observation_stays_quarantined_on_the_other_machine() {
+        let (trust, reason) = trust_for_imported(
+            "granian depende de uvicorn segun el modelo",
+            Some(crate::core::trust::QUARANTINED),
+        );
+        assert_eq!(
+            trust,
+            crate::core::trust::QUARANTINED,
+            "the bundle carries the trust the writing machine assigned, and the import used to \
+             throw it away and recompute from the text alone: anything that did not look like a \
+             credential landed trusted. What the REM cycle extracts is quarantined precisely \
+             because a model wrote it, not because it looks dangerous — so one sync turned every \
+             hallucination on machine A into searchable memory on machine B. Reason: {reason:?}"
+        );
+    }
+
+    #[test]
+    fn a_trusted_observation_that_carries_a_secret_is_still_caught() {
+        let (trust, reason) = trust_for_imported(
+            "el deploy usa ghp_abcdefghijklmnop",
+            Some(crate::core::trust::TRUSTED),
+        );
+        assert_eq!(
+            trust,
+            crate::core::trust::QUARANTINED,
+            "respecting the declared trust must not weaken the credential check: the result is \
+             the stricter of the two, never the one the sender claims"
+        );
+        assert!(reason.is_some(), "and the pattern is named");
     }
 }
