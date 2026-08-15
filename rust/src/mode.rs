@@ -1,4 +1,5 @@
 use std::env;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -54,8 +55,28 @@ impl Mode {
     }
 
     pub fn rerank_default(self) -> bool {
-        matches!(self, Mode::Completo)
+        rerank_default_for(self, rerank_gpu_active())
     }
+}
+
+fn rerank_default_for(mode: Mode, gpu_active: bool) -> bool {
+    matches!(mode, Mode::Completo) || gpu_active
+}
+
+fn gpu_really_active(compiled_with_gpu: bool, gpu_degraded: bool, placed_on_gpu: bool) -> bool {
+    compiled_with_gpu && !gpu_degraded && placed_on_gpu
+}
+
+static RERANK_GPU_ACTIVE: OnceLock<bool> = OnceLock::new();
+
+fn rerank_gpu_active() -> bool {
+    *RERANK_GPU_ACTIVE.get_or_init(|| {
+        gpu_really_active(
+            cfg!(any(feature = "cuda", feature = "directml")),
+            crate::gpu::status().degraded,
+            crate::gpu::wants_gpu(crate::gpu::Workload::Reranker),
+        )
+    })
 }
 
 pub fn env_toggle(name: &str) -> Option<bool> {
@@ -79,9 +100,64 @@ mod tests {
         assert!(Mode::Completo.docs_default());
         assert!(Mode::Completo.rerank_default());
         assert!(!Mode::Local.docs_default());
-        assert!(!Mode::Local.rerank_default());
+        assert!(
+            !Mode::Local.rerank_default(),
+            "false here only because this build has neither cuda nor directml compiled in \
+             — every `cargo test` gate in this repo runs without them. On a build that has \
+             them and a working card, rerank_default_for takes the other branch on purpose"
+        );
         assert!(!Mode::Red.rerank_default());
         assert!(Mode::Red.is_cloud());
         assert!(!Mode::Local.is_cloud());
+    }
+
+    #[test]
+    fn a_real_gpu_turns_rerank_on_even_outside_completo_mode() {
+        assert!(
+            rerank_default_for(Mode::Local, true),
+            "a genuinely active GPU provider must turn rerank on by default even outside \
+             completo mode — tying the default to hardware instead of to a mode flag is \
+             the whole point of this change"
+        );
+        assert!(rerank_default_for(Mode::Red, true));
+        assert!(
+            !rerank_default_for(Mode::Local, false),
+            "CPU reranking costs 60-110s per search (measured, README) and blows the \
+             request budget — it has to stay off unless asked for explicitly"
+        );
+        assert!(
+            rerank_default_for(Mode::Completo, false),
+            "CUBA_MODE=completo is an explicit operator choice and must win even with no GPU"
+        );
+    }
+
+    #[test]
+    fn gpu_really_active_requires_both_a_gpu_build_and_a_working_device() {
+        assert!(
+            gpu_really_active(true, false, true),
+            "compiled with GPU support and the runtime reports no degradation — that is \
+             what an active GPU looks like"
+        );
+        assert!(
+            !gpu_really_active(true, true, true),
+            "compiled with GPU support but degraded (CPU-only runtime, or no NVIDIA card \
+             detected) — still no real GPU underneath"
+        );
+        assert!(
+            !gpu_really_active(false, false, true),
+            "a CPU-only build reports degraded=false for the ordinary case of having no \
+             GPU at all to complain about — that false must never be read as 'GPU active', \
+             or every plain CPU install would silently pay the 60-110s reranker tax"
+        );
+        assert!(!gpu_really_active(false, true, true));
+        assert!(
+            !gpu_really_active(true, false, false),
+            "a GPU build on a machine with a working card still runs the reranker on the CPU \
+             when CUBA_RERANK_DEVICE=cpu, and gpu::status() never looks at that variable: it \
+             only checks that the provider file exists and that a driver is present. Reading \
+             its degraded=false as «the reranker is on the GPU» turns such an install into a \
+             106s rerank against a 20s budget, and the timeout does not even reclaim the work \
+             — spawn_blocking is not cancellable and keeps holding the session mutex"
+        );
     }
 }

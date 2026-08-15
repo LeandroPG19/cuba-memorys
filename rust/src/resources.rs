@@ -280,7 +280,7 @@ fn set_if_absent(key: &str, value: &str) {
     unsafe { std::env::set_var(key, value) }
 }
 
-fn disabled_model_path() -> String {
+pub fn disabled_model_path() -> String {
     std::env::temp_dir()
         .join(DISABLED_MODEL_DIR)
         .to_string_lossy()

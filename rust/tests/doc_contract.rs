@@ -7,30 +7,73 @@ fn read(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
-fn counts_claimed(text: &str) -> BTreeSet<usize> {
-    fn number(word: &str) -> Option<usize> {
-        word.trim_matches(|c: char| !c.is_ascii_digit())
-            .parse::<usize>()
-            .ok()
-    }
+fn number(word: &str) -> Option<usize> {
+    word.trim_matches(|c: char| !c.is_ascii_digit())
+        .parse::<usize>()
+        .ok()
+}
 
+fn clean(word: &str) -> &str {
+    word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+}
+
+fn is_bare_tools_word(word: &str) -> bool {
+    clean(word) == "tools"
+}
+
+fn mentions_tools(word: &str) -> bool {
+    let cleaned = clean(word);
+    cleaned == "tools" || cleaned.ends_with("_tools")
+}
+
+fn counts_claimed(text: &str) -> BTreeSet<usize> {
     let mut found = BTreeSet::new();
-    let words: Vec<&str> = text.split_whitespace().collect();
-    for (i, word) in words.iter().enumerate() {
-        if !word.starts_with("tools") {
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        if !words.iter().any(|w| mentions_tools(w)) {
             continue;
         }
-        for back in 1..=2 {
-            let Some(j) = i.checked_sub(back) else { break };
-            if let Some(n) = number(words[j]) {
-                found.insert(n);
-                break;
+        for (i, word) in words.iter().enumerate() {
+            if is_bare_tools_word(word) {
+                for back in 1..=2 {
+                    let Some(j) = i.checked_sub(back) else { break };
+                    if let Some(n) = number(words[j]) {
+                        found.insert(n);
+                        break;
+                    }
+                }
+                if words.get(i + 1).is_some_and(|w| *w == "of")
+                    && let Some(n) = words.get(i + 2).and_then(|w| number(w))
+                {
+                    found.insert(n);
+                }
+            }
+            if *word == "of"
+                && i > 0
+                && let Some(a) = number(words[i - 1])
+                && let Some(b) = words.get(i + 1).and_then(|w| number(w))
+            {
+                found.insert(a);
+                found.insert(b);
             }
         }
-        if words.get(i + 1).is_some_and(|w| *w == "of")
-            && let Some(n) = words.get(i + 2).and_then(|w| number(w))
-        {
-            found.insert(n);
+    }
+    found
+}
+
+fn percents_claimed(text: &str) -> BTreeSet<u64> {
+    let mut found = BTreeSet::new();
+    for line in text.lines() {
+        if !line.contains("catalogue") {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let cleaned = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '%');
+            if let Some(digits) = cleaned.strip_suffix('%')
+                && let Ok(n) = digits.parse::<u64>()
+            {
+                found.insert(n);
+            }
         }
     }
     found
@@ -38,16 +81,24 @@ fn counts_claimed(text: &str) -> BTreeSet<usize> {
 
 #[test]
 fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
-    let full = cuba_memorys::constants::tools_for("full").len();
-    let lean = cuba_memorys::constants::tools_for("lean").len();
+    let full_tools = cuba_memorys::constants::tools_for("full");
+    let lean_tools = cuba_memorys::constants::tools_for("lean");
+    let full = full_tools.len();
+    let lean = lean_tools.len();
 
     assert!(
         full > lean && lean > 0,
         "the profiles have to differ for this contract to mean anything: full={full} lean={lean}"
     );
 
+    let full_chars = serde_json::to_string(&full_tools).unwrap().len();
+    let lean_chars = serde_json::to_string(&lean_tools).unwrap().len();
+    let measured_pct = 100.0 * (full_chars - lean_chars) as f64 / full_chars as f64;
+
     let readme = read("README.md");
     let crate_readme = read("rust/README.md");
+    let pyproject = read("pyproject.toml");
+    let server_json = read("server.json");
     let schemas = read("rust/src/constants.rs");
     let described = schemas
         .split("fn meta_tool_defs")
@@ -57,6 +108,8 @@ fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
     for (source, text) in [
         ("README.md", readme.as_str()),
         ("rust/README.md", crate_readme.as_str()),
+        ("pyproject.toml", pyproject.as_str()),
+        ("server.json", server_json.as_str()),
         ("cuba_tools", described),
     ] {
         for n in counts_claimed(text) {
@@ -68,8 +121,24 @@ fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
                  description shipped to every model said 29 — because each was written by hand \
                  at a different time. It looks two words back, not one: the header says «28 MCP \
                  tools», and a scan that only checked the word touching «tools» found «MCP» and \
-                 waved the number through. This assertion is the only thing that makes adding a tool \
-                 and forgetting a document impossible."
+                 waved the number through. It also has to look past a backtick or an underscore: \
+                 `cuba_tools` in the same sentence as «8 of 30» sailed through because neither \
+                 word literally started with «tools». This assertion is the only thing that makes \
+                 adding a tool and forgetting a document impossible."
+            );
+        }
+
+        for p in percents_claimed(text) {
+            let diff = (p as f64 - measured_pct).abs();
+            assert!(
+                diff <= 2.0,
+                "{source} claims the lean catalogue is «{p}%» smaller, but serializing \
+                 tools_for(\"full\") ({full_chars} chars) against tools_for(\"lean\") \
+                 ({lean_chars} chars) measures {measured_pct:.1}%, off by {diff:.1} points — more \
+                 than the ±2 tolerance a rounding difference would explain. A percentage next to \
+                 the word «catalogue» is as much a publishable claim as the tool count next to it, \
+                 and nothing checked it before: README.md carried 73% in one place and 71% in two \
+                 others while the true figure, measured the same way, is {measured_pct:.0}%."
             );
         }
     }

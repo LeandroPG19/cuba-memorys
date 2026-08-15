@@ -240,6 +240,62 @@ fn runtime_role_check(user: &str, is_super: bool, app_role_ready: bool) -> Check
     )
 }
 
+fn reranker_check(
+    configured: bool,
+    resolved: bool,
+    enabled: bool,
+    disabled_by_resources: bool,
+    ram_available_mb: u64,
+    tier: &str,
+    on_by_default: bool,
+) -> Check {
+    if disabled_by_resources {
+        return Check::warn(
+            "reranker",
+            format!(
+                "el modelo NO se cargó: al arrancar había {ram_available_mb} MiB de RAM \
+                 disponible y el plan de recursos salió en nivel «{tier}» — resources.rs \
+                 redirigió CUBA_RERANKER_PATH a un directorio que no existe, para toda la \
+                 vida de este proceso."
+            ),
+            "esta decisión se toma UNA sola vez, al arrancar: subí el límite de memoria del \
+             contenedor o de la unidad de systemd y reiniciá el proceso — más RAM disponible \
+             ahora mismo no lo revive.",
+        );
+    }
+    match (configured, resolved) {
+        (true, true) if enabled => Check::ok(
+            "reranker",
+            format!(
+                "cargado (bge-reranker-v2-m3) — reordena los candidatos por cross-encoder · \
+                 activo por defecto: {on_by_default} ({})",
+                if on_by_default {
+                    "modo completo, o GPU real detectada — ver el check «gpu»"
+                } else {
+                    "sin GPU real, ver el check «gpu» arriba — en CPU cuesta 60-110 s y ese \
+                     trabajo se tira; pedilo con rerank:true si igual lo querés"
+                }
+            ),
+        ),
+        (true, true) => Check::fail(
+            "reranker",
+            "hay un modelo en disco pero NO carga",
+            "el ranking se devuelve tal cual. Suele ser libonnxruntime.so: comprobá \
+             ORT_DYLIB_PATH.",
+        ),
+        (true, false) => Check::ok(
+            "reranker",
+            "configurado — carga en su primer lote (no lo cargo aquí: son ~1,1 GB)",
+        ),
+        (false, _) => Check::warn(
+            "reranker",
+            "no hay modelo en disco — el ranking se devuelve tal cual (RRF, sin reordenar)",
+            "es opcional, pero si querías reordenar y no pusiste el modelo, no está \
+             pasando nada. Instalalo: cuba-memorys models reranker",
+        ),
+    }
+}
+
 pub async fn run_checks(pool: &PgPool, url: &str) -> Vec<Check> {
     run_checks_with(pool, url, false).await
 }
@@ -427,33 +483,20 @@ pub async fn run_checks_with(pool: &PgPool, url: &str, deep: bool) -> Vec<Check>
         _ => Check::ok("gpu", gpu.detail),
     });
 
-    checks.push(
-        match (
-            crate::search::rerank::is_configured(),
-            crate::search::rerank::status_resolved(),
-        ) {
-            (true, true) if crate::search::rerank::enabled() => Check::ok(
-                "reranker",
-                "cargado (bge-reranker-v2-m3) — reordena los candidatos por cross-encoder",
-            ),
-            (true, true) => Check::fail(
-                "reranker",
-                "hay un modelo en disco pero NO carga",
-                "el ranking se devuelve tal cual. Suele ser libonnxruntime.so: comprobá \
-             ORT_DYLIB_PATH.",
-            ),
-            (true, false) => Check::ok(
-                "reranker",
-                "configurado — carga en su primer lote (no lo cargo aquí: son ~1,1 GB)",
-            ),
-            (false, _) => Check::warn(
-                "reranker",
-                "no configurado — el ranking se devuelve tal cual (RRF, sin reordenar)",
-                "es opcional, pero si querías reordenar y no pusiste el modelo, no está \
-             pasando nada. Instalalo: cuba-memorys models reranker",
-            ),
-        },
-    );
+    let rerank_configured = crate::search::rerank::is_configured();
+    let rerank_resolved = crate::search::rerank::status_resolved();
+    let rerank_enabled = rerank_resolved && crate::search::rerank::enabled();
+    let rerank_disabled_by_resources = std::env::var("CUBA_RERANKER_PATH").ok().as_deref()
+        == Some(crate::resources::disabled_model_path().as_str());
+    checks.push(reranker_check(
+        rerank_configured,
+        rerank_resolved,
+        rerank_enabled,
+        rerank_disabled_by_resources,
+        machine.ram_available_mb,
+        resource_plan.tier.as_str(),
+        mode.rerank_default(),
+    ));
 
     if crate::cognitive::nli::available() {
         if deep && crate::cognitive::nli::enabled() {
@@ -952,5 +995,82 @@ mod evidence_tests {
     #[test]
     fn a_populated_principal_table_is_the_healthy_case() {
         assert_eq!(rbac_check(3).status, Status::Ok);
+    }
+}
+
+#[cfg(test)]
+mod reranker_tests {
+    use super::*;
+
+    #[test]
+    fn resources_disabling_it_for_ram_is_distinguished_from_no_model_at_all() {
+        let starved = reranker_check(false, false, false, true, 373, "minimal", false);
+        assert_eq!(
+            starved.status,
+            Status::Warn,
+            "a machine the resource plan starved of RAM is a warning, not a silent 'no model'"
+        );
+        assert!(
+            starved.detail.contains("373"),
+            "the RAM figure measured at startup has to be in the message, or the operator \
+             cannot tell this apart from never having installed a model: {}",
+            starved.detail
+        );
+        assert!(
+            starved
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("reiniciá")),
+            "resources.rs decides this once at startup — the hint has to say a restart is \
+             required, or raising the memory limit later looks like it should have worked"
+        );
+
+        let never_installed = reranker_check(false, false, false, false, 8000, "full", false);
+        assert_ne!(
+            starved.detail, never_installed.detail,
+            "two different root causes collapsing into the same sentence is the exact bug \
+             this check exists to fix — an operator who raises the RAM limit and restarts \
+             would see 'no configurado' again and have no idea it ever meant something else"
+        );
+    }
+
+    #[test]
+    fn a_loaded_model_says_whether_it_is_reachable_by_default() {
+        let with_gpu = reranker_check(true, true, true, false, 8000, "full", true);
+        assert_eq!(with_gpu.status, Status::Ok);
+        assert!(
+            with_gpu.detail.contains("activo por defecto: true"),
+            "{}",
+            with_gpu.detail
+        );
+
+        let without_gpu = reranker_check(true, true, true, false, 8000, "full", false);
+        assert_eq!(without_gpu.status, Status::Ok);
+        assert!(
+            without_gpu.detail.contains("activo por defecto: false"),
+            "the model can load fine on CPU and still be unreachable by default — the two \
+             facts are independent and this message is the only place that says so: {}",
+            without_gpu.detail
+        );
+        assert!(
+            without_gpu.detail.contains("rerank:true"),
+            "an operator who wants it anyway needs the exact escape hatch spelled out: {}",
+            without_gpu.detail
+        );
+    }
+
+    #[test]
+    fn a_model_on_disk_that_fails_to_load_is_still_a_failure() {
+        assert_eq!(
+            reranker_check(true, true, false, false, 8000, "full", true).status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn genuinely_no_model_on_disk_is_only_a_warning() {
+        let check = reranker_check(false, false, false, false, 8000, "full", false);
+        assert_eq!(check.status, Status::Warn);
+        assert!(check.detail.contains("no hay modelo en disco"));
     }
 }

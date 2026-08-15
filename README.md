@@ -125,7 +125,7 @@ Everything lands in `~/.cache/cuba-memorys/` and is found automatically. `models
 
 **Real isolation when you share.** A shared database is where row-level security stops being decorative. Run `cuba-memorys secure` once (as the admin role) to create a non-superuser `cuba_app` with RLS and append-only audit actually enforced, then point the runtime at it with `CUBA_SKIP_MIGRATIONS=1`. `cuba-memorys doctor` reports whether the runtime role is a superuser (which bypasses all of it) or not.
 
-**Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+93% nDCG) and `cuba_docs`. On a GPU the reranker is instant; on CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
+**Maximum capability.** `CUBA_MODE=completo` turns on the cross-encoder reranker (+93% nDCG) and `cuba_docs`. **The reranker no longer needs that mode when the machine can actually run it**: a build with a GPU provider that finds a working device turns it on by itself, because that is where it fits its budget. On CPU it stays off by default — the table below is why — and `cuba-memorys doctor` says which of the three reasons applies. Asking for `rerank: true` in the call still overrides everything. On CPU `faro` time-boxes it and falls back to the RRF ranking (`CUBA_RERANK_TIMEOUT_SECS`, default 20 s), so a slow machine still answers. GPU binaries ship with CUDA (NVIDIA) and, on Windows, DirectML (any GPU) — `cuba-memorys models runtime --gpu` fetches the accelerated runtime.
 
 Fetching the GPU runtime is only half of it: **the binary itself has to be built with `--features cuda`**, or `gpu::configure()` registers no provider and the reranker runs on CPU. That is not a hypothetical — it is what a 50-candidate rerank costs on a 6-core laptop, measured with `cargo run --release --example rerank_bench`:
 
@@ -219,6 +219,8 @@ The same four actions are `cuba_sync action=export|import|diff|status`. A bundle
 
 Anything in an incoming bundle that looks like a credential is stored `quarantined` instead of trusted — withheld from `cuba_faro` and `cuba_expediente` until you promote it with `cuba_eco` — because an import reads JSON out of a repository anyone with push access can write to.
 
+**A peer that only ever reads.** `CUBA_PEER_TOKEN` reaches five more verbs and nothing else. `pull` returns the bundle in the response instead of writing it anywhere, paged by file (`limit`, `offset`) up to a 3 MB budget per page — abort if `manifest_hash` changes between pages, because that means this node was written to mid-transfer and the pages describe two different states. `notify` is the one write a peer token may make: a short `summary` (at most 2000 characters) saying the other machine learned something, tagged with `node_id`/`node_name`, surfaces at the next `cuba_jornada start` and in `status`, and closes itself when a bundle carrying its `manifest_hash` is imported — it never enters the graph itself. `conflicts` lists the rows two machines disagree about with both texts, and `resolve id=… keep=ours|theirs|both` closes one: `keep=both` (the default) keeps this machine's text current and files the other in `previous_versions`, discarding nothing, while `theirs` also clears the embedding because it described text that is no longer here. `fetch` is the other half and runs on the local machine: it pages a peer's `pull` over HTTP, lands the files, imports them with the same validation as any bundle, and records the peer's manifest hash so the next `fetch` stops before opening a transaction when nothing changed. Embeddings are omitted by default on export and included by default on `pull` — a peer that receives text without vectors cannot search what it just received until it re-embeds, which on a machine without a GPU is slow and sequential — and a bundle whose model or dimension does not match this machine is refused rather than silently filling the index with vectors from another space.
+
 ### And it tells you when it is broken
 
 ```
@@ -265,7 +267,7 @@ So `--apply` merges only what is **provable** (identical after normalizing case 
 
 ## The 28 tools
 
-Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise an everyday core of 6 plus `cuba_tools` + `cuba_call` — **8 of 30, a 73% smaller catalogue with zero functions lost**, the rest reachable on demand.
+Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise an everyday core of 6 plus `cuba_tools` + `cuba_call` — **8 of 28, a 66% smaller catalogue with zero functions lost**, the rest reachable on demand.
 
 **Knowledge graph** — `cuba_alma` (entities) · `cuba_cronica` (observations, episodes, timeline) · `cuba_puente` (typed relations, traversal, link prediction) · `cuba_ingesta` (bulk import)
 
@@ -298,7 +300,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_QUERY_PREFIX` · `CUBA_PASSAGE_PREFIX` | `query: ` · `passage: ` | Instruction prefixes prepended before tokenising. E5 was trained with them; `bge-m3` was not — set both to the empty string when you switch, or every vector is computed on text the model never saw that way |
 | `CUBA_CHUNK_THRESHOLD_CHARS` · `CUBA_CHUNK_CHARS` | `1800` · `1400` | Content longer than the threshold is split into chunks of this many characters (200-char overlap). `CUBA_CHUNK_CHARS` is floored at 200. A value that is not a positive integer falls back to the default |
 | `CUBA_EMBED_CONCURRENCY` | `1` | Permits on the semaphore around the ONNX embedding session. Sized once, on first use |
-| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 28, 71% smaller catalogue, nothing lost |
+| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 28, 66% smaller catalogue, nothing lost |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
 | `CUBA_JUEZ_CLI` · `CUBA_JUEZ_MODEL` | `claude` · `claude-haiku-4-5` | The CLI the offline judge shells out to, and the model it asks for. `CUBA_JUEZ_CLI` also decides the automatic path: if that name is not on `PATH` there is no CLI judge and the choice falls through |
 | `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Budget for one judgement, CLI and API alike. Anything that does not parse as an integer leaves the default |
@@ -335,8 +337,10 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_PG_BIND` | `127.0.0.1` | Host address the managed Postgres container publishes its port on. Anything but loopback exposes the database to the network |
 | `CUBA_RANDOM_PAGE_COST` · `CUBA_IO_CONCURRENCY` | `1.1` · `200` | Per-connection planner settings for the pool. Accepted ranges are `0.1`–`10.0` and `≤ 1000`; outside them the default stands |
 | `CUBA_REM_AUTOLINK` | on | `0` / `off` / `false` stops the REM cycle from creating NPMI co-occurrence edges between entities |
-| `CUBA_REM_RELATION_BATCH` | `5` | Entities the REM cycle runs a relation scan over per pass. `0` skips the scan |
+| `CUBA_REM_FIRST_DELAY_SECS` | `300` | How long after start-up the first REM consolidation runs. It used to be `REM_INTERVAL` — four hours — because the loop consumed the interval's first tick, which resolves instantly. Under stdio the process rarely lives that long, so the cycle never ran there at all, and every machine restart put the counter back to zero |
+| `CUBA_REM_RELATION_BATCH` | `5` | Entities the REM cycle runs a relation scan over per pass. `0` skips the scan. Left unset it adapts: 20 while 50 or more entities are still waiting, back to 5 once the queue drains — 226 pending at 5 per 4-hour cycle is a week |
 | `CUBA_REM_SCAN_TIMEOUT_SECS` | `90` | Budget for one entity's relation scan |
+| `CUBA_REM_EXTRACTION_BATCH` | `5` | Observations the REM cycle runs `cuba_ingesta auto_extract` over per pass, right after the relation scan. `0` skips it. What it finds is written `trust=quarantined`, always — this is the graph's only fully unattended writer, so nothing it produces is visible to `cuba_faro` until `cuba_eco action=promote` clears it by hand |
 | `CUBA_REM_BACKFILL_LIMIT` | `100` | Observations without an embedding that the REM cycle backfills per pass. `0` disables the backfill; a negative value leaves the default |
 | `CUBA_SYNC_DIR` | unset → `.cuba-memorys` under the working directory | Root for `cuba_sync` export/import. It is also the confinement boundary: a `--dir` outside this root is refused, so setting it is how you sync somewhere else instead of escaping with `../` |
 | `CUBA_UNDO_DIR` | `~/.cache/cuba-memorys/undo` | Where destructive CLI commands write their undo snapshots |
@@ -497,7 +501,7 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 |---|---|
 | **`compact` by default** | **−30% tokens, nDCG +0.0090** (paired 95% CI [+0.0024, +0.0166], n=191). The earlier "exactly 0.0000" was measured with a harness that let the 5000-token response budget truncate the ranking before scoring it: verbose lost its tail, compact did not. The old "−40%" came from the broken benchmark. |
 | **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
-| **`lean` tool profile** | 8 tools of 28, −71% catalogue, zero functions lost. |
+| **`lean` tool profile** | 8 tools of 28, −66% catalogue, zero functions lost. |
 | **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |
 | **The benchmark itself** | 221 queries (was 10), relevance by document **id**, bootstrap confidence intervals, and the **minimum detectable effect** printed beside every result — so nobody reads a 3-point difference as a finding again. |
 

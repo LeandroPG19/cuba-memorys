@@ -66,6 +66,8 @@ pub fn importance_prior(obs_type: &str, density: f64) -> f64 {
     }
 }
 
+const ALLOW_SECRET_DESC: &str = "Refused when the text looks like a live credential (token, password, URL with embedded creds). Set true only for a false match — the text is then stored verbatim, in clear, and reachable by search, export and every client.";
+
 static TOOL_DEFS: OnceLock<Vec<Value>> = OnceLock::new();
 
 pub fn tool_definitions() -> &'static Vec<Value> {
@@ -100,14 +102,14 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "observations": {"type": "array", "items": {"type": "object"}, "description": "Array of {entity_name, content, observation_type?, source?} objects (for batch_add, max 100)"},
                     "actors": {"type": "array", "items": {"type": "string"}, "description": "People/agents involved in episode (for episode_add)"},
                     "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Files/resources affected in episode (for episode_add)"},
-                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the text carries what looks like a live credential (token, password field, credentials in a URL): stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
         ),
         tool_def(
             "cuba_faro",
-            "Search memory BEFORE answering to ground responses. Returns grounding scores. Mode 'verify' checks claims against evidence (confidence: verified/partial/weak/unknown). Session-aware: boosts results matching active session goals. Supports temporal filtering. v0.9: optional MMR diversification + OOD abstention + exact tiktoken-based budget.",
+            "Search memory BEFORE answering to ground responses. Returns grounding scores. Mode 'verify' checks claims against evidence (confidence: verified/partial/weak/unknown). Session-aware: boosts results matching active session goals. Supports temporal filtering. Optional MMR diversification, OOD abstention and an exact tiktoken-based token budget.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -120,13 +122,13 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "format": {"type": "string", "enum": ["verbose", "compact"], "description": "Response format. compact (DEFAULT): abbreviated keys — e=entity, c=content, t=type, i=importance, s=score. 71% fewer tokens (798 vs 2787 at limit=10, measured). verbose: full key names, only when you need every field."},
                     "tags": {"type": "string", "description": "Filter observations by tag keyword (exact match against auto-extracted tags)"},
                     "max_tokens": {"type": "integer", "description": "Token budget for results (default 5000). Counted exactly via tiktoken cl100k_base."},
-                    "diversify": {"type": "boolean", "description": "v0.9: post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},
-                    "mmr_lambda": {"type": "number", "description": "v0.9: MMR balance — 1.0 pure relevance, 0.0 pure diversity. Default 0.7."},
-                    "abstain_ood": {"type": "boolean", "description": "v0.9: abstain (return empty results with abstain_reason) when query is out-of-distribution via Mahalanobis distance. Default false."},
-                    "ood_threshold": {"type": "number", "description": "v0.9: Mahalanobis distance threshold for abstention. Defaults to sqrt(chi2_0.99(d)), which scales with the embedding dimension (~21.25 for d=384). Override only if you calibrated on your own corpus."},
-                    "enable_bm25": {"type": "boolean", "description": "v0.9: enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector. Catches queries with rare terms that dense embeddings miss. Default true."},
-                    "rerank": {"type": "boolean", "description": "v0.9.2: cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3 (Xiao 2023). Auto-enabled when CUBA_RERANKER_PATH points to a valid ONNX. Identity fallback otherwise."},
-                    "associative": {"type": "boolean", "description": "v0.11: multi-hop expansion (HippoRAG-style). Seeds spreading activation from query-matched entities and pulls in observations on graph-connected entities that no lexical/vector signal surfaced. Additive — never lowers a base hit. Measured +10pts recall@10 on the smoke set. Default false."}
+                    "diversify": {"type": "boolean", "description": "Post-RRF MMR pass that penalizes near-duplicates among top-K. Default false."},
+                    "mmr_lambda": {"type": "number", "description": "MMR balance — 1.0 pure relevance, 0.0 pure diversity. Default 0.7."},
+                    "abstain_ood": {"type": "boolean", "description": "Abstain (return empty results with abstain_reason) when the query is out-of-distribution via Mahalanobis distance. Default false."},
+                    "ood_threshold": {"type": "number", "description": "Mahalanobis distance threshold for abstention. Defaults to sqrt(chi2_0.99(d)), which scales with the embedding dimension (~21.25 for d=384). Override only if you calibrated on your own corpus."},
+                    "enable_bm25": {"type": "boolean", "description": "Enable BM25 (ts_rank_cd) as third RRF signal alongside text + vector. Catches queries with rare terms that dense embeddings miss. Default true."},
+                    "rerank": {"type": "boolean", "description": "Cross-encoder rerank top-50 → top-K with bge-reranker-v2-m3. Auto-enabled when CUBA_MODE=completo, or when this build has a real GPU provider active (CUDA/DirectML compiled in AND a working device). Off by default everywhere else, even with the model on disk: on CPU it costs 60-110s and blows the search budget. Explicit true/false always wins; run `cuba-memorys doctor` to see which reason applies here."},
+                    "associative": {"type": "boolean", "description": "Multi-hop expansion: seeds spreading activation from query-matched entities and pulls in observations on graph-connected entities that no lexical/vector signal surfaced. Additive — never lowers a base hit. Default false."}
                 },
                 "required": ["query"]
             }),
@@ -163,7 +165,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "id": {"type": "string", "description": "Target UUID for promote/quarantine when kind is episode or error. For kind=observation use observation_id."},
                     "correction": {"type": "string", "description": "New content (for correct action)"},
                     "limit": {"type": "integer", "description": "Max rows for the 'pending' listing (default 20, max 200)"},
-                    "allow_secret": {"type": "boolean", "description": "A correction is refused when it carries what looks like a live credential (token, password field, credentials in a URL) — it overwrites stored content, so without this gate it is a way past the one cuba_cronica applies on the way in. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
@@ -178,7 +180,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "error_message": {"type": "string", "description": "Full error message"},
                     "context": {"type": "object", "description": "Context: {file, function, stack_trace, line}"},
                     "project": {"type": "string", "description": "Project name (default: 'default')"},
-                    "allow_secret": {"type": "boolean", "description": "Writes are refused when error_message or context carry what looks like a live credential (token, password field, credentials in a URL) — a stack trace with a header in it is the usual case. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["error_type", "error_message"]
             }),
@@ -191,7 +193,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                 "properties": {
                     "error_id": {"type": "string", "description": "UUID of the error to solve"},
                     "solution": {"type": "string", "description": "Solution that fixed the error"},
-                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the solution carries what looks like a live credential (token, password field, credentials in a URL) — 'it was fixed by exporting this key' is the usual case. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["error_id", "solution"]
             }),
@@ -222,7 +224,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "project": {"type": "string", "description": "v0.8: project name to bind this session to (created on first use). Omit to keep session global."},
                     "outcome": {"type": "string", "enum": ["success", "partial", "failed", "abandoned"], "description": "Session outcome (for end)"},
                     "summary": {"type": "string", "description": "What was accomplished (for end)"},
-                    "allow_secret": {"type": "boolean", "description": "Ending a session is refused when the summary carries what looks like a live credential (token, password field, credentials in a URL); the summary is replayed to the next session as previous_session.summary. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
@@ -240,30 +242,30 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "chosen": {"type": "string", "description": "Option chosen"},
                     "rationale": {"type": "string", "description": "Why this option was chosen"},
                     "query": {"type": "string", "description": "Search text (for query action)"},
-                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the recorded decision carries what looks like a live credential (token, password field, credentials in a URL): stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
         ),
         tool_def(
             "cuba_vigia",
-            "Knowledge graph analytics: summary (counts + token estimate), health (staleness, entropy, DB size), drift (chi-squared on errors), communities (Leiden), bridges (betweenness centrality). v0.9: 'structural' returns harmonic + closeness + k-core ranking for backbone identification.",
+            "Knowledge graph analytics: summary, health, drift, communities, bridges, structural.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "metric": {"type": "string", "enum": ["summary", "health", "drift", "communities", "bridges", "structural"], "description": "Metric to compute. v0.9: 'structural' adds harmonic + closeness centrality (Boldi-Vigna 2014, Bavelas 1950) + k-core decomposition (Seidman 1983)."}
+                    "metric": {"type": "string", "enum": ["summary", "health", "drift", "communities", "bridges", "structural"], "description": "summary: counts + token estimate. health: staleness, entropy, DB size. drift: chi-squared on errors. communities: Leiden clustering. bridges: betweenness centrality. structural: harmonic + closeness centrality + k-core ranking (backbone identification)."}
                 },
                 "required": ["metric"]
             }),
         ),
         tool_def(
             "cuba_zafra",
-            "Memory maintenance: decay (stratified exponential by type), prune (remove low-importance), merge (deduplicate), summarize (compress observations), pagerank (personalized importance), find_duplicates, export, stats, reembed (re-encode with current model). prune PLANS by default: it reports how many observations it would delete, broken down by project, and only deletes when you pass confirm=true. Every action is scoped to the active project.",
+            "Memory maintenance, scoped to the active project: decay, prune, merge, summarize, pagerank, find_duplicates, export, reembed, decay_episodes.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export", "reembed", "decay_episodes"], "description": "Consolidation action. decay_episodes applies power-law decay to brain_episodes."},
-                    "confirm": {"type": "boolean", "description": "prune only: actually delete. Without it prune returns a dry-run plan with would_prune and by_project, and deletes nothing. Read the plan before setting this — the default threshold reaches a large share of a mature corpus."},
+                    "action": {"type": "string", "enum": ["decay", "prune", "merge", "summarize", "stats", "pagerank", "find_duplicates", "export", "reembed", "decay_episodes"], "description": "decay: stratified exponential decay by type. prune: deletes low-importance observations, dry-run unless confirm=true. merge: deduplicates similar entities. summarize: replaces an entity's observations with compressed_summary. stats: counts. pagerank: personalized importance ranking. find_duplicates: lists near-duplicate pairs. export: writes a JSON dump. reembed: re-encodes with the current model. decay_episodes: power-law decay on brain_episodes."},
+                    "confirm": {"type": "boolean", "description": "prune only: actually delete. Without it, prune returns a dry-run plan (would_prune, by_project) and deletes nothing — read the plan first, the default threshold reaches a large share of a mature corpus."},
                     "entity_name": {"type": "string", "description": "Entity to summarize (for summarize action)"},
                     "compressed_summary": {"type": "string", "description": "Compressed text replacing observations (for summarize)"},
                     "threshold": {"type": "number", "description": "Importance threshold for prune (default 0.1)"},
@@ -272,7 +274,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "halflife_days": {"type": "number", "description": "Global halflife override for decay (overrides per-type stratification)"},
                     "c": {"type": "number", "description": "Power-law c parameter for decay_episodes (default 0.1)"},
                     "beta": {"type": "number", "description": "Power-law β exponent for decay_episodes (default 0.5)"},
-                    "allow_secret": {"type": "boolean", "description": "summarize is refused when compressed_summary carries what looks like a live credential (token, password field, credentials in a URL); it supersedes every observation of the entity, so this text is the only survivor. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
@@ -291,22 +293,22 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_reflexion",
-            "Analyze knowledge graph for structural gaps: isolated entities, underconnected hubs, type silos, observation gaps (missing decisions/lessons), and statistical density anomalies. Read-only introspection.",
+            "Analyze the knowledge graph for structural gaps. Read-only.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["analyze"], "description": "Gap analysis action (only 'analyze' supported)"}
+                    "action": {"type": "string", "enum": ["analyze"], "description": "analyze: the only action. Reports isolated entities, underconnected hubs, type silos, observation gaps (missing decisions/lessons), and statistical density anomalies."}
                 },
                 "required": ["action"]
             }),
         ),
         tool_def(
             "cuba_hipotesis",
-            "Abductive inference: given an observed effect, find plausible causes by traversing causal relations backwards. Returns hypotheses ranked by plausibility (path_strength × importance). Read-only.",
+            "Abductive inference: find plausible causes of an observed effect. Read-only.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["explain"], "description": "Inference action"},
+                    "action": {"type": "string", "enum": ["explain"], "description": "explain: traverse causal relations backwards from `effect`, ranked by path_strength × importance."},
                     "effect": {"type": "string", "description": "Entity name representing the observed effect"},
                     "max_depth": {"type": "integer", "description": "Max causal chain hops (default 3, max 5)"},
                     "limit": {"type": "integer", "description": "Max hypotheses to return (default 10, max 50)"}
@@ -328,15 +330,15 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_centinela",
-            "Prospective memory: set triggers that fire when entities are accessed, sessions start, or errors match. 'Remember to remind me about X when Y happens.' Between two AI sessions on the same daemon this is also the note channel: condition_type='on_session_start' with the other session's name as entity_pattern reaches it the next time it opens, exactly once (max_fires), and carries who left it.",
+            "Prospective memory: triggers that fire on entity access, session start, or error match. 'Remember to remind me about X when Y happens.'",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["create", "list", "delete", "check"], "description": "Trigger action"},
+                    "action": {"type": "string", "enum": ["create", "list", "delete", "check"], "description": "create: define a trigger. list: show triggers. delete: remove one (trigger_id). check: evaluate now."},
                     "entity_pattern": {"type": "string", "description": "Entity name or pattern to match"},
-                    "condition_type": {"type": "string", "enum": ["on_access", "on_session_start", "on_error_match"], "description": "When to fire"},
+                    "condition_type": {"type": "string", "enum": ["on_access", "on_session_start", "on_error_match"], "description": "When to fire. on_session_start with the other session's name as entity_pattern is also the cross-session note channel: fires once (max_fires) the next time that session starts, carrying who left it."},
                     "message": {"type": "string", "description": "Reminder message to surface when triggered"},
-                    "allow_secret": {"type": "boolean", "description": "Creating a trigger is refused when the message carries what looks like a live credential (token, password field, credentials in a URL); the message is pushed unprompted into the response of whatever matches the pattern. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."},
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC},
                     "max_fires": {"type": "integer", "description": "Max times to fire (default 1, -1 for unlimited)"},
                     "expires_at": {"type": "string", "description": "ISO8601 expiration datetime"},
                     "trigger_id": {"type": "string", "description": "Trigger UUID (for delete)"}
@@ -346,11 +348,11 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_calibrar",
-            "Bayesian confidence calibration: track verify predictions, mark outcomes, compute P(correct|level). Closes the feedback loop between faro verify and eco correct. v0.9: action 'trust' returns per-source credibility (Beta posterior updated by resolve outcomes; Yin-Han-Yu IEEE TKDE 2008).",
+            "Bayesian confidence calibration: track verify predictions, mark outcomes, compute P(correct|level). Closes the feedback loop between faro verify and eco correct.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["stats", "history", "resolve", "trust", "metrics"], "description": "Calibration action. v0.9: 'trust' returns per-source Beta(α, β) credibility; 'metrics' returns Brier score (1950) + Expected Calibration Error (Naeini AAAI 2015) + reliability diagram."},
+                    "action": {"type": "string", "enum": ["stats", "history", "resolve", "trust", "metrics"], "description": "stats/history: past predictions. resolve: mark a verify_id correct/incorrect. trust: per-source Beta(α, β) credibility, updated by resolve outcomes. metrics: Brier score + Expected Calibration Error + reliability diagram."},
                     "verify_id": {"type": "string", "description": "Verify log UUID (for resolve)"},
                     "outcome": {"type": "string", "enum": ["correct", "incorrect"], "description": "Whether the verify prediction was right (for resolve)"},
                     "limit": {"type": "integer", "description": "Max results for history (default 20)"}
@@ -371,7 +373,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "entity_hint": {"type": "string", "description": "Optional main-subject hint for auto_extract (biases entity_name)"},
                     "supersede_conflicts": {"type": "boolean", "description": "v0.11 (auto_extract): when a new fact replaces/contradicts an existing related one, ask the judge and mark the old observation superseded (knowledge-update; never deletes). Default false."},
                     "untrusted": {"type": "boolean", "description": "Set when the text came from somewhere you do not control (a fetched page, a pasted document, a third party). Everything extracted lands quarantined — stored and inspectable via cuba_eco action=pending, but withheld from cuba_faro until promoted. Default false."},
-                    "allow_secret": {"type": "boolean", "description": "Ingestion is refused when an item's content, or the raw text handed to parse/auto_extract, carries what looks like a live credential (token, password field, credentials in a URL) — pasting a whole work log is the likeliest way one arrives. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
@@ -391,48 +393,48 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_pre_compact",
-            "Compaction-survival protocol (v0.8). Before the agent runs /compact, call action='snapshot' to persist a dense markdown summary of the active session (recent observations, decisions, unresolved errors, pending embeddings, goals). After compaction, call action='restore' to retrieve the latest snapshot for the active session and re-inject it into context.",
+            "Compaction-survival protocol: persist and restore a session summary across /compact.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["snapshot", "restore"], "description": "snapshot persists a session summary; restore returns the latest"}
+                    "action": {"type": "string", "enum": ["snapshot", "restore"], "description": "snapshot: before /compact, persists a dense markdown summary (observations, decisions, unresolved errors, pending embeddings, goals) for the active session. restore: after /compact, retrieves the latest snapshot and re-injects it into context."}
                 },
                 "required": ["action"]
             }),
         ),
         tool_def(
             "cuba_sync",
-            "Git-friendly export/import of the knowledge graph. action='export' writes one JSON file per entity (observations embedded) plus episodes, errors, relations, projects and tombstones under CUBA_SYNC_DIR (default ./.cuba-memorys/). 'import' applies the bundle: deletions travel as tombstones and are applied before inserts, rows the database would reject are refused before the transaction opens rather than aborting it halfway, and importance/access_count/strength are merged as the maximum of both machines so neither side loses what it learned. 'diff' compares disk vs DB. 'status' lists not-yet-imported manifests. 'pull' returns the bundle in the response instead of writing it anywhere, paged by file, for another machine holding a peer token: it is the only write-free way to hand this node's memory over, and the receiving side writes the pages to its own directory and runs a normal import. 'notify' is the one write a peer token may make: a short message saying the other machine learned something, which surfaces at the next cuba_jornada start and in status, and closes itself when a bundle with its manifest_hash is imported. It never enters the graph. 'conflicts' lists the rows two machines disagree about, with both texts, and 'resolve' closes one with keep=ours|theirs|both — 'both' keeps this machine's text current and files the other in previous_versions, discarding nothing. 'fetch' is the other half and runs on the local machine: it pages a peer's pull over HTTP with CUBA_PEER_TOKEN, lands the files, imports them with the same validation as any bundle, and records the peer's manifest hash so the next fetch stops before opening a transaction when nothing changed. Embeddings are omitted by default; when included, a bundle whose model or dimension does not match this machine is refused rather than silently filling the index with vectors from another space.",
+            "Git-friendly export/import of the knowledge graph between machines that share no database. export/import/diff/status work on a local directory (default ./.cuba-memorys/); pull/notify/fetch/conflicts/resolve talk to a peer over HTTP with CUBA_PEER_TOKEN.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["export", "import", "diff", "status", "pull", "notify", "fetch", "conflicts", "resolve"], "description": "Sync mode"},
-                    "id": {"type": "string", "description": "resolve only: the conflict id from action=conflicts."},
-                    "keep": {"type": "string", "enum": ["ours", "theirs", "both"], "description": "resolve only: which text stays current. Default 'both' — this machine's text stays and the other machine's is filed in previous_versions, which is the only choice that loses nothing. 'theirs' also clears the embedding, because it described text that is no longer there."},
-                    "peer": {"type": "string", "description": "fetch only: which peer to pull from (default 'default'). The address is remembered per name after the first fetch."},
-                    "url": {"type": "string", "description": "fetch only: base address of the other daemon, e.g. https://brain.example.net. Falls back to the address recorded for this peer, then to CUBA_PEER_URL."},
-                    "summary": {"type": "string", "description": "notify only: what the other machine learned, in at most 2000 characters. It is a signal, not a payload — the memory itself travels through pull, which is validated and quarantined."},
-                    "node_id": {"type": "string", "description": "notify only: which node is speaking. Self-asserted and unverified: the token is the authentication, this is a label."},
-                    "node_name": {"type": "string", "description": "notify only: the readable name of the node sending the notice."},
-                    "manifest_hash": {"type": "string", "description": "notify only: the bundle hash this notice refers to. Importing a bundle with that hash closes the notice, which is what stops the same signal being reported forever."},
-                    "limit": {"type": "integer", "description": "pull only: at most this many files per page. The response is capped by size regardless; this is for a peer on a slow link that wants smaller pages than the 3 MB budget."},
-                    "offset": {"type": "integer", "description": "pull only: index of the first bundle file to return. Page until has_more is false, and abort if manifest_hash changes between pages — that means this node was written to mid-transfer and the pages describe two different states."},
+                    "action": {"type": "string", "enum": ["export", "import", "diff", "status", "pull", "notify", "fetch", "conflicts", "resolve"], "description": "export/import/diff/status: local bundle round-trip. pull: return the bundle in the response instead of writing it, for a peer to fetch. notify: tell a peer what changed. fetch: pull a peer's bundle over HTTP and import it. conflicts/resolve: list and settle rows two machines disagree about."},
+                    "id": {"type": "string", "description": "resolve only: the conflict id from action=conflicts"},
+                    "keep": {"type": "string", "enum": ["ours", "theirs", "both"], "description": "resolve only: which text stays current (default 'both', which loses nothing)"},
+                    "peer": {"type": "string", "description": "fetch only: which peer to pull from (default 'default')"},
+                    "url": {"type": "string", "description": "fetch only: the peer's base address, e.g. https://brain.example.net"},
+                    "summary": {"type": "string", "description": "notify only: what changed, in at most 2000 characters"},
+                    "node_id": {"type": "string", "description": "notify only: self-asserted id of the sending node"},
+                    "node_name": {"type": "string", "description": "notify only: readable name of the sending node"},
+                    "manifest_hash": {"type": "string", "description": "notify only: the bundle hash this notice refers to"},
+                    "limit": {"type": "integer", "description": "pull only: max files per page"},
+                    "offset": {"type": "integer", "description": "pull only: index of the first bundle file to return"},
                     "dir": {"type": "string", "description": "Directory override (default $CUBA_SYNC_DIR or ./.cuba-memorys/)"},
-                    "scope": {"type": "string", "enum": ["project", "all"], "description": "Export scope: only the active project (default) or all data"},
-                    "with_embeddings": {"type": "boolean", "description": "Include the embeddings.bin.zst blob. Default false on export, true on pull: a peer that receives text without vectors cannot search what it just received until it re-embeds, and on a machine without a GPU that is slow and sequential."},
-                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "How to resolve a row that exists on both sides. merge and skip behave identically for CONTENT — whatever is already here wins and the incoming text is dropped, with the diverging ids reported. overwrite takes the incoming text and pushes the replaced version into previous_versions, so nothing is lost either way. Counters are not content: entity importance and access_count, and relation strength, merge as the maximum under both policies."},
-                    "confirm": {"type": "boolean", "description": "Required when a bundle's tombstones would delete more than 10% of this machine's observations, and at least 25 rows. Below that it is not needed — a guard that trips on ordinary curation is one everybody learns to pass through. A bundle that deletes a large share of your memory is either a mistake or a peer worth distrusting, and this is what stands between that and a remote wipe."}
+                    "scope": {"type": "string", "enum": ["project", "all"], "description": "Export scope: active project only (default) or all data"},
+                    "with_embeddings": {"type": "boolean", "description": "Include embeddings (default false on export, true on pull)"},
+                    "conflict": {"type": "string", "enum": ["merge", "skip", "overwrite"], "description": "How to resolve a row that exists on both sides (default merge; merge and skip keep local content, overwrite takes the incoming version)"},
+                    "confirm": {"type": "boolean", "description": "Required when the import's tombstones would delete more than 10% of this machine's observations and at least 25 rows"}
                 },
                 "required": ["action"]
             }),
         ),
         tool_def(
             "cuba_archivo",
-            "Tamper-evident audit log (v0.9, CFR-21 Part 11 inspired). Append-only with SHA-256 hash chain — every row's current_hash commits to the previous row's, the action and the canonical payload. UPDATE/DELETE blocked at the PostgreSQL trigger level (only `cuba_admin` role can bypass). Use 'verify' to walk the chain and detect tampering, 'tail' to read recent events, 'append' to add a new event.",
+            "Tamper-evident audit log: append-only, SHA-256 hash chain, UPDATE/DELETE blocked at the PostgreSQL trigger level.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["append", "verify", "tail"], "description": "Audit operation"},
+                    "action": {"type": "string", "enum": ["append", "verify", "tail"], "description": "append: add an event. verify: walk the hash chain and detect tampering. tail: read recent events."},
                     "event_action": {"type": "string", "description": "Event type (for append)"},
                     "payload": {"type": "object", "description": "Arbitrary JSON payload (for append)"},
                     "limit": {"type": "integer", "description": "Limit for verify/tail (default 10000 / 20)"}
@@ -450,7 +452,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "content": {"type": "string", "description": "Content to store (for write)"},
                     "tag": {"type": "string", "description": "Optional tag for filtering on read/clear"},
                     "ttl_seconds": {"type": "integer", "description": "Time-to-live in seconds (default 3600)"},
-                    "allow_secret": {"type": "boolean", "description": "Writes are refused when the content carries what looks like a live credential (token, password field, credentials in a URL); a TTL is not protection — the row is readable, dumped and backed up for as long as it lives. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
@@ -470,11 +472,11 @@ pub fn tool_definitions() -> &'static Vec<Value> {
         ),
         tool_def(
             "cuba_juez",
-            "LLM-judge for semantically-conflicting observations (v0.8). When cosine similarity sits in the ambiguous band (0.6-0.8), heuristic detectors miss vocabulary-different conflicts (e.g. 'Postgres' vs 'MongoDB'). cuba_juez escalates a pair to a real LLM via subprocess (Claude Code CLI, $0 if you have a subscription). Verdicts are persisted in brain_judgments (UNIQUE per pair = permanent cache).",
+            "LLM-judge for semantically-conflicting observations in the ambiguous cosine-similarity band (0.6-0.8), where heuristics miss vocabulary-different conflicts. Verdicts are cached in brain_judgments.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["judge_pair", "scan_entity"], "description": "judge_pair = decide on two given obs ids; scan_entity = pull ambiguous pairs and judge each"},
+                    "action": {"type": "string", "enum": ["judge_pair", "scan_entity"], "description": "judge_pair: decide on two given observation ids. scan_entity: pull ambiguous pairs for an entity and judge each."},
                     "observation_a": {"type": "string", "description": "UUID of first observation (for judge_pair)"},
                     "observation_b": {"type": "string", "description": "UUID of second observation (for judge_pair)"},
                     "entity_name": {"type": "string", "description": "Entity to scan (for scan_entity)"},
@@ -501,7 +503,7 @@ pub fn tool_definitions() -> &'static Vec<Value> {
                     "success": {"type": "boolean", "description": "For action=outcome: did it work?"},
                     "query": {"type": "string", "description": "For action=search"},
                     "limit": {"type": "integer", "description": "Max results"},
-                    "allow_secret": {"type": "boolean", "description": "Adding a procedure is refused when any part of it — name, trigger, a step's `run` command, preconditions or verification — carries what looks like a live credential (token, password field, credentials in a URL). A recipe is a list of commands to paste, so `run` is where one usually lands. Stored memory is searchable, exported to JSON inside a git repo, and served to every client. Set true only when the match is not a live credential — the text is stored verbatim, in clear."}
+                    "allow_secret": {"type": "boolean", "description": ALLOW_SECRET_DESC}
                 },
                 "required": ["action"]
             }),
