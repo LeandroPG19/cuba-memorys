@@ -28,6 +28,24 @@ type FailureRow = (
 
 type ConflictRow = (uuid::Uuid, uuid::Uuid, String, String, Option<String>);
 
+type RemCycleRow = (
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+);
+
+const REM_STALE_AFTER_SECS: i64 = 5 * 3600;
+
 pub const METHODS: [&str; 4] = [
     "admin/status",
     "admin/clients",
@@ -80,6 +98,8 @@ async fn status(pool: &PgPool, uptime_secs: u64) -> Result<Value> {
     .await
     .unwrap_or((0, 0, 0, 0));
 
+    let rem = rem_status(pool).await;
+
     Ok(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs,
@@ -98,7 +118,73 @@ async fn status(pool: &PgPool, uptime_secs: u64) -> Result<Value> {
             "relations": counts.3,
         },
         "checks": checks,
+        "rem": rem,
     }))
+}
+
+fn rem_cycle_json(row: &RemCycleRow) -> Value {
+    let (
+        started_at,
+        finished_at,
+        duration_ms,
+        decayed_count,
+        autolink_edges,
+        embeddings_backfilled,
+        entities_scanned,
+        facts_extracted,
+        communities,
+        duplicate_candidates,
+        relation_scan_failed,
+        extraction_failed,
+        error,
+    ) = row;
+    serde_json::json!({
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_ms": duration_ms,
+        "decayed_count": decayed_count,
+        "autolink_edges": autolink_edges,
+        "embeddings_backfilled": embeddings_backfilled,
+        "entities_scanned": entities_scanned,
+        "facts_extracted": facts_extracted,
+        "communities": communities,
+        "duplicate_candidates": duplicate_candidates,
+        "relation_scan_failed": relation_scan_failed,
+        "extraction_failed": extraction_failed,
+        "error": error,
+        "llm_degraded": *relation_scan_failed > 0 || *extraction_failed > 0,
+    })
+}
+
+fn summarize_rem_cycles(rows: &[RemCycleRow]) -> Value {
+    let last = rows.first();
+    let stale = match last {
+        Some((_, finished_at, ..)) => {
+            (chrono::Utc::now() - *finished_at).num_seconds() > REM_STALE_AFTER_SECS
+        }
+        None => true,
+    };
+
+    serde_json::json!({
+        "last": last.map(rem_cycle_json),
+        "recent": rows.iter().map(rem_cycle_json).collect::<Vec<_>>(),
+        "stale": stale,
+        "stale_after_secs": REM_STALE_AFTER_SECS,
+    })
+}
+
+async fn rem_status(pool: &PgPool) -> Value {
+    let rows: Vec<RemCycleRow> = sqlx::query_as(
+        "SELECT started_at, finished_at, duration_ms, decayed_count, autolink_edges,
+                embeddings_backfilled, entities_scanned, facts_extracted, communities,
+                duplicate_candidates, relation_scan_failed, extraction_failed, error
+         FROM brain_rem_cycles ORDER BY finished_at DESC LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    summarize_rem_cycles(&rows)
 }
 
 async fn clients(pool: &PgPool, connected: Vec<Value>) -> Result<Value> {
@@ -208,4 +294,95 @@ async fn problems(pool: &PgPool) -> Result<Value> {
         "quarantined": quarantined,
         "unresolved_errors": unresolved_errors,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn row(
+        finished_at: chrono::DateTime<Utc>,
+        relation_scan_failed: i64,
+        extraction_failed: i64,
+        error: Option<&str>,
+    ) -> RemCycleRow {
+        (
+            finished_at - Duration::seconds(3),
+            finished_at,
+            3_000,
+            10,
+            2,
+            1,
+            5,
+            4,
+            1,
+            0,
+            relation_scan_failed,
+            extraction_failed,
+            error.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn no_cycle_ever_recorded_is_reported_as_stale_with_no_last_run() {
+        let summary = summarize_rem_cycles(&[]);
+        assert!(
+            summary["last"].is_null(),
+            "an empty history has to say there is no last cycle, not silently show nothing: {summary}"
+        );
+        assert_eq!(
+            summary["stale"], true,
+            "a daemon that has never completed a REM cycle is exactly as urgent as one that \
+             stopped running — both must trip the same alarm: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_recent_cycle_with_nothing_to_do_is_not_stale_and_not_degraded() {
+        let rows = vec![row(Utc::now(), 0, 0, None)];
+        let summary = summarize_rem_cycles(&rows);
+        assert_eq!(summary["stale"], false);
+        assert_eq!(summary["last"]["llm_degraded"], false);
+        assert!(
+            summary["last"]["error"].is_null(),
+            "a cycle that ran and found nothing to decay, link or extract is a healthy cycle, \
+             not a failed one: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_cycle_whose_llm_step_gave_up_is_flagged_even_though_the_cycle_itself_did_not_fail() {
+        let rows = vec![row(Utc::now(), 2, 0, None)];
+        let summary = summarize_rem_cycles(&rows);
+        assert_eq!(
+            summary["last"]["error"],
+            Value::Null,
+            "the cycle completed — run_rem_consolidation returned Ok — so there is no \
+             cycle-level error to show"
+        );
+        assert_eq!(
+            summary["last"]["llm_degraded"], true,
+            "relation_scan_failed=2 is the relation scan giving up after two consecutive \
+             failures, the exact case this record exists to surface: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_cycle_older_than_the_stale_window_is_flagged_even_with_a_clean_run() {
+        let old = Utc::now() - Duration::seconds(REM_STALE_AFTER_SECS + 60);
+        let rows = vec![row(old, 0, 0, None)];
+        let summary = summarize_rem_cycles(&rows);
+        assert_eq!(
+            summary["last"]["error"],
+            Value::Null,
+            "the recorded cycle itself was clean"
+        );
+        assert_eq!(
+            summary["stale"], true,
+            "clean or not, a cycle that finished more than {REM_STALE_AFTER_SECS}s ago means \
+             the daemon has not run one since — the same silence the CLI going missing from \
+             PATH would cause: {summary}"
+        );
+    }
 }

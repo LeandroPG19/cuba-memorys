@@ -694,6 +694,7 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
 }
 
 async fn run_rem_consolidation_locked(pool: &PgPool) -> Result<()> {
+    let started_at = chrono::Utc::now();
     let candidates: Vec<uuid::Uuid> = match crate::session::session_id() {
         Some(sid) => vec![sid],
         None if crate::session::daemon_mode() => {
@@ -841,14 +842,20 @@ async fn run_rem_consolidation_locked(pool: &PgPool) -> Result<()> {
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
 
-    match crate::graph::community::detect_and_persist(pool).await {
-        Ok((communities, nodes_updated)) => tracing::info!(
-            communities = communities.len(),
-            nodes_updated,
-            "community detection updated"
-        ),
-        Err(e) => tracing::warn!(error = %e, "REM: community detection failed"),
-    }
+    let communities_found = match crate::graph::community::detect_and_persist(pool).await {
+        Ok((communities, nodes_updated)) => {
+            tracing::info!(
+                communities = communities.len(),
+                nodes_updated,
+                "community detection updated"
+            );
+            communities.len() as i64
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "REM: community detection failed");
+            0
+        }
+    };
 
     let duplicate_candidates = rem_count_duplicate_candidates(pool).await;
     tracing::info!(
@@ -856,9 +863,68 @@ async fn run_rem_consolidation_locked(pool: &PgPool) -> Result<()> {
         "duplicate entity candidates awaiting `cuba-memorys dedupe`"
     );
 
+    record_rem_cycle(
+        pool,
+        RemCycleRecord {
+            started_at,
+            decayed: decayed as i64,
+            autolink_edges: linked as i64,
+            embeddings_backfilled: backfilled.embedded as i64,
+            entities_scanned: scan.scanned as i64,
+            facts_extracted: extraction.added as i64,
+            communities: communities_found,
+            duplicate_candidates,
+            relation_scan_failed: scan.failed as i64,
+            extraction_failed: extraction.failed as i64,
+        },
+    )
+    .await;
+
     tracing::info!("REM consolidation complete");
 
     Ok(())
+}
+
+struct RemCycleRecord {
+    started_at: chrono::DateTime<chrono::Utc>,
+    decayed: i64,
+    autolink_edges: i64,
+    embeddings_backfilled: i64,
+    entities_scanned: i64,
+    facts_extracted: i64,
+    communities: i64,
+    duplicate_candidates: i64,
+    relation_scan_failed: i64,
+    extraction_failed: i64,
+}
+
+async fn record_rem_cycle(pool: &PgPool, r: RemCycleRecord) {
+    let finished_at = chrono::Utc::now();
+    let duration_ms = (finished_at - r.started_at).num_milliseconds();
+    let written = sqlx::query(
+        "INSERT INTO brain_rem_cycles
+            (started_at, finished_at, duration_ms, decayed_count, autolink_edges,
+             embeddings_backfilled, entities_scanned, facts_extracted, communities,
+             duplicate_candidates, relation_scan_failed, extraction_failed)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+    )
+    .bind(r.started_at)
+    .bind(finished_at)
+    .bind(duration_ms)
+    .bind(r.decayed)
+    .bind(r.autolink_edges)
+    .bind(r.embeddings_backfilled)
+    .bind(r.entities_scanned)
+    .bind(r.facts_extracted)
+    .bind(r.communities)
+    .bind(r.duplicate_candidates)
+    .bind(r.relation_scan_failed)
+    .bind(r.extraction_failed)
+    .execute(pool)
+    .await;
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "could not record this REM cycle");
+    }
 }
 
 const HALFVEC_BATCH: i64 = 500;

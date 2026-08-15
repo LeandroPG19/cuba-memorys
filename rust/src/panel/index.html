@@ -111,6 +111,18 @@
   </section>
 
   <section>
+    <h2>Ciclo REM</h2>
+    <div class="body">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
+        <span class="pill" id="rem-status"></span>
+        <span class="muted" id="rem-note"></span>
+      </div>
+      <div class="cards" id="rem-cards"></div>
+      <table id="rem-history" style="margin-top:12px"></table>
+    </div>
+  </section>
+
+  <section>
     <h2>Quién está conectado</h2>
     <div class="body two">
       <div>
@@ -217,6 +229,54 @@ function renderStatus(s) {
   $("dot").className = "dot " + worst;
 }
 
+function renderRem(r) {
+  r = r || {};
+  const last = r.last;
+  $("rem-cards").innerHTML = [
+    card("Último ciclo", last ? when(last.finished_at) : "nunca"),
+    card("Duración", last ? Math.round(last.duration_ms / 1000) + " s" : "—"),
+    card("Decaídas", last ? last.decayed_count : "—"),
+    card("Autolink", last ? last.autolink_edges : "—"),
+    card("Embeddings", last ? last.embeddings_backfilled : "—"),
+    card("Entidades escaneadas", last ? last.entities_scanned : "—"),
+    card("Hechos extraídos", last ? last.facts_extracted : "—"),
+    card("Comunidades", last ? last.communities : "—"),
+    card("Duplicados", last ? last.duplicate_candidates : "—")
+  ].join("");
+
+  let status = "ok", note = "al día.";
+  if (!last) {
+    status = "fail"; note = "el ciclo REM nunca ha corrido en esta base.";
+  } else if (last.error) {
+    status = "fail"; note = "el último ciclo falló: " + last.error;
+  } else if (last.llm_degraded) {
+    status = "warn";
+    note = "el escaneo de relaciones o la auto-extracción fallaron dos veces seguidas y \
+se cortaron a mitad de ciclo — el grafo puede haber dejado de crecer en silencio.";
+  } else if (r.stale) {
+    status = "warn";
+    note = "no corre desde hace más de " + Math.round((r.stale_after_secs || 0) / 3600) + " h.";
+  }
+  $("rem-status").className = "pill " + status;
+  $("rem-status").textContent = status === "ok" ? "al día" : (status === "fail" ? "sin ciclo" : "atención");
+  $("rem-note").textContent = note;
+
+  const rows = (r.recent || []).map((c) =>
+    '<tr><td class="muted">' + when(c.finished_at) + '</td>' +
+    '<td>' + Math.round(c.duration_ms / 1000) + ' s</td>' +
+    '<td>' + c.decayed_count + '</td><td>' + c.autolink_edges + '</td>' +
+    '<td>' + c.embeddings_backfilled + '</td><td>' + c.entities_scanned + '</td>' +
+    '<td>' + c.facts_extracted + '</td><td>' + c.communities + '</td>' +
+    '<td>' + c.duplicate_candidates + '</td>' +
+    '<td>' + (c.llm_degraded ? '<span class="pill warn">LLM falló</span> ' : '') +
+    (c.error ? '<span class="pill fail">' + esc(c.error.slice(0, 120)) + '</span>' : '') +
+    '</td></tr>');
+  $("rem-history").innerHTML = table(
+    ["Cuándo", "Dur.", "Decaídas", "Autolink", "Embeddings", "Entidades", "Hechos", "Comunidades", "Duplicados", ""],
+    rows
+  );
+}
+
 function renderProblems(p) {
   const parts = [];
   const checks = p.checks || [];
@@ -296,7 +356,7 @@ async function refresh() {
     const [s, c, t, p] = await Promise.all([
       rpc("admin/status"), rpc("admin/clients"), rpc("admin/traffic"), rpc("admin/problems")
     ]);
-    renderStatus(s); renderClients(c); renderTraffic(t); renderProblems(p);
+    renderStatus(s); renderRem(s.rem); renderClients(c); renderTraffic(t); renderProblems(p);
     $("head-updated").textContent = new Date().toLocaleTimeString();
   } catch (e) {
     if (String(e.message) === "unauthorized") { logout("El token no vale."); return; }

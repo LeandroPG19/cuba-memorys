@@ -590,13 +590,17 @@ const PROFILE_STANDARD_EXTRA: [&str; 6] = [
     "cuba_calibrar",
 ];
 
-const PROFILE_LEAN: [&str; 6] = [
+const PROFILE_LEAN: [&str; 10] = [
     "cuba_faro",
-    "cuba_cronica",
     "cuba_expediente",
-    "cuba_receta",
+    "cuba_decreto",
     "cuba_jornada",
+    "cuba_cronica",
+    "cuba_ingesta",
     "cuba_alarma",
+    "cuba_remedio",
+    "cuba_receta",
+    "cuba_pizarra",
 ];
 
 pub fn tools_for_profile() -> Vec<Value> {

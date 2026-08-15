@@ -267,7 +267,7 @@ So `--apply` merges only what is **provable** (identical after normalizing case 
 
 ## The 28 tools
 
-Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise an everyday core of 6 plus `cuba_tools` + `cuba_call` — **8 of 28, a 66% smaller catalogue with zero functions lost**, the rest reachable on demand.
+Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_TOOL_PROFILE=lean` to advertise an everyday core of 10 plus `cuba_tools` + `cuba_call` — **12 of 28, a 51% smaller catalogue with zero functions lost**, the rest reachable on demand.
 
 **Knowledge graph** — `cuba_alma` (entities) · `cuba_cronica` (observations, episodes, timeline) · `cuba_puente` (typed relations, traversal, link prediction) · `cuba_ingesta` (bulk import)
 
@@ -300,7 +300,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_QUERY_PREFIX` · `CUBA_PASSAGE_PREFIX` | `query: ` · `passage: ` | Instruction prefixes prepended before tokenising. E5 was trained with them; `bge-m3` was not — set both to the empty string when you switch, or every vector is computed on text the model never saw that way |
 | `CUBA_CHUNK_THRESHOLD_CHARS` · `CUBA_CHUNK_CHARS` | `1800` · `1400` | Content longer than the threshold is split into chunks of this many characters (200-char overlap). `CUBA_CHUNK_CHARS` is floored at 200. A value that is not a positive integer falls back to the default |
 | `CUBA_EMBED_CONCURRENCY` | `1` | Permits on the semaphore around the ONNX embedding session. Sized once, on first use |
-| `CUBA_TOOL_PROFILE` | `full` | `lean` → 8 tools of 28, 66% smaller catalogue, nothing lost |
+| `CUBA_TOOL_PROFILE` | `full` | `lean` → 12 tools of 28, 51% smaller catalogue, nothing lost. The ten are the ten most called over 33 days of real use; the other 16 stay reachable through `cuba_call` |
 | `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
 | `CUBA_JUEZ_CLI` · `CUBA_JUEZ_MODEL` | `claude` · `claude-haiku-4-5` | The CLI the offline judge shells out to, and the model it asks for. `CUBA_JUEZ_CLI` also decides the automatic path: if that name is not on `PATH` there is no CLI judge and the choice falls through |
 | `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Budget for one judgement, CLI and API alike. Anything that does not parse as an integer leaves the default |
@@ -501,7 +501,7 @@ The real number is not 0.894. On 221 id-scored queries it is **nDCG@10 = 0.50** 
 |---|---|
 | **`compact` by default** | **−30% tokens, nDCG +0.0090** (paired 95% CI [+0.0024, +0.0166], n=191). The earlier "exactly 0.0000" was measured with a harness that let the 5000-token response budget truncate the ranking before scoring it: verbose lost its tail, compact did not. The old "−40%" came from the broken benchmark. |
 | **Conformal abstention** | 100% of out-of-distribution queries caught, 0% false abstentions. |
-| **`lean` tool profile** | 8 tools of 28, −66% catalogue, zero functions lost. |
+| **`lean` tool profile** | 12 tools of 28, −51% catalogue, zero functions lost. |
 | **bge-m3 over e5-small** | Direction almost certainly right; **the +21.2 nDCG figure is withdrawn** — it came from the broken benchmark and re-establishing it would mean re-embedding the corpus twice. |
 | **The benchmark itself** | 221 queries (was 10), relevance by document **id**, bootstrap confidence intervals, and the **minimum detectable effect** printed beside every result — so nobody reads a 3-point difference as a finding again. |
 
