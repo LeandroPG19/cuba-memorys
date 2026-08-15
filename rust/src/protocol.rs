@@ -18,6 +18,15 @@ pub fn handler_timeout() -> Duration {
 }
 
 const REM_INTERVAL: Duration = Duration::from_secs(4 * 3600);
+const REM_FIRST_DELAY_DEFAULT_SECS: u64 = 300;
+
+pub fn rem_first_delay() -> Duration {
+    std::env::var("CUBA_REM_FIRST_DELAY_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(REM_FIRST_DELAY_DEFAULT_SECS))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -621,26 +630,70 @@ async fn listen_once(pool: &PgPool, url: &str) -> anyhow::Result<()> {
     }
 }
 
-pub(crate) async fn rem_daemon(pool: PgPool) {
+async fn run_rem_cycle(pool: &PgPool) {
+    tracing::info!("REM sleep cycle starting");
+
+    let pool_clone = pool.clone();
+    let result = tokio::spawn(async move { run_rem_consolidation(&pool_clone).await }).await;
+
+    match result {
+        Ok(Ok(())) => tracing::info!("REM sleep cycle completed"),
+        Ok(Err(e)) => tracing::error!(error = %e, "REM consolidation error"),
+        Err(e) => tracing::error!(error = %e, "REM task panicked"),
+    }
+}
+
+pub async fn rem_daemon(pool: PgPool) {
+    tokio::time::sleep(rem_first_delay()).await;
+    run_rem_cycle(&pool).await;
+
     let mut interval = tokio::time::interval(REM_INTERVAL);
     interval.tick().await;
 
     loop {
         interval.tick().await;
-        tracing::info!("REM sleep cycle starting");
-
-        let pool_clone = pool.clone();
-        let result = tokio::spawn(async move { run_rem_consolidation(&pool_clone).await }).await;
-
-        match result {
-            Ok(Ok(())) => tracing::info!("REM sleep cycle completed"),
-            Ok(Err(e)) => tracing::error!(error = %e, "REM consolidation error"),
-            Err(e) => tracing::error!(error = %e, "REM task panicked"),
-        }
+        run_rem_cycle(&pool).await;
     }
 }
 
+pub const REM_LOCK: i64 = 0x0CBA_A0D1_7106_0034;
+
 pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
+    let mut lock_conn = pool
+        .acquire()
+        .await
+        .context("acquiring a connection to hold the REM advisory lock")?;
+
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(REM_LOCK)
+        .fetch_one(&mut *lock_conn)
+        .await
+        .context("checking the REM advisory lock")?;
+
+    if !acquired {
+        tracing::info!(
+            "REM consolidation: another cycle already holds the lock, skipping this one"
+        );
+        return Ok(());
+    }
+
+    let result = run_rem_consolidation_locked(pool).await;
+
+    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(REM_LOCK)
+        .execute(&mut *lock_conn)
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            "failed to release the REM advisory lock — it stays held until this connection closes"
+        );
+    }
+
+    result
+}
+
+async fn run_rem_consolidation_locked(pool: &PgPool) -> Result<()> {
     let candidates: Vec<uuid::Uuid> = match crate::session::session_id() {
         Some(sid) => vec![sid],
         None if crate::session::daemon_mode() => {
@@ -768,6 +821,15 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         "isolated entities scanned for relations"
     );
 
+    let extraction = rem_extract_observations(pool).await;
+    tracing::info!(
+        observations_scanned = extraction.scanned,
+        facts_added = extraction.added,
+        relations_linked = extraction.relations_linked,
+        failed = extraction.failed,
+        "auto-extraction over unprocessed observations"
+    );
+
     let quantized = rem_backfill_halfvec(pool).await;
     if quantized > 0 {
         tracing::info!(rows = quantized, "embeddings quantized to halfvec");
@@ -778,6 +840,21 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
 
     let ranked = crate::graph::pagerank::compute_and_store(pool).await?;
     tracing::info!(ranked_count = ranked, "PageRank updated");
+
+    match crate::graph::community::detect_and_persist(pool).await {
+        Ok((communities, nodes_updated)) => tracing::info!(
+            communities = communities.len(),
+            nodes_updated,
+            "community detection updated"
+        ),
+        Err(e) => tracing::warn!(error = %e, "REM: community detection failed"),
+    }
+
+    let duplicate_candidates = rem_count_duplicate_candidates(pool).await;
+    tracing::info!(
+        duplicate_candidates,
+        "duplicate entity candidates awaiting `cuba-memorys dedupe`"
+    );
 
     tracing::info!("REM consolidation complete");
 
@@ -861,6 +938,8 @@ async fn rem_refresh_planner_stats(pool: &PgPool) -> usize {
 }
 
 const REM_RELATION_SCAN_DEFAULT_BATCH: usize = 5;
+const REM_RELATION_SCAN_LARGE_BATCH: usize = 20;
+const REM_RELATION_SCAN_QUEUE_THRESHOLD: i64 = 50;
 const REM_RELATION_SCAN_MAX_FAILURES: usize = 2;
 
 #[derive(Default)]
@@ -870,15 +949,31 @@ pub struct RelationScanReport {
     pub failed: usize,
 }
 
-pub fn rem_relation_scan_batch() -> usize {
-    std::env::var("CUBA_REM_RELATION_BATCH")
+pub async fn rem_relation_scan_batch(pool: &PgPool) -> usize {
+    if let Some(explicit) = std::env::var("CUBA_REM_RELATION_BATCH")
         .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(REM_RELATION_SCAN_DEFAULT_BATCH)
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        return explicit;
+    }
+
+    let queue_len = crate::handlers::ingesta::entities_awaiting_relation_scan(
+        pool,
+        REM_RELATION_SCAN_QUEUE_THRESHOLD,
+    )
+    .await
+    .map(|ids| ids.len() as i64)
+    .unwrap_or(0);
+
+    if queue_len >= REM_RELATION_SCAN_QUEUE_THRESHOLD {
+        REM_RELATION_SCAN_LARGE_BATCH
+    } else {
+        REM_RELATION_SCAN_DEFAULT_BATCH
+    }
 }
 
 async fn rem_scan_relations(pool: &PgPool) -> RelationScanReport {
-    let batch = rem_relation_scan_batch();
+    let batch = rem_relation_scan_batch(pool).await;
     let mut report = RelationScanReport::default();
     if batch == 0 {
         return report;
@@ -916,6 +1011,84 @@ async fn rem_scan_relations(pool: &PgPool) -> RelationScanReport {
         }
     }
     report
+}
+
+const REM_EXTRACTION_DEFAULT_BATCH: usize = 5;
+const REM_EXTRACTION_MAX_FAILURES: usize = 2;
+
+pub fn rem_extraction_batch() -> usize {
+    std::env::var("CUBA_REM_EXTRACTION_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(REM_EXTRACTION_DEFAULT_BATCH)
+}
+
+#[derive(Default)]
+pub struct ExtractionScanReport {
+    pub scanned: usize,
+    pub added: u32,
+    pub relations_linked: u32,
+    pub failed: usize,
+}
+
+async fn rem_extract_observations(pool: &PgPool) -> ExtractionScanReport {
+    let batch = rem_extraction_batch();
+    let mut report = ExtractionScanReport::default();
+    if batch == 0 {
+        return report;
+    }
+
+    let candidates = match crate::handlers::ingesta::observations_awaiting_extraction(
+        pool,
+        batch as i64,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(why) => {
+            tracing::warn!(error = %why, "could not list observations for auto-extraction");
+            return report;
+        }
+    };
+
+    let mut consecutive_failures = 0usize;
+    for (id, content) in candidates {
+        match crate::handlers::ingesta::rem_extract_observation(pool, id, &content).await {
+            Ok(outcome) => {
+                consecutive_failures = 0;
+                report.scanned += 1;
+                report.added += outcome.added;
+                report.relations_linked += outcome.relations_linked;
+            }
+            Err(why) => {
+                consecutive_failures += 1;
+                report.failed += 1;
+                tracing::warn!(error = %why, observation = %id, "REM auto-extraction failed");
+                if consecutive_failures >= REM_EXTRACTION_MAX_FAILURES {
+                    tracing::warn!(
+                        failures = consecutive_failures,
+                        "giving up on this cycle's auto-extraction"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    report
+}
+
+const DUPLICATE_NAME_SIMILARITY_THRESHOLD: f64 = 0.70;
+
+pub async fn rem_count_duplicate_candidates(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM brain_entities a
+         JOIN brain_entities b ON a.id < b.id
+         WHERE similarity(lower(a.name), lower(b.name)) > $1",
+    )
+    .bind(DUPLICATE_NAME_SIMILARITY_THRESHOLD)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
 }
 
 fn rem_autolink_enabled() -> bool {

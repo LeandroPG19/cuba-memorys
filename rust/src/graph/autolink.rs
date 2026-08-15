@@ -107,8 +107,9 @@ pub async fn apply(pool: &PgPool, candidates: &[Candidate]) -> Result<usize> {
     let mut inserted = 0usize;
     for c in candidates {
         let result = sqlx::query(
-            "INSERT INTO brain_relations (from_entity, to_entity, relation_type, strength, bidirectional)
-             VALUES ($1, $2, 'related_to', $3, true)
+            "INSERT INTO brain_relations
+                (from_entity, to_entity, relation_type, strength, bidirectional, provenance)
+             VALUES ($1, $2, 'related_to', $3, true, 'predicted')
              ON CONFLICT DO NOTHING",
         )
         .bind(c.from_id)

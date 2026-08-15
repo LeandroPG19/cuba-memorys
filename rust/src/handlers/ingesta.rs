@@ -66,7 +66,16 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         }));
     }
 
-    let relations_linked = link_entities(pool, &relations).await;
+    let untrusted = args
+        .get("untrusted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let relations_linked = if untrusted {
+        0
+    } else {
+        link_entities(pool, &relations).await
+    };
 
     if extracted == 0 {
         return Ok(serde_json::json!({
@@ -75,7 +84,13 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
             "added": 0,
             "relations_linked": relations_linked,
             "backend": backend,
-            "note": "no durable facts, but the text did support graph relations"
+            "note": if untrusted && !relations.is_empty() {
+                "no durable facts, and the relations the text implied were not written: this \
+                 extraction is unattended and quarantined, and neither brain_entities nor \
+                 brain_relations has a way to mark a row as unreviewed"
+            } else {
+                "no durable facts, but the text did support graph relations"
+            }
         }));
     }
 
@@ -89,10 +104,6 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         crate::cognitive::memory_op::OpBreakdown::default()
     };
 
-    let untrusted = args
-        .get("untrusted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let items = if untrusted {
         items
             .into_iter()
@@ -382,6 +393,91 @@ fn relations_from_array(value: &Value) -> Vec<ExtractedRelation> {
 pub async fn link_relations_from_reply(pool: &PgPool, reply: &str) -> Result<u32> {
     let (_, relations) = parse_extraction_reply(reply);
     Ok(link_entities(pool, &relations).await)
+}
+
+#[derive(Default)]
+pub struct ExtractionOutcome {
+    pub added: u32,
+    pub relations_linked: u32,
+}
+
+fn rem_extraction_args(content: &str) -> Value {
+    serde_json::json!({
+        "action": "auto_extract",
+        "text": content,
+        "untrusted": true,
+    })
+}
+
+pub async fn rem_extract_observation(
+    pool: &PgPool,
+    id: uuid::Uuid,
+    content: &str,
+) -> Result<ExtractionOutcome> {
+    let args = rem_extraction_args(content);
+
+    if let Err(why) = crate::redact::refuse_secrets(&args, "text", content.trim()) {
+        mark_extracted(pool, id).await;
+        tracing::warn!(
+            error = %format!("{why:#}"),
+            observation = %id,
+            "auto-extraction will never succeed on this observation, marking it done"
+        );
+        return Ok(ExtractionOutcome::default());
+    }
+
+    let result = auto_extract(pool, &args).await?;
+
+    if result.get("degraded").and_then(Value::as_bool) == Some(true) {
+        anyhow::bail!(
+            "auto_extract degraded: {}",
+            result
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        );
+    }
+
+    mark_extracted(pool, id).await;
+
+    Ok(ExtractionOutcome {
+        added: result.get("added").and_then(Value::as_u64).unwrap_or(0) as u32,
+        relations_linked: result
+            .get("relations_linked")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
+    })
+}
+
+async fn mark_extracted(pool: &PgPool, id: uuid::Uuid) {
+    if let Err(e) = sqlx::query("UPDATE brain_observations SET extracted_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+    {
+        tracing::error!(
+            error = %e,
+            observation = %id,
+            "failed to mark this observation as extracted — it will be reprocessed next cycle"
+        );
+    }
+}
+
+pub async fn observations_awaiting_extraction(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<(uuid::Uuid, String)>> {
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT id, content FROM brain_observations
+         WHERE extracted_at IS NULL AND trust = 'trusted'
+         ORDER BY created_at ASC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("listing observations awaiting extraction")?;
+    Ok(rows)
 }
 
 const RELATION_SCAN_MAX_OBSERVATIONS: i64 = 12;
@@ -1029,5 +1125,95 @@ mod tests {
             assert_eq!(relations.len(), 1, "type {t} was rejected");
             assert_eq!(relations[0].relation_type, *t);
         }
+    }
+
+    #[test]
+    fn rem_extraction_always_forces_quarantine() {
+        let args = rem_extraction_args("cualquier observación de prueba");
+        assert_eq!(
+            args["untrusted"],
+            json!(true),
+            "the REM cycle is the only fully unattended writer this graph has: nothing a human \
+             reviewed gates what it produces, so what it produces must land quarantined \
+             regardless of what an operator's CUBA_QUARANTINE_INFERENCE happens to be set to"
+        );
+        assert_eq!(args["action"], json!("auto_extract"));
+    }
+
+    #[tokio::test]
+    async fn a_degraded_extraction_is_an_error_and_leaves_the_observation_unmarked() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let previous_cli = std::env::var("CUBA_JUEZ_CLI").ok();
+        unsafe { std::env::set_var("CUBA_JUEZ_CLI", "cuba-memorys-no-such-cli-on-this-machine") };
+
+        let pool = pool_that_cannot_connect();
+        let result =
+            rem_extract_observation(&pool, uuid::Uuid::new_v4(), "una nota cualquiera").await;
+
+        match previous_cli {
+            Some(v) => unsafe { std::env::set_var("CUBA_JUEZ_CLI", v) },
+            None => unsafe { std::env::remove_var("CUBA_JUEZ_CLI") },
+        }
+
+        assert!(
+            result.is_err(),
+            "with no CLI on PATH and no MCP sampling client attached, extraction has no \
+             backend at all: rem_extract_observation must report that as an error, not as an \
+             empty success, or the REM cycle would stamp extracted_at on an observation that \
+             was never actually looked at and it would silently drop out of the queue forever \
+             the very first time the backend was unavailable"
+        );
+    }
+
+    fn write_extraction_stub(reply: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cuba-memorys-extraction-stub-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let script =
+            format!("#!/bin/sh\ncat >/dev/null\ncat <<'CUBA_STUB_EOF'\n{reply}\nCUBA_STUB_EOF\n");
+        std::fs::write(&path, script).expect("writing the extraction CLI stub");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("making the stub executable");
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn a_db_failure_while_writing_is_not_treated_as_a_permanent_refusal() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let stub = write_extraction_stub(
+            r#"{"facts":[{"entity_name":"CleanFactSubject","content":"a clean fact with no secret in it","observation_type":"fact"}],"relations":[]}"#,
+        );
+        let previous_cli = std::env::var("CUBA_JUEZ_CLI").ok();
+        unsafe { std::env::set_var("CUBA_JUEZ_CLI", &stub) };
+
+        let pool = pool_that_cannot_connect();
+        let result = rem_extract_observation(
+            &pool,
+            uuid::Uuid::new_v4(),
+            "a clean note with nothing sensitive in it",
+        )
+        .await;
+
+        match previous_cli {
+            Some(v) => unsafe { std::env::set_var("CUBA_JUEZ_CLI", v) },
+            None => unsafe { std::env::remove_var("CUBA_JUEZ_CLI") },
+        }
+        std::fs::remove_file(&stub).ok();
+
+        assert!(
+            result.is_err(),
+            "the extraction backend answered cleanly and the write gate had nothing to \
+             refuse: the only thing that failed is the pool, which this test points at a \
+             closed port — exactly the shape of a pool exhausted or a commit that failed. \
+             Treating that the same as a poisoned observation stamps extracted_at on a fact \
+             the graph never actually received; the previous code caught every Err from \
+             auto_extract in one branch and returned Ok(ExtractionOutcome::default()) here"
+        );
     }
 }

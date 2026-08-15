@@ -89,6 +89,24 @@ pub async fn handle(pool: &PgPool, args: Value) -> Result<Value> {
                 );
             }
 
+            let pending_review: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM brain_observations
+                 WHERE trust = 'quarantined'
+                   AND ($1::uuid IS NULL OR project_id = $1 OR project_id IS NULL)",
+            )
+            .bind(project_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            if pending_review > 0 {
+                response["observations_pending_review"] = serde_json::json!(pending_review);
+                response["observations_pending_review_note"] = serde_json::json!(
+                    "written by the REM cycle's auto-extraction, or imported from a peer, and \
+                     held back from cuba_faro until a human looks at them — cuba_eco \
+                     action=pending lists them, action=promote clears one."
+                );
+            }
+
             Ok(response)
         }
         "end" => {
