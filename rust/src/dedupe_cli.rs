@@ -302,6 +302,72 @@ async fn merge_entity(pool: &PgPool, loser: &Entity, winner: &Entity) -> Result<
     Ok(())
 }
 
+fn groups_without_contradictions(
+    same: Vec<(Entity, Entity)>,
+    different: &std::collections::HashSet<(Uuid, Uuid)>,
+) -> (Vec<Group>, Vec<Vec<String>>) {
+    let mut component: HashMap<Uuid, usize> = HashMap::new();
+    let mut members: Vec<Vec<Entity>> = Vec::new();
+
+    for (a, b) in &same {
+        match (component.get(&a.id).copied(), component.get(&b.id).copied()) {
+            (None, None) => {
+                component.insert(a.id, members.len());
+                component.insert(b.id, members.len());
+                members.push(vec![a.clone(), b.clone()]);
+            }
+            (Some(i), None) => {
+                component.insert(b.id, i);
+                members[i].push(b.clone());
+            }
+            (None, Some(j)) => {
+                component.insert(a.id, j);
+                members[j].push(a.clone());
+            }
+            (Some(i), Some(j)) if i != j => {
+                let moved = std::mem::take(&mut members[j]);
+                for e in &moved {
+                    component.insert(e.id, i);
+                }
+                members[i].extend(moved);
+            }
+            _ => {}
+        }
+    }
+
+    let mut groups = Vec::new();
+    let mut rejected = Vec::new();
+
+    for mut group in members.into_iter().filter(|m| !m.is_empty()) {
+        group.sort_by(|a, b| b.obs.cmp(&a.obs).then(a.id.cmp(&b.id)));
+        group.dedup_by_key(|e| e.id);
+
+        let contradicted = group.iter().enumerate().any(|(i, a)| {
+            group.iter().skip(i + 1).any(|b| {
+                let key = if a.id < b.id {
+                    (a.id, b.id)
+                } else {
+                    (b.id, a.id)
+                };
+                different.contains(&key)
+            })
+        });
+
+        if contradicted {
+            rejected.push(group.into_iter().map(|e| e.name).collect());
+            continue;
+        }
+
+        let winner = group.remove(0);
+        groups.push(Group {
+            winner,
+            losers: group,
+        });
+    }
+
+    (groups, rejected)
+}
+
 fn build_same_entity_prompt(a: &Entity, b: &Entity, sa: &str, sb: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nonce: u32 = SystemTime::now()
@@ -341,7 +407,8 @@ Respondé SOLO con una línea JSON:\n\
 
 async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Result<Vec<Group>> {
     let judge = crate::cognitive::judge::resolve_judge();
-    let mut out = Vec::new();
+    let mut same: Vec<(Entity, Entity)> = Vec::new();
+    let mut different: std::collections::HashSet<(Uuid, Uuid)> = std::collections::HashSet::new();
 
     for (a, b, _sim) in pairs {
         let sample = |id: Uuid| async move {
@@ -386,10 +453,7 @@ async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Resul
                 loser.name,
                 reason.as_deref().unwrap_or("")
             );
-            out.push(Group {
-                winner,
-                losers: vec![loser],
-            });
+            same.push((winner, loser));
         } else {
             println!(
                 "  · distintas: «{}» ≠ «{}»   {}",
@@ -397,9 +461,31 @@ async fn judge_likely(pool: &PgPool, pairs: Vec<(Entity, Entity, f64)>) -> Resul
                 b.name,
                 reason.as_deref().unwrap_or("")
             );
+            let key = if a.id < b.id {
+                (a.id, b.id)
+            } else {
+                (b.id, a.id)
+            };
+            different.insert(key);
         }
     }
-    Ok(out)
+
+    let (groups, rejected) = groups_without_contradictions(same, &different);
+
+    for names in &rejected {
+        println!(
+            "\n  ⚠ NO se fusiona: {}\n    \
+             El juez dijo que dos de estas son la misma y que otras dos no lo son, y las tres \
+             caen en el mismo grupo. Fusionarlas dejaría juntas dos entidades que él mismo \
+             separó, y el resultado dependería del orden en que se apliquen. Medido sobre este \
+             grafo: entre dos corridas seguidas del mismo juez sobre los mismos datos, 3 de 22 \
+             veredictos cambiaron. Una fusión no tiene deshacer, así que ante una contradicción \
+             se deja el grupo entero como está.",
+            names.join(" ≟ ")
+        );
+    }
+
+    Ok(groups)
 }
 
 fn parse_same_entity(raw: &str) -> (Option<bool>, Option<String>) {
@@ -420,7 +506,7 @@ fn parse_same_entity(raw: &str) -> (Option<bool>, Option<String>) {
     let reason = v
         .get("reason")
         .and_then(|x| x.as_str())
-        .map(|s| format!("({})", &s[..s.len().min(90)]));
+        .map(|s| format!("({})", s.chars().take(90).collect::<String>()));
 
     match verdict {
         Some("misma") => (Some(true), reason),
@@ -453,6 +539,14 @@ mod tests {
             normalize("G-Codes Reference Guide"),
             "these must never collapse into an automatic merge"
         );
+    }
+
+    fn distinct(name: &str, obs: i64) -> Entity {
+        Entity {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            obs,
+        }
     }
 
     fn ent(name: &str, obs: i64) -> Entity {
@@ -488,6 +582,68 @@ mod tests {
         let (v, r) = parse_same_entity(raw);
         assert_eq!(v, Some(true));
         assert!(r.unwrap().contains("typo"));
+    }
+
+    #[test]
+    fn a_contradicted_group_is_left_alone() {
+        let base = distinct("mapupita-simulador", 11);
+        let nc = distinct("mapupita-simulador-nc", 5);
+        let cnc = distinct("mapupita-simulador-cnc", 4);
+        let mut different = std::collections::HashSet::new();
+        let key = if nc.id < cnc.id {
+            (nc.id, cnc.id)
+        } else {
+            (cnc.id, nc.id)
+        };
+        different.insert(key);
+
+        let (groups, rejected) = groups_without_contradictions(
+            vec![(base.clone(), nc.clone()), (base.clone(), cnc.clone())],
+            &different,
+        );
+
+        assert!(
+            groups.is_empty(),
+            "the judge called base≡nc and base≡cnc but nc≠cnc, and all three land in one group.              Merging pair by pair in order puts nc and cnc together inside base, which is the              one thing the judge explicitly refused — and with the pairs in the other order the              outcome differs. Measured on the live graph: 3 of 22 verdicts flipped between two              consecutive runs of the same judge over the same data, and a merge has no undo"
+        );
+        assert_eq!(
+            rejected.len(),
+            1,
+            "and refusing has to be said out loud, or a silent skip reads as «nothing to merge»"
+        );
+        assert_eq!(rejected[0].len(), 3, "the whole component is left alone");
+    }
+
+    #[test]
+    fn a_clean_group_still_merges() {
+        let web = distinct("Mapupita-Web", 101);
+        let typo = distinct("Mapupitta-Web", 60);
+        let (groups, rejected) =
+            groups_without_contradictions(vec![(web, typo)], &std::collections::HashSet::new());
+        assert_eq!(
+            groups.len(),
+            1,
+            "a pair nobody contradicted still merges, or the contradiction check would have              turned the whole command into a no-op"
+        );
+        assert_eq!(groups[0].winner.name, "Mapupita-Web");
+        assert_eq!(groups[0].losers[0].name, "Mapupitta-Web");
+        assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn an_accent_at_the_cut_does_not_kill_the_run() {
+        let long = format!("{}éxito", "a".repeat(89));
+        let raw = format!(r#"{{"verdict":"distintas","reason":"{long}"}}"#);
+        let (v, r) = parse_same_entity(&raw);
+        assert_eq!(v, Some(false));
+        assert!(
+            r.is_some(),
+            "the reason was truncated with a byte slice at 90, and byte 90 of this string lands \
+             inside the two bytes of «é». Measured on the live graph: the judge panicked after \
+             deciding 24 of 31 pairs and every one of those verdicts was lost. The reasons this \
+             tool prints come from a Spanish-speaking model, so an accent near any cut is the \
+             common case, not the edge one"
+        );
     }
 
     #[test]

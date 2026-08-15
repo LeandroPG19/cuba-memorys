@@ -129,18 +129,48 @@ jobs:
       - name: Rust DB integration tests
         env:
           DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain
+          CUBA_PEER_DATABASE_URL: postgresql://cuba:memorys2026@127.0.0.1:5488/brain_ci_peer
         run: |
-          cargo test --test integration --test v08_project_scoping --test v09_integration \
-                     --test v021_audit_append_under_app_role --test v021_audit_downgrade \
-                     --test v021_import_quarantine_all_kinds \
-                     --test v022_merge_reports_what_it_drops --test v022_sync_takes_a_lock \
-                     --test v022_same_name_different_id --test v022_bundle_is_validated_first --test v023_tombstones --test v023_node_identity \
-                     --test v023_sync_clock --test v023_history_is_kept --test v023_counters_merge --test v023_bundle_carries_the_clock \
-                     --test v024_hand_edited_bundle --test v024_embedding_guard \
-                     --test v024_tombstone_lists_agree --test v024_facts_and_procedures_travel \
-                     --test v016_quarantine --test v016_relation_extraction \
-                     --test v017_codegraph_hardening \
-                     -- --ignored --nocapture
+          # Three discovered files (v025_two_machines_converge, v027_the_bell_closes_itself,
+          # v028_two_node_convergence — nine tests) .expect() a second node and refuse to
+          # skip without one, on purpose: a two-node test that silently passes on one node
+          # proves nothing. scripts/run-all-tests.sh provisions that database; this job did
+          # not, so switching to glob discovery would have failed nine tests on every push.
+          # The lesson is general: the discovery loop was copied without the environment the
+          # local gate builds around it.
+          psql "postgresql://cuba:memorys2026@127.0.0.1:5488/postgres" -q \
+            -c "DROP DATABASE IF EXISTS brain_ci_peer WITH (FORCE)" \
+            -c "CREATE DATABASE brain_ci_peer"
+          DATABASE_URL="$CUBA_PEER_DATABASE_URL" CUBA_APP_ROLE=0 ONNX_MODEL_PATH="" \
+            cargo run --quiet --bin cuba-memorys -- doctor >/dev/null 2>&1 || true
+
+          # Every tests/*.rs is discovered, not listed by hand. The list above used to
+          # be a hand-written `--test` flag per file and had drifted to 25 of 62: files
+          # added by parallel work (v030_rem_first_delay, v030_rem_relation_batch among
+          # them) never ran here while this job kept reporting green over the commits
+          # that added them. rust/tests/ci_contract.rs is what stops this happening again.
+          #
+          # MODEL_OR_CLI_ONLY hard-assert a model or CLI this runner does not have: no
+          # ONNX embedding model (ONNX_MODEL_PATH is unset here), no NLI model, no
+          # reranker model, no `claude` on PATH. scripts/run-all-tests.sh runs them
+          # locally behind run_if_present/`command -v claude`; this job has no such
+          # environment to run them against, so it excludes them instead of failing on
+          # every push. nli_entailment/nli_cost/nli_probe self-skip via
+          # nli::available() and are NOT in this list — they run here for free and
+          # print SKIPPED without failing.
+          MODEL_OR_CLI_ONLY=(v016_chunking v016_extract_without_sampling v017_relation_scan v017_rerank_gpu)
+          # ROLE0 rewrites roles and the audit log under CUBA_APP_ROLE=0 and runs in
+          # its own step below, outside the default-role discovery loop.
+          ROLE0=(v020_audit_update_applies v020_role_separation)
+          DISCOVERED=()
+          for file in tests/*.rs; do
+            name="$(basename "$file" .rs)"
+            if printf '%s\n' "${MODEL_OR_CLI_ONLY[@]}" "${ROLE0[@]}" | grep -qx "$name"; then
+              continue
+            fi
+            DISCOVERED+=(--test "$name")
+          done
+          cargo test "${DISCOVERED[@]}" -- --ignored --nocapture
           cargo test --lib -- --ignored --nocapture
           CUBA_APP_ROLE=0 cargo test --test v020_audit_update_applies \
                      --test v020_role_separation -- --ignored --nocapture
