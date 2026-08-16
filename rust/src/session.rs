@@ -85,8 +85,22 @@ pub fn remember_client_root(key: &str, project_id: Uuid) {
     }
 }
 
+tokio::task_local! {
+    static ROOT_PROJECT: Uuid;
+}
+
+pub async fn with_root_project<F, R>(project: Option<Uuid>, fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    match project {
+        Some(id) => ROOT_PROJECT.scope(id, fut).await,
+        None => fut.await,
+    }
+}
+
 pub fn client_root_project() -> Option<Uuid> {
-    client_root_project_for(&current_client()?)
+    ROOT_PROJECT.try_with(|id| *id).ok()
 }
 
 pub fn client_root_project_for(key: &str) -> Option<Uuid> {

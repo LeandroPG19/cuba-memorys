@@ -724,10 +724,12 @@ async fn dispatch_one(
         crate::session::with_scope(scope, protocol::handle_request(&pool, request)).await
     };
     let work = async {
+        let rooted =
+            crate::session::with_root_project(crate::session::client_root_project_for(key), served);
         if declared {
-            crate::session::with_client(key.to_string(), served).await
+            crate::session::with_client(key.to_string(), rooted).await
         } else {
-            served.await
+            rooted.await
         }
     };
 

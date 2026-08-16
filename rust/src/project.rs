@@ -86,9 +86,8 @@ mod tests {
         let pool = pool_that_is_never_queried();
         let from_root = Uuid::new_v4();
 
-        crate::session::with_client("claude-code@roots".to_string(), async {
+        crate::session::with_root_project(Some(from_root), async {
             crate::session::clear();
-            crate::session::remember_client_root("claude-code@roots", from_root);
 
             assert_eq!(
                 current_project_id(&pool).await.unwrap(),
@@ -111,8 +110,35 @@ mod tests {
             crate::session::clear();
         })
         .await;
+    }
 
-        crate::session::forget_client("claude-code@roots");
+    #[tokio::test]
+    async fn the_root_reaches_the_write_even_when_the_client_declared_no_identity() {
+        let _one_at_a_time = crate::session::GLOBAL_STATE_GUARD.lock().await;
+        let pool = pool_that_is_never_queried();
+        let from_root = Uuid::new_v4();
+        crate::session::clear();
+        crate::session::remember_client_root("anonymous", from_root);
+
+        let seen = crate::session::with_root_project(
+            crate::session::client_root_project_for("anonymous"),
+            async { current_project_id(&pool).await.unwrap() },
+        )
+        .await;
+
+        crate::session::forget_client("anonymous");
+
+        assert_eq!(
+            seen,
+            Some(from_root),
+            "the daemon only enters with_client when the client declared an identity through \
+             _meta, on purpose: every Claude Code instance sends the same clientInfo.name and \
+             sharing a session between them was a real bug. Reading the root through \
+             current_client() therefore found nothing for exactly the clients this feature \
+             exists for — measured end to end on 2026-08-16, the daemon logged 'adopted the \
+             client's root as its project' and the observation still landed with project_id \
+             NULL. The root belongs to the connection, not to a declared identity"
+        );
     }
 
     #[tokio::test]
