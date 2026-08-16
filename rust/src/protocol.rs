@@ -677,7 +677,12 @@ pub async fn run_rem_consolidation(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
 
+    let cycle_started_at = chrono::Utc::now();
     let result = run_rem_consolidation_locked(pool).await;
+
+    if let Err(e) = &result {
+        record_rem_cycle_failure(pool, cycle_started_at, e).await;
+    }
 
     if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(REM_LOCK)
@@ -876,6 +881,7 @@ async fn run_rem_consolidation_locked(pool: &PgPool) -> Result<()> {
             duplicate_candidates,
             relation_scan_failed: scan.failed as i64,
             extraction_failed: extraction.failed as i64,
+            error: None,
         },
     )
     .await;
@@ -896,6 +902,7 @@ struct RemCycleRecord {
     duplicate_candidates: i64,
     relation_scan_failed: i64,
     extraction_failed: i64,
+    error: Option<String>,
 }
 
 async fn record_rem_cycle(pool: &PgPool, r: RemCycleRecord) {
@@ -905,8 +912,8 @@ async fn record_rem_cycle(pool: &PgPool, r: RemCycleRecord) {
         "INSERT INTO brain_rem_cycles
             (started_at, finished_at, duration_ms, decayed_count, autolink_edges,
              embeddings_backfilled, entities_scanned, facts_extracted, communities,
-             duplicate_candidates, relation_scan_failed, extraction_failed)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+             duplicate_candidates, relation_scan_failed, extraction_failed, error)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
     )
     .bind(r.started_at)
     .bind(finished_at)
@@ -920,11 +927,36 @@ async fn record_rem_cycle(pool: &PgPool, r: RemCycleRecord) {
     .bind(r.duplicate_candidates)
     .bind(r.relation_scan_failed)
     .bind(r.extraction_failed)
+    .bind(r.error)
     .execute(pool)
     .await;
     if let Err(e) = written {
         tracing::warn!(error = %e, "could not record this REM cycle");
     }
+}
+
+async fn record_rem_cycle_failure(
+    pool: &PgPool,
+    started_at: chrono::DateTime<chrono::Utc>,
+    error: &anyhow::Error,
+) {
+    record_rem_cycle(
+        pool,
+        RemCycleRecord {
+            started_at,
+            decayed: 0,
+            autolink_edges: 0,
+            embeddings_backfilled: 0,
+            entities_scanned: 0,
+            facts_extracted: 0,
+            communities: 0,
+            duplicate_candidates: 0,
+            relation_scan_failed: 0,
+            extraction_failed: 0,
+            error: Some(format!("{error:#}")),
+        },
+    )
+    .await;
 }
 
 const HALFVEC_BATCH: i64 = 500;
@@ -1065,6 +1097,7 @@ async fn rem_scan_relations(pool: &PgPool) -> RelationScanReport {
             Err(why) => {
                 consecutive_failures += 1;
                 report.failed += 1;
+                crate::handlers::ingesta::mark_relation_scan_attempt_failed(pool, id).await;
                 tracing::warn!(error = %why, entity = %id, "relation scan failed");
                 if consecutive_failures >= REM_RELATION_SCAN_MAX_FAILURES {
                     tracing::warn!(
@@ -1129,6 +1162,7 @@ async fn rem_extract_observations(pool: &PgPool) -> ExtractionScanReport {
             Err(why) => {
                 consecutive_failures += 1;
                 report.failed += 1;
+                crate::handlers::ingesta::mark_extraction_attempt_failed(pool, id).await;
                 tracing::warn!(error = %why, observation = %id, "REM auto-extraction failed");
                 if consecutive_failures >= REM_EXTRACTION_MAX_FAILURES {
                     tracing::warn!(
@@ -1568,5 +1602,55 @@ mod tests {
         assert_eq!(info["protocolVersion"], "2025-06-18");
         assert_eq!(info["serverInfo"]["name"], "cuba-memorys");
         assert!(info["capabilities"]["tools"].is_object());
+    }
+
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL env var required for integration tests");
+        db::create_pool(&url)
+            .await
+            .expect("connect to test database")
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_cycle_that_dies_mid_flight_leaves_a_row_carrying_its_own_error() {
+        let pool = test_pool().await;
+        let started_at = chrono::Utc::now() + chrono::Duration::minutes(12);
+        let boom = anyhow::anyhow!("pagerank::compute_and_store: connection reset");
+
+        record_rem_cycle_failure(&pool, started_at, &boom).await;
+
+        let row: (Option<String>, i64, i64) = sqlx::query_as(
+            "SELECT error, facts_extracted, extraction_failed FROM brain_rem_cycles
+             WHERE started_at = $1",
+        )
+        .bind(started_at)
+        .fetch_one(&pool)
+        .await
+        .expect(
+            "a cycle that fails must still leave a row in brain_rem_cycles — the panel's \
+             'last cycle' otherwise keeps showing an earlier, unrelated success as if it \
+             were today's run",
+        );
+
+        sqlx::query("DELETE FROM brain_rem_cycles WHERE started_at = $1")
+            .bind(started_at)
+            .execute(&pool)
+            .await
+            .ok();
+
+        assert_eq!(
+            row.0.as_deref(),
+            Some("pagerank::compute_and_store: connection reset"),
+            "the error column exists since migration 0059 but the INSERT never named it, so \
+             it landed NULL no matter what record_rem_cycle was told — a crashed cycle read \
+             back exactly like a clean one with nothing extracted"
+        );
+        assert_eq!(row.1, 0, "a cycle that never finished extracted nothing");
+        assert_eq!(
+            row.2, 0,
+            "a cycle that never reached extraction failed nothing there"
+        );
     }
 }

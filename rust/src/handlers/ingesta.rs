@@ -35,7 +35,14 @@ async fn auto_extract(pool: &PgPool, args: &Value) -> Result<Value> {
         .unwrap_or("");
     let prompt = build_extraction_prompt(text, hint);
 
-    let (reply, backend) = match extraction_reply(&prompt).await {
+    let budget = args
+        .get("budget_secs")
+        .and_then(Value::as_u64)
+        .filter(|&s| s > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(extraction_budget);
+
+    let (reply, backend) = match extraction_reply_within(&prompt, budget).await {
         Ok(pair) => pair,
         Err(why) => {
             return Ok(serde_json::json!({
@@ -183,10 +190,6 @@ impl NoExtraction {
             ),
         }
     }
-}
-
-async fn extraction_reply(prompt: &str) -> Result<(String, &'static str), NoExtraction> {
-    extraction_reply_within(prompt, extraction_budget()).await
 }
 
 async fn extraction_reply_within(
@@ -406,6 +409,7 @@ fn rem_extraction_args(content: &str) -> Value {
         "action": "auto_extract",
         "text": content,
         "untrusted": true,
+        "budget_secs": relation_scan_budget().as_secs(),
     })
 }
 
@@ -470,7 +474,7 @@ pub async fn observations_awaiting_extraction(
     let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT id, content FROM brain_observations
          WHERE extracted_at IS NULL AND trust = 'trusted'
-         ORDER BY created_at ASC
+         ORDER BY extraction_attempts ASC, created_at ASC
          LIMIT $1",
     )
     .bind(limit)
@@ -478,6 +482,24 @@ pub async fn observations_awaiting_extraction(
     .await
     .context("listing observations awaiting extraction")?;
     Ok(rows)
+}
+
+pub async fn mark_extraction_attempt_failed(pool: &PgPool, id: uuid::Uuid) {
+    if let Err(e) = sqlx::query(
+        "UPDATE brain_observations SET extraction_attempts = extraction_attempts + 1
+         WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(
+            error = %e,
+            observation = %id,
+            "failed to record this auto-extraction attempt — it stays at the same priority \
+             and may starve the queue behind it again"
+        );
+    }
 }
 
 const RELATION_SCAN_MAX_OBSERVATIONS: i64 = 12;
@@ -590,6 +612,24 @@ async fn mark_relations_scanned(pool: &PgPool, entity_id: uuid::Uuid) {
         .await;
 }
 
+pub async fn mark_relation_scan_attempt_failed(pool: &PgPool, entity_id: uuid::Uuid) {
+    if let Err(e) = sqlx::query(
+        "UPDATE brain_entities SET relation_scan_attempts = relation_scan_attempts + 1
+         WHERE id = $1",
+    )
+    .bind(entity_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(
+            error = %e,
+            entity = %entity_id,
+            "failed to record this relation scan attempt — it stays at the same priority \
+             and may starve the queue behind it again"
+        );
+    }
+}
+
 pub async fn entities_awaiting_relation_scan(pool: &PgPool, limit: i64) -> Result<Vec<uuid::Uuid>> {
     let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT e.id FROM brain_entities e
@@ -601,7 +641,8 @@ pub async fn entities_awaiting_relation_scan(pool: &PgPool, limit: i64) -> Resul
                 OR EXISTS (SELECT 1 FROM brain_observations o
                            WHERE o.entity_id = e.id
                              AND o.created_at > e.relations_scanned_at))
-         ORDER BY e.relations_scanned_at ASC NULLS FIRST,
+         ORDER BY e.relation_scan_attempts ASC,
+                  e.relations_scanned_at ASC NULLS FIRST,
                   (SELECT count(*) FROM brain_observations o WHERE o.entity_id = e.id) DESC
          LIMIT $1",
     )
@@ -1138,6 +1179,26 @@ mod tests {
              regardless of what an operator's CUBA_QUARANTINE_INFERENCE happens to be set to"
         );
         assert_eq!(args["action"], json!("auto_extract"));
+    }
+
+    #[test]
+    fn rem_extraction_gets_the_same_budget_as_the_scan_it_rides_along_with() {
+        let asked = rem_extraction_args("cualquier observación de prueba")["budget_secs"]
+            .as_u64()
+            .expect("the REM cycle must state a budget instead of inheriting the handler's");
+
+        assert_eq!(asked, relation_scan_budget().as_secs());
+        assert!(
+            asked > extraction_budget().as_secs(),
+            "extraction_budget is 60% of the MCP handler timeout — 18s — because a caller is \
+             waiting on the other end. Nobody waits on the REM cycle, and the CLI it shells out \
+             to takes longer than that: measured in production on 2026-08-16, every single \
+             attempt died with 'claude CLI timed out after 18.000000715s', so the cycle logged \
+             extraction_failed=2 and facts_extracted=0 forever while the relation scan, which \
+             calls the same CLI with 90s, failed zero times. Asked for {asked}s against an \
+             extraction default of {}s",
+            extraction_budget().as_secs()
+        );
     }
 
     #[tokio::test]

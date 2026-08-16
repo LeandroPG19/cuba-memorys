@@ -8,6 +8,49 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+### Una migración nueva ya no puede repetir la deuda de la 0.22
+
+`rust/tests/migrations_contract.rs` escanea `migrations/*.up.sql` por
+`CREATE TRIGGER` y `ADD CONSTRAINT` sin guarda — ninguno de los dos admite
+`IF NOT EXISTS` — y falla si el fichero no está en la lista de excepciones ya
+aplicadas. 0057 y 0059 llegaron sin guarda después de que la 0.23.0 escribiera
+la deuda en el CHANGELOG; ahora una migración nueva con el mismo defecto rompe
+la puerta en vez de sumarse a la lista. Las 14 migraciones ya aplicadas y no
+reaplicables (0029 en adelante) quedan excusadas con su motivo, porque
+editarlas rompe el checksum SHA-384 de sqlx en toda base que ya las corrió.
+
+### Documentos que prometían lo que el binario no tiene
+
+- `rust/Cargo.toml:description` (lo que viaja a crates.io) anunciaba «Allen
+  interval + ADWIN drift + MI tagging» y «optional Prometheus /metrics»: `mi
+  tagging` y `/metrics` no existen en el código desde hace versiones, y Allen y
+  ADWIN nunca tuvieron un llamante fuera de sus propios tests. También decía
+  «29 tools» cuando el binario por defecto produce 28. Corregido, y
+  `rust/Cargo.toml` se suma al contrato de conteo de tools en `doc_contract.rs`
+  — antes se quedaba fuera del escaneo y por eso llevaba dos versiones
+  mintiendo sin que nada lo notara.
+- `server.json` ofrecía `ANTHROPIC_API_KEY` y `anthropic_api` como valor de
+  `CUBA_JUDGE`: la feature que los leía se borró en la 0.23.0, y
+  `CUBA_JUDGE=anthropic_api` caía al caso por defecto sin ningún aviso. Fuera.
+
+### 383 líneas sin un solo llamante
+
+`cognitive::adwin`, `cognitive::allen` y `cognitive::calibration` — ya
+señaladas en `docs/PLAN-MEJORAS-v0.11.md` y sobrevivientes a trece versiones
+mientras sus compañeras de esa lista (`mi_tagging`, `temporal_query`) sí se
+borraron. Verificado con `grep -rw` sobre `src/`, `tests/` y `examples/`: fuera
+de sus propios `#[cfg(test)]`, la única mención en todo el repo eran las tres
+líneas que las declaraban en `cognitive/mod.rs`.
+
+### Seis ficheros huérfanos, ~78 KB
+
+`scripts/enable-rls.sql` (duplicaba a mano lo que ya hacen las migraciones
+0017/0031/0055, sin nada que avisara si divergían), `scripts/gen-eval-dataset.py`,
+`rust/scripts/migrate_v3.sql` (migración v2.x→v0.3.0, el proyecto va por
+0.24), `rust/tests/datasets/beam_prepare.py` y `brain_qa_es.jsonl` (52 KB, solo
+lo nombraba el script anterior), `rust/examples/bench_handlers.rs`. Cada uno
+verificado con `grep -rn` sobre todo el repo antes de borrarlo.
+
 ## [0.24.0] — 2026-08-15 (Cargo `0.24.0` · npm `0.24.0` · PyPI `1.26.0`)
 
 El grafo crece solo, y lo que escribe un modelo entra en cuarentena. Esa frase es
@@ -314,11 +357,13 @@ marcha.
 
 ### Lo que esta versión NO arregla
 
-**8 de las 12 migraciones de la 0.22 abortan si se reaplican** (17 sentencias:
-`ADD CONSTRAINT` y `CREATE TRIGGER`, que no admiten `IF NOT EXISTS`). Arreglarlo
-exige editarlas, y eso rompe el checksum de sqlx en toda base que ya las tiene.
-Solo muerde en reparación manual o restauración sin `_sqlx_migrations`, y falla
-ruidosamente. Queda anotado.
+**7 de las 12 migraciones de la 0.22 abortan si se reaplican** (8 sentencias:
+`ADD CONSTRAINT` y `CREATE TRIGGER`, que no admiten `IF NOT EXISTS`; 13 si se
+cuenta cada una de las 6 tablas que recorre el bucle de 0045, en vez de la
+sentencia dinámica una sola vez). Arreglarlo exige editarlas, y eso rompe el
+checksum de sqlx en toda base que ya las tiene. Solo muerde en reparación
+manual o restauración sin `_sqlx_migrations`, y falla ruidosamente. Queda
+anotado.
 
 ## [0.22.0] — 2026-08-13 (Cargo `0.22.0` · npm `0.22.0` · PyPI `1.24.0`)
 
@@ -438,6 +483,8 @@ cliente no distingue nada.
 - **`observability` sigue muerta en el binario que se publica**: la feature no
   está en ninguna fila de la matriz de release, así que `record_handler`
   compila a nada. El anillo del panel va fuera de ese `#[cfg]` a propósito.
+  (Ya no es cierto desde la 0.23.0, que borró la feature entera en vez de
+  arreglarla — ver «Quitado» en esa sección.)
 
 ## [0.21.0] — 2026-08-03 (Cargo `0.21.0` · npm `0.21.0` · PyPI `1.23.0`)
 

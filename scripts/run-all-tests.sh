@@ -153,11 +153,11 @@ cargo fmt --check
 echo "=== cargo clippy (--all-targets: without it, tests/ is never linted) ==="
 cargo clippy --all-targets -- -D warnings
 
-echo "=== cargo test (unit + smoke) ==="
-DATABASE_URL="$GATE_DATABASE_URL" cargo test
-
 echo "=== throwaway database for every mutating step ==="
 provision_gate_db
+
+echo "=== cargo test (unit + smoke) ==="
+DATABASE_URL="$GATE_DATABASE_URL" cargo test
 
 echo "=== DB integration tests (--ignored) ==="
 export DATABASE_URL="$GATE_DATABASE_URL"

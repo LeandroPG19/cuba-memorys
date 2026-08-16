@@ -39,7 +39,7 @@
         },
         {
           "name": "CUBA_JUDGE",
-          "description": "cuba_juez backend selector: claude_cli | anthropic_api | heuristic | auto (default auto).",
+          "description": "cuba_juez backend selector: nli | mcp_sampling | claude_cli | heuristic | auto (default auto).",
           "isRequired": false,
           "isSecret": false,
           "format": "string"
@@ -56,13 +56,6 @@
           "description": "Model name passed to the judge backend (default 'claude-haiku-4-5').",
           "isRequired": false,
           "isSecret": false,
-          "format": "string"
-        },
-        {
-          "name": "ANTHROPIC_API_KEY",
-          "description": "API key for AnthropicApiJudge (only used when feature 'anthropic-api' is built in).",
-          "isRequired": false,
-          "isSecret": true,
           "format": "string"
         },
         {

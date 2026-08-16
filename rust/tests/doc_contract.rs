@@ -99,6 +99,7 @@ fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
     let crate_readme = read("rust/README.md");
     let pyproject = read("pyproject.toml");
     let server_json = read("server.json");
+    let cargo_toml = read("rust/Cargo.toml");
     let schemas = read("rust/src/constants.rs");
     let described = schemas
         .split("fn meta_tool_defs")
@@ -110,6 +111,7 @@ fn every_tool_count_in_the_docs_is_one_the_code_can_produce() {
         ("rust/README.md", crate_readme.as_str()),
         ("pyproject.toml", pyproject.as_str()),
         ("server.json", server_json.as_str()),
+        ("rust/Cargo.toml", cargo_toml.as_str()),
         ("cuba_tools", described),
     ] {
         for n in counts_claimed(text) {
@@ -495,6 +497,32 @@ fn the_gate_does_not_run_its_provisioning_inside_the_database_container() {
          recovery; the same orphan exiting 0 produced only a log line. That is what took the live \
          brain database into recovery mid-gate. The gate reaches the server over TCP with the \
          host's psql instead, which cannot be adopted by anything. Offending lines: {offenders:#?}"
+    );
+}
+
+#[test]
+fn the_gate_creates_the_database_it_points_the_unit_tests_at_before_running_them() {
+    let gate = read("scripts/run-all-tests.sh");
+    let body = gate
+        .split_once("trap drop_gate_db EXIT")
+        .expect("the gate provisions a throwaway database and drops it on exit")
+        .1;
+    let provision = body
+        .find("\nprovision_gate_db")
+        .expect("the gate calls provision_gate_db");
+    let unit_tests = body
+        .find("DATABASE_URL=\"$GATE_DATABASE_URL\" cargo test")
+        .expect("the gate runs the unit tests against the throwaway database");
+
+    assert!(
+        provision < unit_tests,
+        "the gate pointed `cargo test` at $GATE_DATABASE_URL and only created that database on \
+         the next line. It passed for months because no unit test in src/ ever opened a real \
+         connection — every one of them builds a pool that cannot connect on purpose. The first \
+         one that did open a connection died with `database \"brain_gate\" does not exist`, which \
+         reads like a broken test rather than a gate that runs its steps out of order. Provision \
+         first: a step that needs a database it was told to use must not be the step that proves \
+         it was missing"
     );
 }
 
