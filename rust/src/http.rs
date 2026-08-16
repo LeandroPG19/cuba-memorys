@@ -415,6 +415,64 @@ fn batch_items(payload: Value) -> Result<(Vec<Value>, bool), Value> {
     }
 }
 
+const ROOTS_REQUEST_ID: &str = "cuba_roots";
+
+fn asks_for_roots(items: &[Value]) -> bool {
+    items.iter().any(|item| {
+        item.get("method").and_then(Value::as_str) == Some("initialize")
+            && item
+                .get("params")
+                .and_then(|p| p.get("capabilities"))
+                .and_then(|c| c.get("roots"))
+                .is_some()
+    })
+}
+
+fn first_root_uri(item: &Value) -> Option<&str> {
+    if item.get("id").and_then(Value::as_str) != Some(ROOTS_REQUEST_ID) {
+        return None;
+    }
+    item.get("result")?
+        .get("roots")?
+        .as_array()?
+        .first()?
+        .get("uri")?
+        .as_str()
+}
+
+async fn adopt_client_root(pool: &PgPool, key: &str, uri: &str) {
+    let Some(name) = crate::session::root_to_project_name(uri) else {
+        return;
+    };
+    match crate::project::upsert_project(pool, &name).await {
+        Ok(id) => {
+            crate::session::remember_client_root(key, id);
+            tracing::info!(client = %key, project = %name, "adopted the client's root as its project");
+        }
+        Err(why) => {
+            tracing::warn!(client = %key, project = %name, error = %why, "could not adopt the client's root")
+        }
+    }
+}
+
+fn sse_response(server_request: Value, replies: Vec<Value>) -> Response {
+    let mut body = String::new();
+    for msg in std::iter::once(server_request).chain(replies) {
+        body.push_str("data: ");
+        body.push_str(&msg.to_string());
+        body.push_str("\n\n");
+    }
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/event-stream"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 fn error_envelope(id: Value, code: i64, message: impl Into<String>) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -537,6 +595,24 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
         }
     };
 
+    let mut items = items;
+    let mut carried_roots = false;
+    for item in &items {
+        if let Some(uri) = first_root_uri(item) {
+            adopt_client_root(&state.pool, &key, uri).await;
+            carried_roots = true;
+        }
+    }
+    if carried_roots {
+        items.retain(|item| first_root_uri(item).is_none());
+        if items.is_empty() {
+            return StatusCode::ACCEPTED.into_response();
+        }
+    }
+
+    let wants_roots =
+        crate::session::client_root_project_for(&key).is_none() && asks_for_roots(&items);
+
     let dispatch = async {
         let mut responses: Vec<Value> = Vec::with_capacity(items.len());
         for item in items {
@@ -568,6 +644,17 @@ async fn mcp_endpoint(State(state): State<AppState>, headers: HeaderMap, body: B
 
     if responses.is_empty() {
         return StatusCode::ACCEPTED.into_response();
+    }
+
+    if wants_roots {
+        return sse_response(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": ROOTS_REQUEST_ID,
+                "method": "roots/list"
+            }),
+            responses,
+        );
     }
 
     if is_batch {
@@ -715,6 +802,77 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(name, value.parse().unwrap());
         h
+    }
+
+    #[test]
+    fn a_client_that_announces_roots_is_asked_for_them() {
+        let announces = serde_json::json!({
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": { "roots": { "listChanged": true }, "elicitation": {} },
+                "clientInfo": { "name": "claude-code" }
+            }
+        });
+        assert!(
+            asks_for_roots(std::slice::from_ref(&announces)),
+            "Claude Code 2.1.233 announces exactly this — captured from a live handshake on \
+             2026-08-16. Asking a client that never announced roots would leave a request \
+             hanging in its stream that it has no handler for"
+        );
+
+        let silent = serde_json::json!({
+            "method": "initialize",
+            "params": { "capabilities": { "sampling": {} } }
+        });
+        assert!(!asks_for_roots(std::slice::from_ref(&silent)));
+
+        let not_a_handshake = serde_json::json!({
+            "method": "tools/call",
+            "params": { "capabilities": { "roots": {} } }
+        });
+        assert!(!asks_for_roots(std::slice::from_ref(&not_a_handshake)));
+    }
+
+    #[test]
+    fn the_answer_to_our_roots_request_is_recognised_and_nothing_else_is() {
+        let answer = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": ROOTS_REQUEST_ID,
+            "result": { "roots": [
+                { "uri": "file:///home/leandro/proyectos/MCP/cuba-memorys" },
+                { "uri": "file:///tmp" }
+            ]}
+        });
+        assert_eq!(
+            first_root_uri(&answer),
+            Some("file:///home/leandro/proyectos/MCP/cuba-memorys"),
+            "the client lists its primary working directory first and its extra ones after; \
+             taking any other entry would file every write under /tmp"
+        );
+
+        let someone_elses = serde_json::json!({
+            "jsonrpc": "2.0", "id": "srv_9", "result": { "roots": [{ "uri": "file:///x" }] }
+        });
+        assert_eq!(first_root_uri(&someone_elses), None);
+
+        let ordinary_call = serde_json::json!({ "method": "tools/list", "id": 1 });
+        assert_eq!(first_root_uri(&ordinary_call), None);
+    }
+
+    #[test]
+    fn the_roots_request_rides_out_before_the_reply_it_travels_with() {
+        let body = sse_response(
+            serde_json::json!({ "jsonrpc": "2.0", "id": ROOTS_REQUEST_ID, "method": "roots/list" }),
+            vec![serde_json::json!({ "jsonrpc": "2.0", "id": 0, "result": { "ok": true } })],
+        );
+        assert_eq!(
+            body.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "sent as plain JSON the client sees two objects glued together and drops both"
+        );
     }
 
     #[test]

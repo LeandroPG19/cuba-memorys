@@ -71,6 +71,53 @@ pub fn forget_client(key: &str) {
     if let Ok(mut guard) = PER_CLIENT.write() {
         guard.remove(key);
     }
+    if let Ok(mut guard) = CLIENT_ROOTS.write() {
+        guard.remove(key);
+    }
+}
+
+static CLIENT_ROOTS: LazyLock<RwLock<HashMap<String, Uuid>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn remember_client_root(key: &str, project_id: Uuid) {
+    if let Ok(mut guard) = CLIENT_ROOTS.write() {
+        guard.insert(key.to_string(), project_id);
+    }
+}
+
+pub fn client_root_project() -> Option<Uuid> {
+    client_root_project_for(&current_client()?)
+}
+
+pub fn client_root_project_for(key: &str) -> Option<Uuid> {
+    CLIENT_ROOTS.read().ok()?.get(key).copied()
+}
+
+pub fn root_to_project_name(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix("file://").unwrap_or(uri);
+    let decoded: String = {
+        let bytes = path.as_bytes();
+        let mut out = String::with_capacity(path.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let Ok(byte) = u8::from_str_radix(&path[i + 1..i + 3], 16)
+            {
+                out.push(byte as char);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    };
+    let name = decoded.trim_end_matches('/').rsplit('/').next()?;
+    if name.is_empty() || name == "." {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 pub fn all_active() -> Vec<ActiveSession> {
@@ -135,6 +182,53 @@ pub fn session_id() -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_root_uri_becomes_the_name_of_the_directory_it_points_at() {
+        assert_eq!(
+            root_to_project_name("file:///home/leandro/proyectos/MCP/cuba-memorys").as_deref(),
+            Some("cuba-memorys")
+        );
+        assert_eq!(
+            root_to_project_name("file:///home/leandro/proyectos/MCP/cuba-memorys/").as_deref(),
+            Some("cuba-memorys"),
+            "a trailing slash is not a directory called empty string"
+        );
+        assert_eq!(
+            root_to_project_name("file:///home/leandro/proyectos/pedido/%5Bid%5D").as_deref(),
+            Some("[id]"),
+            "Claude Code percent-encodes its roots — measured 16-ago-2026, it announced \
+             `.../pedido/%5Bid%5D` for a Next.js dynamic route. Left encoded, that name reaches \
+             brain_projects as literal %5Bid%5D and never matches the same directory again"
+        );
+        assert_eq!(root_to_project_name("file:///").as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn the_root_is_remembered_per_client_not_globally() {
+        let one = Uuid::new_v4();
+        let two = Uuid::new_v4();
+        remember_client_root("claude-code@a", one);
+        remember_client_root("claude-code@b", two);
+
+        assert_eq!(client_root_project_for("claude-code@a"), Some(one));
+        assert_eq!(
+            client_root_project_for("claude-code@b"),
+            Some(two),
+            "every Claude Code instance sends the same clientInfo.name, so if the root were \
+             kept in one global slot the last client to connect would silently retarget every \
+             other client's writes at its own project"
+        );
+        assert_eq!(client_root_project_for("never-seen"), None);
+
+        forget_client("claude-code@a");
+        assert_eq!(
+            client_root_project_for("claude-code@a"),
+            None,
+            "a client that goes away must not leave its project behind for whoever reuses the key"
+        );
+        forget_client("claude-code@b");
+    }
 
     #[tokio::test]
     async fn set_get_clear_roundtrip() {
