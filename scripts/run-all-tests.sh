@@ -16,6 +16,48 @@ export CUBA_EMBEDDING_DIM="${CUBA_EMBEDDING_DIM:-1024}"
 export CUBA_EMBED_MODEL="${CUBA_EMBED_MODEL:-bge-m3}"
 export CUBA_POOLING="${CUBA_POOLING:-cls}"
 
+# Disk, before anything compiles. A gate run of this repo linked with `ld` dying on
+# SIGBUS and three test binaries reported as "could not compile" — the cause was a
+# partition at 98% with target/ alone holding 64 GB, and nothing in that output said
+# so. Measured 15-ago-2026. A gate that fails for a reason nobody can read is worse
+# than one that refuses to start.
+#
+# target/debug/deps grows without bound because cargo never removes the binaries of
+# earlier compilations: every edit produces a new hash and the old one stays. The
+# sweep below is by age, not by size, so an artifact still in use is never touched.
+MIN_FREE_GB="${CUBA_GATE_MIN_FREE_GB:-8}"
+SWEEP_BELOW_GB="${CUBA_GATE_SWEEP_BELOW_GB:-20}"
+SWEEP_OLDER_THAN_DAYS="${CUBA_GATE_SWEEP_DAYS:-7}"
+
+free_gb() { df --output=avail -BG "$RUST_DIR" | tail -1 | tr -dc '0-9'; }
+
+sweep_stale_artifacts() {
+  local before after
+  before="$(free_gb)"
+  echo "disk: ${before}G free — sweeping build artifacts older than ${SWEEP_OLDER_THAN_DAYS}d"
+  rm -rf "$RUST_DIR/target/debug/incremental" 2>/dev/null || true
+  find "$RUST_DIR/target/debug/deps" -maxdepth 1 -type f \
+       -mtime "+$SWEEP_OLDER_THAN_DAYS" -delete 2>/dev/null || true
+  find "$RUST_DIR/target/debug/.fingerprint" -maxdepth 1 -type d \
+       -mtime "+$SWEEP_OLDER_THAN_DAYS" -exec rm -rf {} + 2>/dev/null || true
+  after="$(free_gb)"
+  echo "disk: ${after}G free after the sweep (was ${before}G)"
+}
+
+if [[ "$(free_gb)" -lt "$SWEEP_BELOW_GB" ]]; then
+  sweep_stale_artifacts
+fi
+
+if [[ "$(free_gb)" -lt "$MIN_FREE_GB" ]]; then
+  echo "FAIL: only $(free_gb)G free on the filesystem holding $RUST_DIR, and this run needs more." >&2
+  echo '      Linking is what breaks first, and it breaks as SIGBUS inside ld with no' >&2
+  echo "      mention of disk — that is an hour of looking for a bug that is not there." >&2
+  echo "      target/ currently holds: $(du -sh "$RUST_DIR/target" 2>/dev/null | cut -f1)" >&2
+  echo "      Free it with: cargo clean --manifest-path $RUST_DIR/Cargo.toml" >&2
+  echo "      (or raise the bar with CUBA_GATE_MIN_FREE_GB if you know what you are doing)" >&2
+  exit 1
+fi
+
 run_if_present() {
   local what="$1" probe="$2"
   shift 2

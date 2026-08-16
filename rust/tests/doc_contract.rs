@@ -497,3 +497,25 @@ fn the_gate_does_not_run_its_provisioning_inside_the_database_container() {
          host's psql instead, which cannot be adopted by anything. Offending lines: {offenders:#?}"
     );
 }
+
+#[test]
+fn the_gate_refuses_to_start_when_the_disk_cannot_hold_the_link() {
+    let gate = read("scripts/run-all-tests.sh");
+    assert!(
+        gate.contains("-lt \"$MIN_FREE_GB\"")
+            && gate.contains("df --output=avail")
+            && gate.contains("exit 1"),
+        "the gate has to check free disk before anything compiles. Measured on 2026-08-15: a \
+         run failed with `collect2: fatal error: ld terminated with signal 7 [Bus error]` and \
+         three test binaries reported as «could not compile», on a partition at 98% where \
+         target/ alone held 64 GB. Nothing in that output mentions disk, so it reads as a code \
+         failure and costs an hour of looking for a bug that is not there"
+    );
+    assert!(
+        gate.contains("-mtime \"+$SWEEP_OLDER_THAN_DAYS\"") && gate.contains("-delete"),
+        "and it has to sweep what nothing uses any more. cargo never removes the binaries of \
+         earlier compilations — every edit produces a new hash and the old one stays — so \
+         target/debug/deps grows without bound. Sweeping by AGE and not by size is what makes \
+         it safe: an artifact this run still needs was written today"
+    );
+}

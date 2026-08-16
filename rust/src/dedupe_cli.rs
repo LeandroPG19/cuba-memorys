@@ -1002,7 +1002,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_hand_verified_merge_moves_everything_and_leaves_an_alias() {
-        let pool = judge_test_pool().await;
+        let (pool, _one_at_a_time) = judge_test_pool().await;
         let tag = &Uuid::new_v4().to_string()[..8];
         let keeper = format!("merge_keeper_{tag}");
         let absorbed = format!("merge_absorbed_{tag}");
@@ -1097,12 +1097,19 @@ mod tests {
         );
     }
 
-    async fn judge_test_pool() -> PgPool {
+    async fn judge_test_pool() -> (PgPool, tokio::sync::MutexGuard<'static, ()>) {
+        let held = crate::session::GLOBAL_STATE_GUARD.lock().await;
         let url = std::env::var("DATABASE_URL")
             .expect("DATABASE_URL env var required for integration tests");
-        crate::db::create_pool(&url)
-            .await
-            .expect("connect to test database")
+        let pool = crate::db::create_pool(&url).await.expect(
+            "connect to test database. Taking GLOBAL_STATE_GUARD first is not decoration: \
+             db.rs sets CUBA_SKIP_MIGRATIONS to prove the migration guard refuses a database \
+             behind the binary, and cargo runs unit tests as threads of one process. Without \
+             the guard, that variable is set while this pool opens and create_pool comes back \
+             with «this database is at migration 58 and this binary expects 59» — a failure \
+             that has nothing to do with what this test is checking",
+        );
+        (pool, held)
     }
 
     async fn seed_bare_entity(pool: &PgPool, name: &str) -> Uuid {
@@ -1126,7 +1133,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn sample_observations_spans_the_whole_timeline_not_just_the_top_by_importance() {
-        let pool = judge_test_pool().await;
+        let (pool, _one_at_a_time) = judge_test_pool().await;
         let name = format!("DedupeSampleSpan_{}", &Uuid::new_v4().to_string()[..8]);
         let entity_id = seed_bare_entity(&pool, &name).await;
 
@@ -1163,7 +1170,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn sample_observations_keeps_more_than_a_snippet() {
-        let pool = judge_test_pool().await;
+        let (pool, _one_at_a_time) = judge_test_pool().await;
         let name = format!("DedupeSampleLength_{}", &Uuid::new_v4().to_string()[..8]);
         let entity_id = seed_bare_entity(&pool, &name).await;
 
@@ -1192,7 +1199,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn fetch_timeline_counts_sessions_and_spans_every_observation() {
-        let pool = judge_test_pool().await;
+        let (pool, _one_at_a_time) = judge_test_pool().await;
         let name = format!("DedupeTimeline_{}", &Uuid::new_v4().to_string()[..8]);
         let entity_id = seed_bare_entity(&pool, &name).await;
 
@@ -1231,7 +1238,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn cross_cosine_similarity_averages_over_every_pair_not_just_the_closest() {
-        let pool = judge_test_pool().await;
+        let (pool, _one_at_a_time) = judge_test_pool().await;
         let name_a = format!("DedupeCosA_{}", &Uuid::new_v4().to_string()[..8]);
         let name_b = format!("DedupeCosB_{}", &Uuid::new_v4().to_string()[..8]);
         let entity_a = seed_bare_entity(&pool, &name_a).await;

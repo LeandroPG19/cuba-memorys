@@ -8,6 +8,150 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-08-15 (Cargo `0.24.0` · npm `0.24.0` · PyPI `1.26.0`)
+
+El grafo crece solo, y lo que escribe un modelo entra en cuarentena. Esa frase es
+la versión entera; todo lo demás es lo que hizo falta para que fuera cierta y
+segura. Dos revisiones adversarias sobre el propio trabajo encontraron seis
+agujeros, uno de ellos el día antes de la primera prueba entre dos máquinas.
+
+### El ciclo REM era lo único periódico, y casi no llegaba a correr
+
+Su primera consolidación ocurría **cuatro horas después de arrancar**, porque el
+bucle consumía el primer tick del `interval` —que en tokio resuelve al instante—
+y esperaba al segundo. Bajo stdio, donde un proceso rara vez vive tanto, **no
+corría jamás**, y cada reinicio de la máquina ponía el contador a cero. Medido en
+el grafo vivo: **96 de 322 entidades** habían sido escaneadas alguna vez, 226
+esperando, a 5 por ciclo — una semana de cola.
+
+Ahora el primer ciclo llega a los cinco minutos (`CUBA_REM_FIRST_DELAY_SECS`), el
+lote sube a 20 mientras haya 50 o más esperando, y dentro corren tres cosas que ya
+existían y solo se ejecutaban a mano: **auto-extracción, detección de comunidades
+y conteo de duplicados**. Adelantarlo no daña nada: el decay es
+`EXP(-0.693 · transcurrido / 86400)`, decae por tiempo pasado y no por número de
+ejecuciones.
+
+### Lo que un modelo escribe entra cuarentenado, siempre
+
+`auto_extract` es lo único que convierte una conversación en hechos, y **no tenía
+disparador**: dependía de que una IA se acordara de teclearlo, y el SKILL
+instalado ni lo menciona.
+
+Antes de esto, `brain_observations.trust` tenía `DEFAULT 'trusted'` y **las 1902
+filas eran `trusted`: la cuarentena existía y no se había usado ni una vez**. Sin
+marcar, lo que un modelo inventara sería indistinguible de lo que escribió una
+persona, alimentaría la búsqueda, y llegaría al grafo — porque el escaneo de
+relaciones solo lee filas confiables. Cuarentenado, `faro` lo retiene en sus ocho
+ramas hasta que `cuba_eco promote` lo asciende, y `jornada start` dice cuántas
+esperan revisión, solo cuando hay alguna.
+
+**Y no escribe entidades ni aristas.** No hay forma de marcarlas:
+`brain_entities` no tiene columna de confianza y el `CHECK` de
+`brain_relations.provenance` no admite un valor de cuarentena — y ningún
+consumidor leería ninguno de los dos. Una marca que nadie lee es el mismo agujero
+con otro nombre.
+
+### La cuarentena no sobrevivía al viaje *(encontrado un día antes de la prueba)*
+
+El bundle lleva el `trust` con el que se escribió cada fila, y el import **lo
+tiraba**: recalculaba mirando solo si el texto parecía una credencial. Lo que la
+auto-extracción escribe es cuarentena **porque lo escribió un modelo**, no porque
+parezca peligroso — así que **un solo sync habría convertido cada alucinación de
+la máquina A en memoria confiable y buscable en la B**. Ahora el resultado es el
+más restrictivo de los dos.
+
+### El reranker: el catálogo prometía uno que estaba apagado
+
+`constants.rs` decía a cada modelo que el rerank se auto-activa con solo tener el
+ONNX. No era cierto: hacía falta además `CUBA_MODE=completo`. En una instalación
+limpia el reranker estaba apagado **y el modelo creía que estaba encendido**, así
+que nunca lo pedía — y es la mayor mejora de calidad que este proyecto ha medido,
+**+93% nDCG**.
+
+Encenderlo era la mitad fácil. La condición obvia habría roto **todos los binarios
+publicados de Linux y Windows**, que llevan CUDA: `gpu::status().degraded` solo
+comprueba que el fichero del proveedor exista y que haya driver. Dónde corre de
+verdad lo decide `wants_gpu(Workload::Reranker)`, que lee `CUBA_RERANK_DEVICE`.
+Con ese knob en `cpu`, `degraded` es falso, el default se habría encendido, y cada
+búsqueda costaría **106,9 s contra un presupuesto de 20** — y el timeout ni
+siquiera lo recupera: `spawn_blocking` no se cancela y retiene el mutex de la
+sesión mientras la siguiente búsqueda hace cola.
+
+`doctor` distingue ahora las tres razones por las que puede estar apagado, que se
+leían igual: no hay modelo, no hay GPU real, o **el plan de recursos lo desconectó
+por RAM en el instante del arranque** — decisión que dura toda la vida del proceso
+y que solo aparecía en una línea de log. Visto ocurrir con 373 MB libres.
+
+### Dos búsquedas que informaban de éxito dando menos
+
+- **Sin modelo de embeddings**, `vector_search` devolvía `Ok(vec![])`: la rama
+  vectorial no aportaba nada y la respuesta salía sin marca. Una instalación nueva
+  parecía sana y buscaba solo por léxico. El propio `doctor` ya lo llamaba «la
+  búsqueda vectorial devuelve vacío en silencio».
+- **`enrich_graphrag` repetía la misma entidad** tantas veces como resultados suyos
+  hubiera —tres entradas idénticas en una búsqueda medida— y hacía una consulta por
+  resultado. Ahora deduplica y resuelve todos los vecinos en una sola consulta,
+  conservando el tope de 5 **por entidad**.
+
+### El ciclo, visible
+
+Era el motor del sistema y no se veía por ningún lado. `brain_rem_cycles` guarda
+una fila por ciclo, y el panel separa lo que antes era idéntico: **nunca corrió**,
+**corrió sin nada que hacer**, y **corrió con su LLM rindiéndose**.
+
+### El juez del dedupe decidía con 450 caracteres
+
+`dedupe --judge` moría a mitad con `end byte index 90 is not a char boundary; it
+is inside 'é'` — cortaba por bytes una razón escrita en español. Había decidido ya
+24 de 31 pares; todos perdidos.
+
+Peor que la caída: **la fusión dependía del orden**. Cada veredicto producía su
+grupo y se aplicaban en secuencia, así que cuando el juez dijo A≡B, A≡C y B≠C —lo
+que hizo— B y C acababan dentro de A, que es justo lo que había rechazado.
+
+Y se equivocaba. Veía **tres observaciones cortadas a 150 caracteres**: 450
+caracteres para juzgar 161 memorias. Por eso declaró la misma entidad a
+`Mapupita-Web` y `Mapupitta-Web` — dos proyectos distintos, sin un día de
+solapamiento, en comunidades de Leiden separadas, con pagerank 0,798 contra 0,0 y
+un coseno máximo de 0,681. Y por eso **3 de 22 veredictos cambiaban** entre dos
+corridas sobre los mismos datos.
+
+Ahora ve seis observaciones de 300 caracteres repartidas por toda la línea
+temporal, más las señales objetivas que sí acertaron: fechas, sesiones, proyecto,
+y el coseno **medio** entre ambos conjuntos. Y usa la confianza que el modelo ya
+devolvía **y el código descartaba**, sin una sola llamada extra. Vuelto a correr,
+llama distintos a los dos pares que antes habría fusionado, y explica por qué.
+
+Para lo que el juez frena a propósito y una persona sí ha verificado:
+`dedupe --merge A --into B`, con dry-run por defecto.
+
+### El perfil `lean` estaba elegido a ojo
+
+Llevaba `cuba_receta` (puesto 9, 32 llamadas) y **dejaba fuera `cuba_decreto`**
+(puesto 3, 114). Reconstruido con 33 días de uso real: las diez más llamadas más
+las dos meta — **12 anunciadas, el 93,5% del uso**, y el catálogo baja de 31.838 a
+15.604 caracteres.
+
+### Y el CI miraba 25 de 62 ficheros de test
+
+Treinta y siete nunca corrían allí mientras el job informaba en verde sobre los
+commits que los añadían. **Tercera vez que esta clase muerde**: la puerta local
+tenía el mismo bug a 30 de 52. Ahora descubre `tests/*.rs`, con cuatro exclusiones
+razonadas. Pasar a un glob heredó los ficheros **sin el entorno que la puerta
+construye alrededor**: tres de ellos exigen un segundo nodo y se niegan a saltarse,
+porque un test de dos nodos que pasa en uno no prueba nada. El job lo provisiona.
+
+### Lo que esta versión NO arregla
+
+El conteo de duplicados del ciclo es O(n²) — 140 ms con 325 entidades, ~12 s a
+3.000. Corre una vez cada cuatro horas y el grafo crece a una entidad al día.
+Los episodios y errores **no transportan `trust`** en el bundle: es una brecha del
+formato, no del import, y no afecta a la auto-extracción, que escribe
+observaciones. Y el `eval` smoke de la puerta imprimió cinco `different vector
+dimensions 384 and 1024` con el modelo cargado, que **no se ha conseguido
+reproducir** fuera de ella con tres entornos distintos: el nDCG de esa corrida es
+solo léxico y queda como hallazgo abierto.
+
 ## [0.23.0] — 2026-08-13 (Cargo `0.23.0` · npm `0.23.0` · PyPI `1.25.0`)
 
 Cuatro auditorías adversarias contra la 0.22.0, corridas horas después de
