@@ -48,10 +48,16 @@ antiguo y el test lo dice.
 - `search::rrf::fuse` y `RankedResult`: sin un solo llamante fuera de sus dos
   tests, mientras `faro.rs` reimplementa RRF en línea. Una segunda
   implementación no usada invita a arreglar la que no corre.
-- `create-app-role.sql` se nombraba en cuatro sitios y no existe desde hace
-  versiones: el SQL va embebido en el binario y lo aplica `cuba-memorys secure`.
-  Corregidos los tres editables; el de las migraciones 0031 y 0055 se queda,
-  porque están aplicadas y su checksum es intocable.
+- `create-app-role.sql` se nombraba en cuatro sitios y no existía. Las
+  migraciones 0031 y 0055 lo mandan correr y **no se pueden editar** —están
+  aplicadas y sqlx hashea el fichero—, así que en vez de corregir el texto se
+  corrigió la realidad: el SQL vive ahora en `scripts/create-app-role.sql`, donde
+  esos comentarios siempre dijeron, y el binario lo embebe desde ahí con
+  `include_str!` en lugar de al revés. `psql -f scripts/create-app-role.sql` y
+  `cuba-memorys secure` son la misma copia. Verificado ejecutándolo: deja
+  `cuba_app` con `rolsuper=f, rolbypassrls=f`.
+  `a_file_an_applied_migration_tells_you_to_run_still_exists` impide que vuelva a
+  moverse; si falta, el crate ni siquiera compila.
 - `README.md` ofrecía `anthropic_api` como valor de `CUBA_JUDGE`: `judge.rs` lo
   hace caer al caso por defecto sin avisar. `rust/README.md` describía un
   directorio `scripts/` que ya no existe.

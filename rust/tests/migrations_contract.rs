@@ -218,3 +218,49 @@ fn a_migration_that_has_already_shipped_cannot_be_edited() {
         frozen.len()
     );
 }
+
+#[test]
+fn a_file_an_applied_migration_tells_you_to_run_still_exists() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+
+    let mut promised: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the migrations directory is readable") {
+        let entry = entry.expect("a directory entry is readable");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".sql") {
+            continue;
+        }
+        let body = std::fs::read_to_string(entry.path()).expect("a migration is readable");
+        for word in body.split_whitespace() {
+            let path = word.trim_matches(|c: char| {
+                !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '-' && c != '_'
+            });
+            if path.starts_with("scripts/") && path.ends_with(".sql") {
+                promised.push((name.clone(), path.to_string()));
+            }
+        }
+    }
+
+    assert!(
+        !promised.is_empty(),
+        "the scan found no script path in any migration, so a green result would prove nothing. \
+         0031 and 0055 both tell the reader to run scripts/create-app-role.sql"
+    );
+
+    let missing: Vec<&(String, String)> = promised
+        .iter()
+        .filter(|(_, path)| !root.join(path).exists())
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "an applied migration tells the reader to run a file that is not there: {missing:?}. \
+         These comments cannot be corrected — sqlx hashes every applied migration and editing \
+         one refuses to start every database that already ran it — so the only way to keep them \
+         honest is to keep the file where they say it is. That is why the SQL lives at \
+         scripts/create-app-role.sql and the binary embeds it from there with include_str!, \
+         instead of the reverse. Moving it back under rust/src/ would silently make two \
+         permanent comments lie again"
+    );
+}

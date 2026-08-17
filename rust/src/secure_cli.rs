@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use sqlx::Executor;
 
-const CREATE_APP_ROLE_SQL: &str = include_str!("secure_role.sql");
+const CREATE_APP_ROLE_SQL: &str = include_str!("../../scripts/create-app-role.sql");
 
 pub async fn run_cli(_args: &[String]) -> Result<()> {
     let admin_url = crate::setup::resolve_database_url().await;
@@ -22,7 +22,7 @@ pub async fn run_cli(_args: &[String]) -> Result<()> {
 
     pool.execute(CREATE_APP_ROLE_SQL)
         .await
-        .context("ejecutando secure_role.sql")?;
+        .context("ejecutando scripts/create-app-role.sql")?;
 
     let app_url = derive_app_url(&admin_url);
 
