@@ -132,9 +132,6 @@ rust/
 │       ├── centrality.rs    # Brandes betweenness centrality
 │       ├── community.rs     # Leiden algorithm (Traag 2019)
 │       └── pagerank.rs      # Personalized PageRank (alpha=0.85)
-├── scripts/
-│   ├── download_model.sh    # ONNX model downloader
-│   └── migrate_v3.sql       # v2.x -> v0.3.0 column cleanup
 └── tests/
     ├── smoke_test.rs        # 11 smoke tests (no DB required)
     └── e2e_all_tools.py     # 55 E2E tests (all 28 tools vs real DB)

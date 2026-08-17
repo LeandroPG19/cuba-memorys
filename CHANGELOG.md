@@ -8,6 +8,54 @@ revisions without binary changes).
 
 ## [Unreleased]
 
+### Un nombre fusionado volvía a la vida al escribir sobre él
+
+`dedupe --apply` mueve todo al ganador y guarda el nombre perdedor en
+`brain_entity_aliases` — una tabla que se escribía y **nadie leía**. Como
+`ensure_entity_typed` buscaba solo por `brain_entities.name`, la siguiente
+observación escrita con el nombre viejo creaba una entidad nueva y **deshacía la
+fusión en silencio**. Ahora resuelve por alias antes de crear, con una consulta
+que solo corre cuando el nombre no existe.
+
+### La puerta escribe su propio código de salida
+
+`scripts/run-all-tests.sh` deja el código en `~/.cache/cuba-gate/run.exit`,
+capturado antes de que la limpieza pise `$?`, y fuera de `/tmp` porque `/tmp` se
+barre al reiniciar. Dejárselo a quien la lanza no funciona: el 16-ago-2026 se
+lanzó tres veces con `nohup` sin capturar nada y el resultado se leyó de un
+fichero que no iba a aparecer. Con contrato en `doc_contract.rs`, que además
+exige que el trap se arme antes del primer paso que puede fallar.
+
+### Una migración ya publicada no se puede editar
+
+`a_migration_that_has_already_shipped_cannot_be_edited` congela con SHA-384 el
+conjunto de migraciones hasta la 0060. sqlx hashea cada fichero aplicado y se
+niega a arrancar contra una base que corrió otra versión, así que editar una
+inutiliza toda instalación existente — no el CI, que siempre migra desde cero.
+Ya pasó con `e96df5d`, y en esta misma sesión un arreglo de una palabra en un
+comentario de la 0031 estuvo a punto de repetirlo.
+
+### Muestreo del juez: el test no podía fallar
+
+`sample_observations_spans_the_whole_timeline` sembraba exactamente
+`JUDGE_SAMPLE_SIZE` observaciones, así que `ntile(6)` daba un cubo por fila y el
+test pasaba estratificara o no la consulta. Ahora siembra el triple con
+importancia decreciente: sin estratificar, la muestra se queda en el tercio más
+antiguo y el test lo dice.
+
+### Menos superficie
+
+- `search::rrf::fuse` y `RankedResult`: sin un solo llamante fuera de sus dos
+  tests, mientras `faro.rs` reimplementa RRF en línea. Una segunda
+  implementación no usada invita a arreglar la que no corre.
+- `create-app-role.sql` se nombraba en cuatro sitios y no existe desde hace
+  versiones: el SQL va embebido en el binario y lo aplica `cuba-memorys secure`.
+  Corregidos los tres editables; el de las migraciones 0031 y 0055 se queda,
+  porque están aplicadas y su checksum es intocable.
+- `README.md` ofrecía `anthropic_api` como valor de `CUBA_JUDGE`: `judge.rs` lo
+  hace caer al caso por defecto sin avisar. `rust/README.md` describía un
+  directorio `scripts/` que ya no existe.
+
 ### Una migración nueva ya no puede repetir la deuda de la 0.22
 
 `rust/tests/migrations_contract.rs` escanea `migrations/*.up.sql` por

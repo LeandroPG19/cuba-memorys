@@ -795,6 +795,20 @@ async fn ensure_entity_typed(
         return Ok(found);
     }
 
+    let merged_away: Option<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT e.id, e.entity_type
+         FROM brain_entity_aliases a JOIN brain_entities e ON e.id = a.entity_id
+         WHERE a.alias_text = $1
+         LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(found) = merged_away {
+        return Ok(found);
+    }
+
     let row: (uuid::Uuid, String) = sqlx::query_as(
         "INSERT INTO brain_entities (name, entity_type, project_id)
          VALUES ($1, 'concept', $2)

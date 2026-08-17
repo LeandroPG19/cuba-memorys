@@ -501,10 +501,36 @@ fn the_gate_does_not_run_its_provisioning_inside_the_database_container() {
 }
 
 #[test]
+fn the_gate_writes_its_own_exit_code_where_a_reader_can_find_it() {
+    let gate = read("scripts/run-all-tests.sh");
+    assert!(
+        gate.contains("local code=$?") && gate.contains("echo \"$code\" > \"$EXIT_FILE\""),
+        "the gate has to record its own exit code, captured before the cleanup can overwrite \
+         $?, and outside /tmp because /tmp is swept on reboot. A 20-minute gate is launched in \
+         the background, and whatever the wrapper reports is the exit code of the last command \
+         in the chain, not of the gate: that is how GATE_EXIT=101 was once read as green. \
+         Leaving this to the caller does not work either — on 2026-08-16 the gate was launched \
+         three times with nohup and no capture, and each time the result was read from a file \
+         that was never going to appear"
+    );
+    let trap = gate
+        .find("trap on_exit EXIT")
+        .expect("the gate installs its exit trap");
+    let first_step = gate
+        .find("=== cargo fmt --check ===")
+        .expect("the gate starts by checking formatting");
+    assert!(
+        trap < first_step,
+        "the trap has to be armed before the first step that can fail, or a failure in fmt or \
+         clippy leaves no exit code behind and the run looks like it never happened"
+    );
+}
+
+#[test]
 fn the_gate_creates_the_database_it_points_the_unit_tests_at_before_running_them() {
     let gate = read("scripts/run-all-tests.sh");
     let body = gate
-        .split_once("trap drop_gate_db EXIT")
+        .split_once("trap on_exit EXIT")
         .expect("the gate provisions a throwaway database and drops it on exit")
         .1;
     let provision = body

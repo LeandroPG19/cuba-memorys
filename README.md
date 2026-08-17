@@ -301,7 +301,7 @@ Named after Cuban culture. `cuba-memorys` advertises all of them, or set `CUBA_T
 | `CUBA_CHUNK_THRESHOLD_CHARS` · `CUBA_CHUNK_CHARS` | `1800` · `1400` | Content longer than the threshold is split into chunks of this many characters (200-char overlap). `CUBA_CHUNK_CHARS` is floored at 200. A value that is not a positive integer falls back to the default |
 | `CUBA_EMBED_CONCURRENCY` | `1` | Permits on the semaphore around the ONNX embedding session. Sized once, on first use |
 | `CUBA_TOOL_PROFILE` | `full` | `lean` → 12 tools of 28, 51% smaller catalogue, nothing lost. The ten are the ten most called over 33 days of real use; the other 16 stay reachable through `cuba_call` |
-| `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `anthropic_api` / `heuristic` |
+| `CUBA_JUDGE` | `auto` | `nli` / `mcp_sampling` / `claude_cli` / `heuristic` |
 | `CUBA_JUEZ_CLI` · `CUBA_JUEZ_MODEL` | `claude` · `claude-haiku-4-5` | The CLI the offline judge shells out to, and the model it asks for. `CUBA_JUEZ_CLI` also decides the automatic path: if that name is not on `PATH` there is no CLI judge and the choice falls through |
 | `CUBA_JUEZ_TIMEOUT_SECS` | `30` | Budget for one judgement, CLI and API alike. Anything that does not parse as an integer leaves the default |
 | `CUBA_JUEZ_MAX_PAIRS` | `5` | Candidate pairs `cuba_juez` sends per call |

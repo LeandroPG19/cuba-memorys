@@ -140,12 +140,25 @@ provision_gate_db() {
   echo "OK  second node database $PEER_DB ready ($peer_tables tables)"
 }
 
-drop_gate_db() {
+# The exit code is written here before anything else can overwrite $?. A 20-minute
+# gate gets launched in the background, and then its result is read from whatever
+# the wrapper reports — which is the exit code of the last command in the chain,
+# not of the gate. That is how GATE_EXIT=101 was once reported as green. Reading
+# this file is the only honest answer, and /tmp is swept on reboot, so it lives
+# under ~/.cache. Written by the gate itself so that launching it correctly is not
+# something the caller has to remember.
+EXIT_FILE="${CUBA_GATE_EXIT_FILE:-$HOME/.cache/cuba-gate/run.exit}"
+rm -f "$EXIT_FILE"
+
+on_exit() {
+  local code=$?
   psql "$ADMIN_DATABASE_URL" -q \
     -c "DROP DATABASE IF EXISTS $GATE_DB WITH (FORCE)" \
     -c "DROP DATABASE IF EXISTS $PEER_DB WITH (FORCE)" >/dev/null 2>&1 || true
+  mkdir -p "$(dirname "$EXIT_FILE")"
+  echo "$code" > "$EXIT_FILE"
 }
-trap drop_gate_db EXIT
+trap on_exit EXIT
 
 echo "=== cargo fmt --check ==="
 cargo fmt --check

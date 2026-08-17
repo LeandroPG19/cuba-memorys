@@ -5,7 +5,7 @@ async fn as_app_role(pool: &sqlx::PgPool, project: Uuid, sql: &str) -> Vec<Strin
     sqlx::query("SET ROLE cuba_app")
         .execute(&mut *conn)
         .await
-        .expect("cuba_app exists — scripts/create-app-role.sql creates it");
+        .expect("cuba_app exists — `cuba-memorys secure` creates it");
     sqlx::query("SELECT set_config('app.current_project', $1, false)")
         .bind(project.to_string())
         .execute(&mut *conn)

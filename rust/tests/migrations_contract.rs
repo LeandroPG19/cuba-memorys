@@ -173,3 +173,48 @@ fn a_new_migration_cannot_ship_a_statement_that_aborts_if_the_database_replays_i
          already are. A migration that is new to this branch has no such excuse: {offenders:#?}"
     );
 }
+
+const FROZEN_THROUGH: u32 = 60;
+const FROZEN_DIGEST: &str = "df5e42237556df4f7e7d32cc3ba55bc8fa61987a3a559eef95827f538b7ea1a27216b0b028f586d42b3ad0f8314e1337";
+
+#[test]
+fn a_migration_that_has_already_shipped_cannot_be_edited() {
+    use sha2::{Digest, Sha384};
+
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut frozen: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the migrations directory is readable")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".up.sql"))
+        .filter(|name| {
+            name.get(..4)
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n <= FROZEN_THROUGH)
+        })
+        .collect();
+    frozen.sort();
+
+    let mut hasher = Sha384::new();
+    for name in &frozen {
+        hasher.update(name.as_bytes());
+        hasher.update(std::fs::read(dir.join(name)).expect("a listed migration is readable"));
+    }
+    let digest = format!("{:x}", hasher.finalize());
+
+    assert_eq!(
+        digest,
+        FROZEN_DIGEST,
+        "one of the {} migrations at or below {FROZEN_THROUGH} changed on disk. sqlx hashes \
+         every applied file with SHA-384 and refuses to start any database that already ran a \
+         different version of it, so editing one of these bricks every existing install — not \
+         CI, which always migrates from scratch, but the machines that already have the data. \
+         It has happened twice: e96df5d stripped comments from applied migrations and broke \
+         the startup of every pre-0.14 database (undone in a245f62), and on 2026-08-16 a \
+         one-word fix to a stale comment in 0031 nearly shipped the same way. If a shipped \
+         migration is wrong, write a new one that corrects it. If you deliberately added \
+         migrations past {FROZEN_THROUGH}, raise FROZEN_THROUGH and update this digest in the \
+         same commit. Find what moved with: git diff HEAD -- rust/migrations/",
+        frozen.len()
+    );
+}

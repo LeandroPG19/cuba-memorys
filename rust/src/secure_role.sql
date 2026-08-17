@@ -8,7 +8,7 @@
 --   * brain_audit_log UPDATE/DELETE is refused (not a cuba_admin member).
 --
 -- Idempotent. Run as a superuser (cuba) against each brain DB:
---   psql "$DATABASE_URL" -f scripts/create-app-role.sql
+--   cuba-memorys secure          (this file is embedded in the binary)
 --
 -- Then point the app's DATABASE_URL at cuba_app instead of cuba.
 

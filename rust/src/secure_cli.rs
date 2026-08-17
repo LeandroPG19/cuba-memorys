@@ -22,7 +22,7 @@ pub async fn run_cli(_args: &[String]) -> Result<()> {
 
     pool.execute(CREATE_APP_ROLE_SQL)
         .await
-        .context("ejecutando create-app-role.sql")?;
+        .context("ejecutando secure_role.sql")?;
 
     let app_url = derive_app_url(&admin_url);
 

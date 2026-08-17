@@ -1137,15 +1137,16 @@ mod tests {
         let name = format!("DedupeSampleSpan_{}", &Uuid::new_v4().to_string()[..8]);
         let entity_id = seed_bare_entity(&pool, &name).await;
 
-        for (day, importance) in [(1, 0.9), (2, 0.8), (3, 0.7), (4, 0.4), (5, 0.3), (6, 0.2)] {
-            let created_at = Utc::now() - chrono::Duration::days(6 - day);
+        let span = JUDGE_SAMPLE_SIZE * 3;
+        for day in 1..=span {
+            let created_at = Utc::now() - chrono::Duration::days(span - day);
             sqlx::query(
                 "INSERT INTO brain_observations (entity_id, content, importance, created_at)
                  VALUES ($1, $2, $3, $4)",
             )
             .bind(entity_id)
             .bind(format!("MARKER_DAY{day}"))
-            .bind(importance)
+            .bind(1.0 - (day as f64) / (span as f64 + 1.0))
             .bind(created_at)
             .execute(&pool)
             .await
@@ -1155,16 +1156,24 @@ mod tests {
         let sample = sample_observations(&pool, entity_id).await;
         drop_entity(&pool, entity_id).await;
 
-        for day in 1..=6 {
-            assert!(
-                sample.contains(&format!("MARKER_DAY{day}")),
-                "day {day} is missing from the judge's material. `ORDER BY importance DESC \
-                 LIMIT 3` would only ever return days 1, 2 and 3 — the highest-importance rows \
-                 — no matter how many days the entity actually spans, which is exactly how the \
-                 judge decided Mapupita-Web on three same-tier observations and never saw that \
-                 Mapupitta-Web was a single day in June. Got: {sample}"
-            );
-        }
+        let seen: Vec<i64> = sample
+            .split(" | ")
+            .filter_map(|piece| piece.trim().strip_prefix("MARKER_DAY"))
+            .filter_map(|day| day.parse().ok())
+            .collect();
+        let newest_third = span - span / 3;
+
+        assert!(
+            seen.iter().any(|day| *day > newest_third),
+            "nothing past day {newest_third} of {span} reached the judge. Importance falls as \
+             the days advance here, so `ORDER BY importance DESC LIMIT {JUDGE_SAMPLE_SIZE}` \
+             returns the {JUDGE_SAMPLE_SIZE} oldest rows and stops — which is exactly how the \
+             judge decided Mapupita-Web on same-tier observations and never saw that \
+             Mapupitta-Web was a single day in June. The fixture used to seed exactly \
+             {JUDGE_SAMPLE_SIZE} rows, so ntile({JUDGE_SAMPLE_SIZE}) gave one bucket per row \
+             and the test passed whether or not the query stratified anything. Got days \
+             {seen:?} from: {sample}"
+        );
     }
 
     #[tokio::test]
