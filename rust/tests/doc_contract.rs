@@ -573,3 +573,54 @@ fn the_gate_refuses_to_start_when_the_disk_cannot_hold_the_link() {
          it safe: an artifact this run still needs was written today"
     );
 }
+
+#[test]
+fn every_repo_file_the_docs_point_at_is_a_file_that_exists() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut promised: BTreeSet<(&str, String)> = BTreeSet::new();
+
+    for source in [
+        "README.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "rust/README.md",
+    ] {
+        let text = read(source);
+        for span in text.split('`').skip(1).step_by(2) {
+            let path = span.trim();
+            let looks_like_a_repo_file = path.contains('/')
+                && !path.contains(' ')
+                && !path.starts_with('/')
+                && !path.starts_with("http")
+                && !path.contains('$')
+                && !path.contains('*')
+                && [".rs", ".sql", ".sh", ".toml", ".py", ".json", ".yml", ".md"]
+                    .iter()
+                    .any(|ext| path.ends_with(ext));
+            if looks_like_a_repo_file {
+                promised.insert((source, path.to_string()));
+            }
+        }
+    }
+
+    assert!(
+        promised.len() >= 3,
+        "the scan found almost no repo paths in the docs, so a green result would prove \
+         nothing. Found: {promised:?}"
+    );
+
+    let missing: Vec<&(&str, String)> = promised
+        .iter()
+        .filter(|(_, path)| !root.join(path).exists() && !root.join("rust").join(path).exists())
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "a document points the reader at a file that is not there: {missing:?}. This is what \
+         moving a file looks like from the outside — on 2026-08-16 secure_role.sql moved to \
+         scripts/create-app-role.sql so that two frozen migration comments would stop lying, \
+         and the move left SECURITY.md naming the old path twice. Nothing caught it: the \
+         crate still compiled and every test stayed green, because a stale path in prose only \
+         fails for the person who types it"
+    );
+}

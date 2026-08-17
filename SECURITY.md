@@ -45,12 +45,12 @@ and sometimes material under NDA.
   `cuba-memorys-db` container already exists, setup keeps the credential it was built
   with rather than locking you out of your own database — and that fallback,
   `memorys2026`, IS compiled into the binary (`setup.rs`), as is `app2026` in
-  `secure_role.sql`. Both are development defaults. Rotate them before exposing the
+  `scripts/create-app-role.sql`. Both are development defaults. Rotate them before exposing the
   database to anything.
 - **Least privilege** — the runtime downgrades itself to `cuba_app` (`NOSUPERUSER`,
   `NOBYPASSRLS`) when that role exists and its credential works; migrations run separately
   under an admin role. What stops `cuba_app` writing to the audit log is a trigger, not a
-  missing GRANT: `secure_role.sql` grants UPDATE/DELETE on every table in `public`, and
+  missing GRANT: `scripts/create-app-role.sql` grants UPDATE/DELETE on every table in `public`, and
   `0016_audit_log.up.sql` refuses them unless the caller is a member of `cuba_admin`.
   Both matter — a disabled trigger leaves the permission wide open.
   **Verify, do not assume**: `cuba-memorys doctor` fails the `runtime_role` check if the
